@@ -1,0 +1,373 @@
+// Tabs + Monaco editor. Monaco loads lazily on first file open so the app
+// shell paints instantly; models are cached per tab and disposed on close.
+import * as monacoLoader from './monaco';
+import { fsApi } from '../lib/api';
+import { readSettings } from '../lib/agent';
+import { createStore } from '../lib/util';
+
+export interface Tab {
+  path: string; // unique tab id (file path, or `diff:<file>` for change review)
+  file?: string; // real workspace file (== path for normal tabs)
+  dirty: boolean;
+  mtime?: number;
+  diff?: { before: string; after: string }; // present on session-diff review tabs
+}
+
+interface EditorState {
+  tabs: Tab[];
+  active: string | null;
+}
+
+export const editorStore = createStore<EditorState>({ tabs: [], active: null });
+
+type Monaco = typeof import('monaco-editor');
+let monaco: Monaco | null = null;
+let editor: import('monaco-editor').editor.IStandaloneCodeEditor | null = null;
+let diffEditor: import('monaco-editor').editor.IStandaloneDiffEditor | null = null;
+let editorDiv: HTMLElement | null = null;
+let diffDiv: HTMLElement | null = null;
+const models = new Map<string, import('monaco-editor').editor.ITextModel>();
+const diffModels = new Map<string, { original: import('monaco-editor').editor.ITextModel; modified: import('monaco-editor').editor.ITextModel }>();
+let suppressDirty = false;
+
+export interface EditorHooks {
+  onCursor(pos: { line: number; col: number }): void;
+  onTabs(): void;
+  toast(msg: string, kind?: 'info' | 'error'): void;
+}
+let hooks: EditorHooks | null = null;
+
+function langOf(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  const map: Record<string, string> = {
+    ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
+    mjs: 'javascript', cjs: 'javascript', json: 'json', html: 'html', css: 'css',
+    scss: 'scss', less: 'less', md: 'markdown', py: 'python', rs: 'rust',
+    go: 'go', java: 'java', c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp',
+    cs: 'csharp', rb: 'ruby', php: 'php', sh: 'shell', yml: 'yaml', yaml: 'yaml',
+    toml: 'ini', xml: 'xml', sql: 'sql', vue: 'html', svelte: 'html',
+  };
+  return map[ext] ?? 'plaintext';
+}
+
+/** Apply persisted editor prefs (font size, minimap) to the live editor. */
+export function applyEditorPrefs() {
+  if (!editor) return;
+  const s = readSettings();
+  editor.updateOptions({ fontSize: s.fontSize, minimap: { enabled: s.minimap }, wordWrap: s.wordWrap ? 'on' : 'off' });
+}
+
+export async function initEditor(container: HTMLElement, h: EditorHooks) {
+  hooks = h;
+  monaco = await monacoLoader.load();
+  const prefs = readSettings();
+  editorDiv = document.createElement('div');
+  editorDiv.className = 'editor-pane';
+  diffDiv = document.createElement('div');
+  diffDiv.className = 'editor-pane hidden';
+  container.append(editorDiv, diffDiv);
+  editor = monaco.editor.create(editorDiv, {
+    theme: 'barang-dark',
+    automaticLayout: true,
+    fontFamily: "'JetBrains Mono','Cascadia Code',Consolas,monospace",
+    fontSize: prefs.fontSize,
+    lineHeight: 1.55,
+    minimap: { enabled: prefs.minimap },
+    wordWrap: prefs.wordWrap ? 'on' : 'off',
+    scrollBeyondLastLine: false,
+    padding: { top: 10 },
+    renderLineHighlight: 'all',
+    smoothScrolling: true,
+    cursorBlinking: 'smooth',
+    tabSize: 2,
+  });
+  monaco.editor.defineTheme('barang-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [{ token: 'comment', foreground: '63636b' }],
+    colors: {
+      'editor.background': '#080808',
+      'editor.lineHighlightBackground': '#ffffff08',
+      'editorLineNumber.foreground': '#52525b',
+      'editorLineNumber.activeForeground': '#d4d4d8',
+      'editorCursor.foreground': '#fafafa',
+      'editor.selectionBackground': '#ffffff26',
+      'editorWidget.background': '#101012',
+      'editorWidget.border': '#ffffff1f',
+    },
+  });
+  monaco.editor.setTheme('barang-dark');
+  editor.onDidChangeModelContent(() => {
+    if (suppressDirty || !editor) return;
+    const path = editorStore.get().active;
+    if (!path) return;
+    editorStore.set((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) => (t.path === path ? { ...t, dirty: true } : t)),
+    }));
+    hooks?.onTabs();
+  });
+  editor.onDidChangeCursorPosition((e) => hooks?.onCursor({ line: e.position.lineNumber, col: e.position.column }));
+}
+
+export async function openFile(path: string) {
+  if (!editor || !monaco) return;
+  let tab = editorStore.get().tabs.find((t) => t.path === path);
+  if (!tab) {
+    tab = { path, file: path, dirty: false };
+    editorStore.set((s) => ({ tabs: [...s.tabs, tab!], active: path }));
+  } else {
+    editorStore.set({ active: path });
+  }
+  let model = models.get(path);
+  if (!model) {
+    try {
+      const file = await fsApi.read(path);
+      if (file.binary) {
+        hooks?.toast(`${path} is binary — preview not supported`, 'error');
+        editorStore.set((s) => ({ ...s, tabs: s.tabs.filter((t) => t.path !== path), active: s.tabs.find((t) => t.path !== path)?.path ?? null }));
+        hooks?.onTabs();
+        return;
+      }
+      tab.mtime = file.mtime;
+      model = monaco.editor.createModel(file.content ?? '', langOf(path), monaco.Uri.parse(`inmemory://barang/${path}`));
+      model.onDidChangeContent(() => {});
+      models.set(path, model);
+    } catch (e) {
+      hooks?.toast(`Cannot open ${path}: ${(e as Error).message}`, 'error');
+      editorStore.set((s) => ({ ...s, tabs: s.tabs.filter((t) => t.path !== path), active: s.active === path ? (s.tabs.find((t) => t.path !== path)?.path ?? null) : s.active }));
+      hooks?.onTabs();
+      return;
+    }
+  }
+  suppressDirty = true;
+  showNormal();
+  editor.setModel(model);
+  suppressDirty = false;
+  hooks?.onTabs();
+  editor.focus();
+}
+
+/** Show the normal editor pane (hide the diff pane). */
+function showNormal() {
+  diffDiv?.classList.add('hidden');
+  editorDiv?.classList.remove('hidden');
+}
+
+/** Show the diff pane (hide the normal editor), re-laying out after unhide. */
+function showDiff() {
+  editorDiv?.classList.add('hidden');
+  diffDiv?.classList.remove('hidden');
+  if (diffEditor) requestAnimationFrame(() => diffEditor!.layout());
+}
+
+function ensureDiffEditor() {
+  if (diffEditor || !monaco || !diffDiv) return diffEditor;
+  const prefs = readSettings();
+  diffEditor = monaco.editor.createDiffEditor(diffDiv, {
+    theme: 'barang-dark',
+    automaticLayout: true,
+    readOnly: true,
+    renderSideBySide: true,
+    useInlineViewWhenSpaceIsLimited: true,
+    scrollBeyondLastLine: false,
+    fontFamily: "'JetBrains Mono','Cascadia Code',Consolas,monospace",
+    fontSize: prefs.fontSize,
+    lineHeight: 1.55,
+    minimap: { enabled: false },
+    renderLineHighlight: 'all',
+    smoothScrolling: true,
+  });
+  return diffEditor;
+}
+
+/**
+ * Open a session-diff review tab (read-only before/after from opencode).
+ * Reuses the tab + models when already open, refreshing contents.
+ * Loads Monaco on demand: a diff can be the very first thing opened.
+ */
+export async function openDiffTab(file: string, before: string, after: string) {
+  if (!monaco) {
+    try {
+      monaco = await monacoLoader.load();
+    } catch (e) {
+      hooks?.toast(`Cannot open diff: ${(e as Error).message}`, 'error');
+      return;
+    }
+  }
+  if (!ensureDiffEditor()) return;
+  const path = `diff:${file}`;
+  const tab = editorStore.get().tabs.find((t) => t.path === path);
+  if (!tab) {
+    editorStore.set((s) => ({ tabs: [...s.tabs, { path, file, dirty: false, diff: { before, after } }], active: path }));
+  } else {
+    tab.diff = { before, after };
+    editorStore.set({ active: path });
+  }
+  diffModels.get(path)?.original.dispose();
+  diffModels.get(path)?.modified.dispose();
+  const original = monaco.editor.createModel(before, langOf(file));
+  const modified = monaco.editor.createModel(after, langOf(file));
+  diffModels.set(path, { original, modified });
+  diffEditor!.setModel({ original, modified });
+  showDiff();
+  hooks?.onTabs();
+}
+
+/** Activate an already-open diff tab (models cached on the tab). */
+export function showDiffTab(path: string) {
+  const pair = diffModels.get(path);
+  if (!ensureDiffEditor() || !pair) return;
+  editorStore.set({ active: path });
+  diffEditor!.setModel({ original: pair.original, modified: pair.modified });
+  showDiff();
+  hooks?.onTabs();
+}
+
+export function closeTab(path: string) {
+  const s = editorStore.get();
+  const tab = s.tabs.find((t) => t.path === path);
+  if (tab?.dirty && !confirm(`Discard unsaved changes to ${path}?`)) return;
+  dropTabs([path]);
+}
+
+/** Remove tabs without asking (callers confirm first). Shared by all batch closes. */
+function dropTabs(paths: string[]) {
+  if (!paths.length) return;
+  const gone = new Set(paths);
+  for (const p of paths) {
+    models.get(p)?.dispose();
+    models.delete(p);
+    const pair = diffModels.get(p);
+    if (pair) {
+      pair.original.dispose();
+      pair.modified.dispose();
+      diffModels.delete(p);
+    }
+  }
+  const s = editorStore.get();
+  const rest = s.tabs.filter((t) => !gone.has(t.path));
+  const active = s.active && !gone.has(s.active) ? s.active : (rest[rest.length - 1]?.path ?? null);
+  editorStore.set({ tabs: rest, active });
+  const activeTab = rest.find((t) => t.path === active);
+  const pair = active ? diffModels.get(active) : undefined;
+  if (editor && monaco) {
+    if (activeTab?.diff && pair && diffEditor) {
+      diffEditor.setModel({ original: pair.original, modified: pair.modified });
+      showDiff();
+    } else {
+      showNormal();
+      editor.setModel(active ? (models.get(active) ?? null) : null);
+    }
+  }
+  hooks?.onTabs();
+}
+
+function dirtyAmong(paths: string[]) {
+  const set = new Set(paths);
+  return editorStore.get().tabs.filter((t) => set.has(t.path) && t.dirty);
+}
+
+/** One confirm for a batch (VSCode-style) instead of per-tab prompts. */
+function confirmDiscard(paths: string[]): boolean {
+  const dirty = dirtyAmong(paths);
+  if (!dirty.length) return true;
+  const names = dirty.slice(0, 4).map((t) => t.path.split('/').pop()).join(', ') +
+    (dirty.length > 4 ? `, +${dirty.length - 4} more` : '');
+  return confirm(`Discard unsaved changes in ${dirty.length} file(s)? (${names})`);
+}
+
+export function closeOtherTabs(keep: string) {
+  const others = editorStore.get().tabs.map((t) => t.path).filter((p) => p !== keep);
+  if (!confirmDiscard(others)) return;
+  dropTabs(others);
+}
+
+export function closeAllTabs() {
+  const all = editorStore.get().tabs.map((t) => t.path);
+  if (!confirmDiscard(all)) return;
+  dropTabs(all);
+}
+
+export function closeSavedTabs() {
+  dropTabs(editorStore.get().tabs.filter((t) => !t.dirty).map((t) => t.path));
+}
+
+/** Close a tab and any tabs under it (deleted/renamed folder). False = user cancelled. */
+export function closePathAndChildren(prefix: string): boolean {
+  const hit = editorStore.get().tabs
+    .map((t) => t.path)
+    .filter((p) => p === prefix || p.startsWith(prefix + '/') || p === `diff:${prefix}` || p.startsWith(`diff:${prefix}/`));
+  if (!hit.length) return true;
+  if (!confirmDiscard(hit)) return false;
+  dropTabs(hit);
+  return true;
+}
+
+export async function saveActive(): Promise<boolean> {
+  const { active } = editorStore.get();
+  if (!active || !editor) return false;
+  const model = models.get(active);
+  if (!model) return false;
+  try {
+    const res = await fsApi.write(active, model.getValue());
+    editorStore.set((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) => (t.path === active ? { ...t, dirty: false, mtime: res.mtime } : t)),
+    }));
+    hooks?.onTabs();
+    return true;
+  } catch (e) {
+    hooks?.toast(`Save failed: ${(e as Error).message}`, 'error');
+    return false;
+  }
+}
+
+export async function saveAll() {
+  for (const t of editorStore.get().tabs.filter((t) => t.dirty)) {
+    const m = models.get(t.path);
+    if (!m) continue;
+    try {
+      const res = await fsApi.write(t.path, m.getValue());
+      t.dirty = false;
+      t.mtime = res.mtime;
+    } catch (e) {
+      hooks?.toast(`Save failed (${t.path}): ${(e as Error).message}`, 'error');
+    }
+  }
+  editorStore.set((s) => ({ ...s }));
+  hooks?.onTabs();
+}
+
+/** On window focus: reload clean tabs changed on disk (agent edits!), warn on dirty ones. */
+export async function checkExternalChanges() {
+  const s = editorStore.get();
+  for (const t of [...s.tabs]) {
+    const model = models.get(t.path);
+    if (!model) continue;
+    try {
+      const file = await fsApi.read(t.path);
+      if (file.binary || file.mtime === undefined || file.mtime === t.mtime) continue;
+      if (t.dirty) {
+        hooks?.toast(`${t.path} changed on disk (agent?) — your unsaved edits kept`, 'info');
+        t.mtime = file.mtime;
+      } else {
+        suppressDirty = true;
+        model.setValue(file.content ?? '');
+        suppressDirty = false;
+        t.mtime = file.mtime;
+      }
+    } catch { /* file deleted etc. — leave tab as-is */ }
+  }
+  editorStore.set((st) => ({ ...st }));
+  hooks?.onTabs();
+}
+
+export function revealInEditor(path: string, line?: number) {
+  void openFile(path).then(() => {
+    if (line && editor && monaco) {
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column: 1 });
+    }
+  });
+}

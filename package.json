@@ -1,0 +1,56 @@
+{
+  "name": "barang",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Barang — super-lightweight desktop code editor (Sublime speed) with opencode agents (Cursor brains). No auth/BYOK: it drives your local opencode CLI.",
+  "type": "module",
+  "main": "electron/main/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "setup": "npm install && npm --prefix web install",
+    "dev": "node scripts/dev-electron.js",
+    "dev:web": "npm --prefix web run dev",
+    "start": "electron .",
+    "build": "node scripts/sync-logo.js && npm --prefix web run build",
+    "fetch:opencode": "node scripts/fetch-opencode.js",
+    "dist": "npm run fetch:opencode && npm run build && electron-builder --dir",
+    "dist:portable": "npm run fetch:opencode && npm run build && electron-builder --win portable",
+    "smoke": "electron . --smoke",
+    "smoke:ui": "electron . --smoke-ui"
+  },
+  "devDependencies": {
+    "electron": "^35.1.5",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "ai.barang.editor",
+    "productName": "Barang",
+    "files": [
+      "electron/**/*",
+      "web/dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/",
+        "to": "vendor"
+      }
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "Barang-${version}-win.${ext}"
+    },
+    "directories": {
+      "output": "release"
+    }
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,273 @@
+// Root-confined workspace file operations (called from IPC handlers).
+// Same behavior as the original bridge: lazy depth-limited tree, 1MB reads
+// with binary sniffing, atomic writes, ripgrep fast-path with fallback.
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { isWin } from './opencode.js';
+
+const MAX_READ = 1024 * 1024; // 1MB
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', '.hg', '.svn', 'dist', 'build', 'out', '.next',
+  '__pycache__', '.venv', 'target', 'bin', 'obj', '.idea', '.vscode', 'release',
+]);
+
+function resolveIn(root, rel) {
+  const abs = path.resolve(root, rel || '.');
+  if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error('Path escapes project root');
+  return abs;
+}
+
+async function listDir(abs, root, depth, includeSkipped) {
+  const dirents = await fs.readdir(abs, { withFileTypes: true });
+  const entries = [];
+  for (const d of dirents) {
+    if (!includeSkipped && d.isDirectory() && SKIP_DIRS.has(d.name)) continue;
+    const full = path.join(abs, d.name);
+    const rel = path.relative(root, full).split(path.sep).join('/');
+    const node = { name: d.name, path: rel, type: d.isDirectory() ? 'dir' : 'file' };
+    if (d.isDirectory() && depth > 1) {
+      try {
+        node.children = await listDir(full, root, depth - 1, includeSkipped);
+      } catch {
+        node.children = [];
+      }
+    }
+    entries.push(node);
+  }
+  entries.sort((a, b) =>
+    a.type === b.type ? a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) : a.type === 'dir' ? -1 : 1,
+  );
+  return entries;
+}
+
+export async function tree(root, { path: rel = '.', depth = 1, all = false } = {}) {
+  const abs = resolveIn(root, rel);
+  return { path: rel, children: await listDir(abs, root, Math.min(depth, 3), all) };
+}
+
+export async function readFile(root, rel) {
+  if (!rel) throw new Error('Missing path');
+  const abs = resolveIn(root, rel);
+  const stat = await fs.stat(abs);
+  if (!stat.isFile()) throw new Error('Not a file');
+  if (stat.size > MAX_READ) throw new Error('File too large to open (>1MB)');
+  const buf = await fs.readFile(abs);
+  if (buf.includes(0)) return { path: rel, binary: true, size: stat.size };
+  return { path: rel, content: buf.toString('utf8'), size: stat.size, mtime: stat.mtimeMs };
+}
+
+export async function writeFile(root, rel, content) {
+  if (!rel || typeof content !== 'string') throw new Error('Need {path, content}');
+  const abs = resolveIn(root, rel);
+  await fs.mkdir(path.dirname(abs), { recursive: true });
+  const tmp = abs + `.barang-tmp-${process.pid}`;
+  await fs.writeFile(tmp, content, 'utf8');
+  await fs.rename(tmp, abs);
+  const stat = await fs.stat(abs);
+  return { ok: true, path: rel, size: stat.size, mtime: stat.mtimeMs };
+}
+
+export async function mkdir(root, rel) {
+  if (!rel || typeof rel !== 'string') throw new Error('Need {path}');
+  const abs = resolveIn(root, rel);
+  await fs.mkdir(abs, { recursive: true });
+  return { ok: true, path: rel };
+}
+
+function fuzzyScore(query, name) {
+  query = query.toLowerCase();
+  name = name.toLowerCase();
+  let qi = 0,
+    score = 0,
+    last = -1;
+  for (let i = 0; i < name.length && qi < query.length; i++) {
+    if (name[i] === query[qi]) {
+      score += last === i - 1 ? 3 : 1;
+      if (i === 0 || name[i - 1] === '/' || name[i - 1] === '_' || name[i - 1] === '-') score += 2;
+      last = i;
+      qi++;
+    }
+  }
+  return qi === query.length ? score : -1;
+}
+
+async function* walk(root, rel, includeSkipped, maxFiles) {
+  let count = 0;
+  const stack = [rel];
+  while (stack.length) {
+    const cur = stack.pop();
+    const abs = path.join(root, cur);
+    let dirents;
+    try {
+      dirents = await fs.readdir(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of dirents) {
+      if (!includeSkipped && d.isDirectory() && SKIP_DIRS.has(d.name)) continue;
+      const childRel = cur ? `${cur}/${d.name}` : d.name;
+      if (d.isDirectory()) stack.push(childRel);
+      else {
+        yield childRel;
+        if (++count >= maxFiles) return;
+      }
+    }
+  }
+}
+
+export async function find(root, { query = '', limit = 50 } = {}) {
+  const q = query.trim();
+  if (!q) return { results: [] };
+  const scored = [];
+  for await (const rel of walk(root, '', false, 20000)) {
+    const s = fuzzyScore(q, rel);
+    if (s >= 0) scored.push({ path: rel, score: s + (rel.length < 60 ? 2 : 0) });
+    if (scored.length > 5000) break;
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { results: scored.slice(0, Math.min(limit, 200)) };
+}
+
+let rgAvailable = null;
+function hasRg() {
+  if (rgAvailable !== null) return Promise.resolve(rgAvailable);
+  return new Promise((resolve) => {
+    execFile(isWin ? 'rg.exe' : 'rg', ['--version'], { shell: isWin }, (err) => {
+      rgAvailable = !err;
+      resolve(rgAvailable);
+    });
+  });
+}
+
+async function rgSearch(root, query, relDir, limit) {
+  return new Promise((resolve) => {
+    const args = ['--json', '--max-count', '5', '--max-columns', '200', '-i', '--hidden', '--glob', '!.git', query];
+    if (relDir) args.push(relDir);
+    execFile(isWin ? 'rg.exe' : 'rg', args, { cwd: root, shell: isWin, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      const out = [];
+      for (const line of String(stdout || '').split('\n')) {
+        if (out.length >= limit) break;
+        if (!line.trim()) continue;
+        try {
+          const ev = JSON.parse(line);
+          if (ev.type === 'match') {
+            out.push({
+              path: ev.data.path.text.split(path.sep).join('/'),
+              line: ev.data.line_number,
+              text: ev.data.lines.text.trim().slice(0, 240),
+            });
+          }
+        } catch {
+          /* skip */
+        }
+      }
+      resolve({ results: out, engine: 'ripgrep', truncated: !!err });
+    });
+  });
+}
+
+async function nodeSearch(root, query, relDir, limit) {
+  const out = [];
+  let needle;
+  try {
+    needle = new RegExp(query, 'i');
+  } catch {
+    needle = null;
+  }
+  const test = needle
+    ? (s) => {
+        try {
+          return needle.test(s);
+        } catch {
+          return false;
+        }
+      }
+    : (s) => s.toLowerCase().includes(query.toLowerCase());
+  for await (const rel of walk(root, relDir || '', false, 3000)) {
+    if (out.length >= limit) break;
+    if (/\.(png|jpe?g|gif|webp|ico|pdf|zip|exe|dll|bin|mp4|woff2?)$/i.test(rel)) continue;
+    const abs = path.join(root, rel);
+    let stat;
+    try {
+      stat = await fs.stat(abs);
+    } catch {
+      continue;
+    }
+    if (stat.size > 512 * 1024) continue;
+    let text;
+    try {
+      text = await fs.readFile(abs, 'utf8');
+    } catch {
+      continue;
+    }
+    if (text.includes('\0')) continue;
+    const lines = text.split('\n');
+    let perFile = 0;
+    for (let i = 0; i < lines.length && perFile < 5; i++) {
+      if (test(lines[i])) {
+        out.push({ path: rel, line: i + 1, text: lines[i].trim().slice(0, 240) });
+        perFile++;
+      }
+    }
+  }
+  return { results: out, engine: 'builtin' };
+}
+
+export async function search(root, { q = '', path: relDir = '', limit = 50 } = {}) {
+  if (!q) throw new Error('Missing q');
+  const n = Math.min(limit, 200);
+  if (await hasRg()) return rgSearch(root, q, relDir, n);
+  return nodeSearch(root, q, relDir, n);
+}
+
+export async function renamePath(root, from, to) {
+  if (!from || !to) throw new Error('Need {from, to}');
+  const absFrom = resolveIn(root, from);
+  const absTo = resolveIn(root, to);
+  if (absFrom === root || absTo === root) throw new Error('Cannot rename the project root');
+  await fs.mkdir(path.dirname(absTo), { recursive: true });
+  await fs.rename(absFrom, absTo);
+  const rel = path.relative(root, absTo).split(path.sep).join('/');
+  return { ok: true, path: rel };
+}
+
+export async function removePath(root, rel) {
+  if (!rel) throw new Error('Need {path}');
+  const abs = resolveIn(root, rel);
+  if (abs === root) throw new Error('Cannot delete the project root');
+  await fs.rm(abs, { recursive: true, force: true });
+  return { ok: true, path: rel };
+}
+
+const IMAGE_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+};
+
+export function mimeFor(name) {
+  return IMAGE_MIME[path.extname(String(name || '')).toLowerCase()] || null;
+}
+
+export function isImageName(name) {
+  return mimeFor(name) !== null;
+}
+
+/**
+ * Read any absolute file as base64 (for composer image attachments — these
+ * live anywhere, e.g. Downloads, so this is intentionally NOT root-confined).
+ */
+export async function readExternal(absPath, maxBytes = 8 * 1024 * 1024) {
+  if (!absPath || !path.isAbsolute(absPath)) throw new Error('Need an absolute {path}');
+  const stat = await fs.stat(absPath);
+  if (!stat.isFile()) throw new Error('Not a file');
+  if (stat.size > maxBytes) throw new Error(`File too large for attach (${(stat.size / 1048576).toFixed(1)} MB > ${(maxBytes / 1048576).toFixed(0)} MB)`);
+  const mime = mimeFor(absPath);
+  if (!mime) throw new Error('Only images can be attached as files (PNG, JPG, GIF, WebP, BMP)');
+  const buf = await fs.readFile(absPath);
+  return { ok: true, path: absPath, name: path.basename(absPath), mime, size: stat.size, base64: buf.toString('base64') };
+}

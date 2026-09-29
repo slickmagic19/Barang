@@ -1,0 +1,8 @@
+node_modules/
+web/node_modules/
+web/dist/
+release/
+vendor/
+*.log
+.DS_Store
+Thumbs.db

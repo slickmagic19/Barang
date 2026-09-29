@@ -7,6 +7,7 @@ import {
   setAgent, listSelectableModels, applyModelSelection,
 } from '../lib/agent';
 import { appState } from '../lib/api';
+import { barang } from '../lib/transport';
 import { el } from '../lib/util';
 import { iconEl } from './icons';
 import { applyEditorPrefs } from './editor';
@@ -15,6 +16,9 @@ import logoUrl from '../assets/barang-logo.png';
 export interface SettingsHooks {
   toast(msg: string, kind?: 'info' | 'error'): void;
 }
+
+// Build identity stamp (injected by vite.config.ts from git HEAD).
+declare const __BARANG_COMMIT__: string | undefined;
 
 const FONT_SIZES = [12, 13, 14, 15, 16];
 
@@ -72,6 +76,17 @@ export function openSettings(hooks: SettingsHooks) {
   // --- Sessions ---
   section('Sessions');
   const confirmBox = checkRow('Ask before deleting a session');
+
+  // --- Startup ---
+  section('Startup');
+  const restoreBox = checkRow('Reopen last project on startup');
+  void appState()
+    .then((s) => {
+      restoreBox.checked = s.restore === true;
+    })
+    .catch(() => {
+      restoreBox.toggleAttribute('disabled', true);
+    });
 
   // --- Layout ---
   section('Layout');
@@ -197,6 +212,18 @@ export function openSettings(hooks: SettingsHooks) {
     applyEditorPrefs();
   };
   confirmBox.onchange = () => commit((s) => { s.confirmDelete = confirmBox.checked; });
+  restoreBox.onchange = () => {
+    void barang()
+      .app.setRestore(restoreBox.checked)
+      .then((r) => {
+        restoreBox.checked = r.restore;
+        hooks.toast(r.restore ? 'Will reopen the last project on startup.' : 'Will start with no project open.', 'info');
+      })
+      .catch((e) => {
+        restoreBox.checked = !restoreBox.checked;
+        hooks.toast((e as Error).message, 'error');
+      });
+  };
   btnResetLayout.onclick = () => {
     try {
       localStorage.removeItem('barang:layout-v1');
@@ -225,7 +252,8 @@ export function openSettings(hooks: SettingsHooks) {
   body.append(about);
   void appState()
     .then((s) => {
-      aboutVer.textContent = `v${s.versions.app} · opencode ${s.opencode.version ?? s.opencode.cli ?? ''}`.trim();
+      const commit = typeof __BARANG_COMMIT__ !== 'undefined' ? __BARANG_COMMIT__ : 'dev';
+      aboutVer.textContent = `v${s.versions.app} · ${commit} · opencode ${s.opencode.version ?? s.opencode.cli ?? ''}`.trim();
     })
     .catch(() => {
       aboutVer.textContent = '';

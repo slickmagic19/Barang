@@ -1,4 +1,13 @@
 import { defineConfig } from 'vite';
+import { execSync } from 'node:child_process';
+
+function gitCommit(): string {
+  try {
+    return execSync('git rev-parse --short HEAD', { encoding: 'utf8', timeout: 5000 }).trim() || 'dev';
+  } catch {
+    return 'dev';
+  }
+}
 
 // Monaco is lazy-loaded (own chunk) so first paint stays instant.
 // NOTE (desktop): the renderer runs inside Electron and talks to main over
@@ -7,6 +16,10 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   // Relative asset URLs: the renderer loads over file:// inside Electron.
   base: './',
+  // Build identity stamp (About dialog + staleness checks).
+  define: {
+    __BARANG_COMMIT__: JSON.stringify(process.env.BARANG_COMMIT || gitCommit()),
+  },
   server: {
     port: 5173,
     strictPort: false,

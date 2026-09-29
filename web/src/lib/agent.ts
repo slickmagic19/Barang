@@ -217,9 +217,9 @@ export async function loadSessions() {
   const list = await oc.get<SessionInfo[] | { value?: SessionInfo[] }>('/session').catch(() => []);
   const all = Array.isArray(list) ? list : (list.value ?? []);
   // Scope chat history to the open project: opencode sessions carry the
-  // project root in `directory`. Unknown root = show everything (fallback).
+  // project root in `directory`. No project open = no sessions shown.
   const root = normDir(agentStore.get().root || '');
-  const sessions = (root ? all.filter((x) => normDir(String(x.directory || '')) === root) : all).slice();
+  const sessions = (root ? all.filter((x) => normDir(String(x.directory || '')) === root) : []).slice();
   sessions.sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0));
   const s = agentStore.get();
   const activeId = s.activeId && sessions.some((x) => x.id === s.activeId) ? s.activeId : (sessions[0]?.id ?? null);

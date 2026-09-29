@@ -93,6 +93,22 @@ button { font-family: inherit; }
   width: var(--side-w); flex: 0 0 auto; background: var(--bg-soft);
   border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0;
 }
+.sidebar.collapsed { display: none; }
+/* gutter sits immediately AFTER the sidebar: hide it too when collapsed */
+.sidebar.collapsed + .gutter-v { display: none; }
+
+/* collapsed explorer rail: slim strip with an expand button */
+.sidebar.rail { width: 40px; flex-basis: 40px; align-items: center; padding-top: 10px; }
+.sidebar.rail + .gutter-v { display: none; }
+.sidebar.rail .side-header, .sidebar.rail .tree, .sidebar.rail .tree-empty { display: none; }
+.sidebar .rail-btn { display: none; }
+.sidebar.rail .rail-btn { display: inline-flex; }
+
+/* slim overlay-style Monaco scrollbars (match the 10px option size) */
+.monaco-editor .scrollbar.vertical { width: 10px !important; }
+.monaco-editor .scrollbar.horizontal { height: 10px !important; }
+.monaco-editor .scrollbar > .slider { background: #ffffff2e !important; border-radius: 5px !important; }
+.monaco-editor .scrollbar > .slider:hover { background: #ffffff4d !important; }
 .center { flex: 1; display: flex; flex-direction: column; min-width: 120px; background: var(--bg); }
 .agent-wrap {
   width: var(--agent-w); flex: 0 0 auto; border-left: 1px solid var(--border);
@@ -141,11 +157,18 @@ button { font-family: inherit; }
 .tree-name { overflow: hidden; text-overflow: ellipsis; }
 .tree-sub { border-left: 1px solid var(--border); margin-left: 15px; padding-left: 2px; }
 .tree-err { color: var(--red); padding: 8px 12px; font-size: 12px; }
-.tree-prompt { padding: 6px 8px; }
+.tree-prompt { display: flex; gap: 5px; padding: 6px 8px; align-items: center; }
 .tree-prompt-input {
-  width: 100%; background: var(--panel-2); border: 1px solid var(--accent-line);
+  flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--accent-line);
   color: var(--text); border-radius: var(--radius-sm); padding: 6px 9px; font-size: 12px; outline: none;
 }
+.tree-prompt-ok {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; width: 27px; height: 27px;
+  background: var(--accent-dim); border: 1px solid var(--accent-line); color: var(--text);
+  border-radius: var(--radius-sm); cursor: pointer;
+}
+.tree-prompt-ok:hover { border-color: var(--accent); }
 
 /* tabs + editor */
 .tabs {
@@ -578,6 +601,35 @@ kbd {
 .patch-hunk { color: var(--accent-strong); }
 .patch-ctx { color: var(--text-dim); }
 .patch-foot { display: flex; justify-content: flex-end; padding: 10px 18px 14px; }
+
+/* welcome entry points */
+.welcome-actions { display: flex; justify-content: center; margin-bottom: 18px; }
+.welcome-recent { max-width: 460px; margin: 0 auto; text-align: left; }
+.welcome-recent-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 1.1px; text-transform: uppercase;
+  color: var(--text-faint); margin: 0 2px 7px; user-select: none;
+}
+.recent-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text-dim); padding: 9px 13px; margin-bottom: 6px; cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.recent-row:hover { border-color: var(--border-strong); color: var(--text); }
+.recent-row .ic { color: var(--text-faint); flex: 0 0 auto; }
+.recent-row:hover .ic { color: var(--accent-strong); }
+.recent-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.recent-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.recent-path { font-size: 11px; font-family: var(--mono); color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* explorer empty state (no project open) */
+.tree-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 24px 20px; text-align: center; color: var(--text-faint);
+}
+.tree-empty .ic { color: var(--text-faint); opacity: .7; }
+.tree-empty-title { font-size: 13px; font-weight: 650; color: var(--text-dim); margin-top: 6px; }
+.tree-empty-sub { font-size: 12px; line-height: 1.55; margin-bottom: 8px; }
 
 /* editor panes (normal + diff review share the host) */
 .editor-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }

@@ -10,6 +10,8 @@ export interface PaletteHooks {
   saveAll(): void;
   toggleAgent(): void;
   refreshExplorer(): void;
+  openRecent(path: string): void;
+  getRecents(): string[];
   toast(msg: string, kind?: 'info' | 'error'): void;
 }
 
@@ -17,6 +19,7 @@ const COMMANDS = [
   { id: 'session.new', label: 'Agent: New session' },
   { id: 'agent.toggle', label: 'View: Toggle agent panel' },
   { id: 'file.saveAll', label: 'File: Save all' },
+  { id: 'file.openRecent', label: 'File: Open recent…' },
   { id: 'explorer.refresh', label: 'Explorer: Refresh' },
   { id: 'help.shortcuts', label: 'Help: Keyboard shortcuts' },
 ];
@@ -30,7 +33,7 @@ export function initPalette(hooks: PaletteHooks) {
   const box = el('div', { class: 'palette' });
   const inputWrap = el('div', { class: 'palette-input-wrap' });
   inputWrap.append(iconEl('search', 15));
-  const input = el('input', { class: 'palette-input', placeholder: 'Type a file name, > for commands, # for text search' }) as HTMLInputElement;
+  const input = el('input', { class: 'palette-input', placeholder: 'File name, > commands, # search, ~ recent' }) as HTMLInputElement;
   inputWrap.append(input);
   const results = el('div', { class: 'palette-results' });
   const foot = el('div', { class: 'palette-foot' });
@@ -111,6 +114,20 @@ export function initPalette(hooks: PaletteHooks) {
       }));
       idx = 0;
       paint();
+    } else if (v.startsWith('~')) {
+      // Recent projects (typed or via File: Open Recent).
+      mode = 'search';
+      const q = v.slice(1).trim().toLowerCase();
+      const recents = hooks.getRecents().filter((r) => r.toLowerCase().includes(q));
+      items = recents.map((r) => ({
+        label: r.split(/[\\/]/).filter(Boolean).pop() || r,
+        sub: r,
+        icon: 'folder' as IconName,
+        run: () => hooks.openRecent(r),
+      }));
+      if (!items.length) items = [{ label: 'No recent projects', run: () => {} }];
+      idx = 0;
+      paint();
     } else if (v.startsWith('#')) {
       mode = 'search';
       void searchText(v.slice(1));
@@ -125,6 +142,7 @@ export function initPalette(hooks: PaletteHooks) {
     if (id === 'session.new') hooks.newSession();
     else if (id === 'agent.toggle') hooks.toggleAgent();
     else if (id === 'file.saveAll') void hooks.saveAll();
+    else if (id === 'file.openRecent') open('~ ');
     else if (id === 'explorer.refresh') hooks.refreshExplorer();
     else if (id === 'help.shortcuts') hooks.toast(SHORTCUTS, 'info');
   };

@@ -31,7 +31,9 @@ function bootLog(stage, extra = '') {
 bootLog('module-loaded');
 
 let win = null;
-let root = process.env.BARANG_ROOT || '';
+let root = process.env.BARANG_ROOT || ''; // '' = no project (welcome state)
+let recents = []; // most-recent-first project roots (max 8)
+let restoreProject = false; // Settings > Startup: reopen last project
 let statePath = '';
 
 function userStatePath() {
@@ -43,20 +45,31 @@ async function loadState() {
   try {
     const raw = await fs.readFile(statePath, 'utf8');
     const saved = JSON.parse(raw);
-    if (!root && typeof saved.root === 'string') root = saved.root;
+    if (Array.isArray(saved.recents)) {
+      recents = saved.recents.filter((r) => typeof r === 'string').slice(0, 8);
+    }
+    restoreProject = saved.restore === true;
+    // Reopen the last project only when enabled (default: welcome state).
+    if (!root && restoreProject && typeof saved.root === 'string') root = saved.root;
   } catch {
     /* first run */
   }
-  if (!root) root = app.getPath('documents');
 }
 
 async function saveState() {
   try {
     await fs.mkdir(path.dirname(statePath), { recursive: true });
-    await fs.writeFile(statePath, JSON.stringify({ root }), 'utf8');
+    await fs.writeFile(statePath, JSON.stringify({ root, recents, restore: restoreProject }), 'utf8');
   } catch {
     /* non-fatal */
   }
+}
+
+/** Remember a project (dedupe case-insensitively, cap 8) and persist. */
+async function touchRecent(dir) {
+  const norm = dir.toLowerCase();
+  recents = [dir, ...recents.filter((r) => r.toLowerCase() !== norm)].slice(0, 8);
+  await saveState();
 }
 
 function broadcast(channel, payload) {
@@ -70,12 +83,16 @@ function broadcast(channel, payload) {
 }
 
 async function bootOpencode() {
+  // With no project open, the agent server idles in a scratch dir inside
+  // userData (never in the app folder or Documents).
+  const cwd = root || path.join(app.getPath('userData'), 'scratch');
   try {
-    await fs.stat(root);
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.stat(cwd);
   } catch {
-    root = app.getPath('documents');
+    /* last resort: serve fails loudly below with a clear error */
   }
-  await ensureServer(root, { onLog: (line) => console.log(line.trimEnd()) });
+  await ensureServer(cwd, { onLog: (line) => console.log(line.trimEnd()) });
 }
 
 function createWindow() {
@@ -133,11 +150,23 @@ function applyNoMenu() {
 async function handleOpenFolder() {
   const picked = await dialog.showOpenDialog(win ?? undefined, {
     properties: ['openDirectory'],
-    defaultPath: root,
+    defaultPath: root || undefined,
   });
   if (picked.canceled || !picked.filePaths[0]) return null;
-  root = picked.filePaths[0];
-  await saveState();
+  return openPath(picked.filePaths[0]);
+}
+
+/** Open a project directly (recent list, welcome screen, palette). */
+async function openPath(dir) {
+  let stat;
+  try {
+    stat = await fs.stat(dir);
+  } catch {
+    throw new Error('Folder no longer exists: ' + dir);
+  }
+  if (!stat.isDirectory()) throw new Error('Not a folder: ' + dir);
+  root = dir;
+  await touchRecent(root);
   await restartServer(root, { onLog: (line) => console.log(line.trimEnd()) });
   broadcast('app:root-changed', { root });
   return { root };
@@ -153,15 +182,21 @@ function registerIpc() {
     }
   };
 
-  ipcMain.handle('fs:tree', ok((p) => files.tree(root, p)));
-  ipcMain.handle('fs:read', ok((p) => files.readFile(root, p.path)));
-  ipcMain.handle('fs:write', ok((p) => files.writeFile(root, p.path, p.content)));
-  ipcMain.handle('fs:mkdir', ok((p) => files.mkdir(root, p.path)));
-  ipcMain.handle('fs:rename', ok((p) => files.renamePath(root, p.from, p.to)));
-  ipcMain.handle('fs:remove', ok((p) => files.removePath(root, p.path)));
+  /** Workspace calls require an open project (root '' = welcome state). */
+  const needRoot = (fn) => async (p) => {
+    if (!root) throw new Error('No folder open');
+    return fn(p);
+  };
+
+  ipcMain.handle('fs:tree', ok(needRoot((p) => files.tree(root, p))));
+  ipcMain.handle('fs:read', ok(needRoot((p) => files.readFile(root, p.path))));
+  ipcMain.handle('fs:write', ok(needRoot((p) => files.writeFile(root, p.path, p.content))));
+  ipcMain.handle('fs:mkdir', ok(needRoot((p) => files.mkdir(root, p.path))));
+  ipcMain.handle('fs:rename', ok(needRoot((p) => files.renamePath(root, p.from, p.to))));
+  ipcMain.handle('fs:remove', ok(needRoot((p) => files.removePath(root, p.path))));
   ipcMain.handle('fs:read-external', ok((p) => files.readExternal(p.path)));
-  ipcMain.handle('fs:find', ok((p) => files.find(root, p)));
-  ipcMain.handle('fs:search', ok((p) => files.search(root, p)));
+  ipcMain.handle('fs:find', ok(needRoot((p) => files.find(root, p))));
+  ipcMain.handle('fs:search', ok(needRoot((p) => files.search(root, p))));
 
   ipcMain.handle('oc:call', async (_ev, p = {}) => {
     try {
@@ -174,12 +209,20 @@ function registerIpc() {
 
   ipcMain.handle('app:state', () => ({
     root,
+    recent: recents,
+    restore: restoreProject,
     opencode: opencodeState(),
     versions: { app: app.getVersion(), electron: process.versions.electron },
   }));
   ipcMain.handle('app:open-folder', async () => {
     const res = await handleOpenFolder();
     return res ? { ok: true, data: res } : { ok: false, error: 'cancelled' };
+  });
+  ipcMain.handle('app:open-path', ok((p) => openPath(p.path)));
+  ipcMain.handle('app:set-restore', async (_ev, p = {}) => {
+    restoreProject = p.restore === true;
+    await saveState();
+    return { ok: true, data: { restore: restoreProject } };
   });
   ipcMain.handle('app:pick-files', async () => {
     // Composer attachments: images (inline) or any file (@mention).
@@ -355,6 +398,31 @@ async function runUiSmoke() {
             dotAlign = dotDelta <= 2 ? 'ok' : 'off';
           }
         } catch { dotAlign = 'error'; }
+        // Explorer rail: collapse button rails the sidebar, rail button restores.
+        // Monaco scrollbars: slim (<=10px) once any editor has booted.
+        let rail = 'skip', scrollSlim = 'skip';
+        try {
+          const col = q('.side-header .side-collapse');
+          if (col) {
+            col.click();
+            await new Promise((r) => setTimeout(r, 300));
+            const railed = q('.sidebar').classList.contains('rail');
+            const exp = q('.sidebar .rail-btn');
+            if (exp) exp.click();
+            await new Promise((r) => setTimeout(r, 300));
+            const back = !q('.sidebar').classList.contains('rail');
+            // Rail button must be invisible again once restored (specificity trap).
+            const btnHidden = getComputedStyle(q('.sidebar .rail-btn')).display === 'none';
+            rail = railed && back && btnHidden ? 'ok' : 'broken';
+          }
+        } catch { rail = 'error'; }
+        try {
+          const sb = document.querySelector('.monaco-editor .scrollbar.vertical');
+          if (sb) {
+            const w = parseFloat(sb.style.width) || parseFloat(getComputedStyle(sb).width);
+            scrollSlim = w <= 10 ? 'ok' : 'wide:' + w;
+          }
+        } catch { scrollSlim = 'error'; }
         // Session diff review: open the first IN-ROOT change row (absolute
         // out-of-root rows can only ever toast) and require a review UI —
         // Monaco side-by-side tab or patch fallback. Otherwise skip.
@@ -376,6 +444,8 @@ async function runUiSmoke() {
             if (diffTab !== 'ok' && diffTab !== 'ok-patch') diffTab = 'missing:' + seenToast;
           }
         } catch { diffTab = 'error'; }
+        // NOTE: no Escape dispatch here — the Settings modal is open by now
+        // and correctly closes on Escape; stray dispatches kill it.
         // Changes collapse: toggle hides/shows the file list. Skip when empty.
         let collapse = 'skip', statColors = 'skip';
         try {
@@ -392,19 +462,101 @@ async function runUiSmoke() {
           }
         } catch { collapse = 'error'; }
         // Open Settings (also under test) so the modal assertions can run.
+        // Retried: modal open raced flakily exactly once, so tolerate latency.
         const btn = q('.settings-btn');
-        if (btn) btn.click();
-        await new Promise((rr) => setTimeout(rr, 600));
-        // fs rename/remove roundtrip over the REAL IPC chain (temp dir in root).
+        let settingsTries = 0, overlaySeen = false, openedAtOnce = false;
+        if (btn) {
+          for (let i = 0; i < 6 && !q('.settings-overlay'); i++) {
+            settingsTries++;
+            try { btn.click(); } catch (e) { overlaySeen = overlaySeen; }
+            await new Promise((rr) => setTimeout(rr, 500));
+            if (q('.settings-overlay')) overlaySeen = true;
+          }
+          openedAtOnce = !!q('.settings-overlay');
+        }
+        // fs full roundtrip over the REAL IPC chain (temp dir in root).
         let fsRoundtrip = 'skip';
+        const modalTrail = [];
+        const modalAlive = (tag) => {
+          modalTrail.push(tag + '=' + (!!document.querySelector('.settings-overlay')));
+        };
+        modalAlive('after-open');
         try {
           await window.barang.fs.write('.barang-smoke-ui/ping.txt', 'pong');
           const r = await window.barang.fs.rename('.barang-smoke-ui/ping.txt', '.barang-smoke-ui/pong.txt');
           const f = await window.barang.fs.read('.barang-smoke-ui/pong.txt');
-          fsRoundtrip = r.path === '.barang-smoke-ui/pong.txt' && f.content === 'pong' ? 'ok' : 'mismatch';
+          await window.barang.fs.mkdir('.barang-smoke-ui/sub');
+          await window.barang.fs.write('.barang-smoke-ui/sub/x.txt', 'x');
+          const okSoFar = r.path === '.barang-smoke-ui/pong.txt' && f.content === 'pong';
+          await window.barang.fs.remove('.barang-smoke-ui');
+          let gone = false;
+          try { await window.barang.fs.read('.barang-smoke-ui/pong.txt'); } catch { gone = true; }
+          fsRoundtrip = okSoFar && gone ? 'ok' : 'mismatch';
         } catch (e) {
           fsRoundtrip = 'error: ' + (e.message || e);
         }
+        try { await window.barang.fs.remove('.barang-smoke-ui'); } catch {}
+        // New-file-via-prompt: the exact UI path users take (button, type, Enter).
+        modalAlive('after-fs');
+        let createFile = 'skip';
+        try {
+          const btn = document.querySelector('.side-header [title="New file"]');
+          if (btn) {
+            btn.click();
+            await new Promise((r) => setTimeout(r, 500));
+            const inp = document.querySelector('.tree-prompt-input');
+            if (!inp) { createFile = 'no-prompt'; }
+            else {
+              inp.focus();
+              inp.value = '.barang-smoke-ui/probe-file.txt';
+              inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+              await new Promise((r) => setTimeout(r, 2500));
+              try {
+                const f = await window.barang.fs.read('.barang-smoke-ui/probe-file.txt');
+                createFile = f.content === '' ? 'ok' : 'content-mismatch';
+              } catch (e) { createFile = 'missing:' + (e.message || e); }
+            }
+          }
+        } catch (e) { createFile = 'error: ' + (e.message || e); }
+        modalAlive('after-create');
+        // Rename-via-context-menu: expand the dir, right-click row, Rename item, retype, Enter.
+        let renameFile = 'skip';
+        try {
+          const labels = [...document.querySelectorAll('.tree-label')];
+          const dirRow = labels.find((b) => (b.title || '') === '.barang-smoke-ui');
+          if (dirRow) {
+            dirRow.click();
+            await new Promise((rr) => setTimeout(rr, 800));
+          }
+          const target = [...document.querySelectorAll('.tree-label')].find((b) => (b.title || '').endsWith('probe-file.txt'));
+          if (!target) { renameFile = 'no-row'; }
+          else {
+            const r = target.getBoundingClientRect();
+            target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 8, clientY: r.top + 8 }));
+            await new Promise((rr) => setTimeout(rr, 400));
+            const item = [...document.querySelectorAll('.ctx-menu .ctx-item')].find((b) => (b.textContent || '').trim() === 'Rename');
+            if (!item) { renameFile = 'no-item'; }
+            else {
+              item.click();
+              await new Promise((rr) => setTimeout(rr, 400));
+              const inp = document.querySelector('.tree-prompt-input');
+              if (!inp) { renameFile = 'no-prompt'; }
+              else {
+                inp.focus();
+                inp.value = '.barang-smoke-ui/probe-renamed.txt';
+                inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+                await new Promise((rr) => setTimeout(rr, 2500));
+                try {
+                  const f = await window.barang.fs.read('.barang-smoke-ui/probe-renamed.txt');
+                  renameFile = 'ok';
+                } catch (e) { renameFile = 'missing:' + (e.message || e); }
+              }
+            }
+          }
+          // NOTE: no Escape dispatch here — the Settings modal is open by now
+          // and correctly closes on Escape; stray dispatches kill it.
+        } catch (e) { renameFile = 'error: ' + (e.message || e); }
+        modalAlive('after-rename');
         try { await window.barang.fs.remove('.barang-smoke-ui'); } catch {}
         return JSON.stringify({
           fsRoundtrip,
@@ -414,6 +566,7 @@ async function runUiSmoke() {
           hasEditor: !!q('.editor-host'),
           hasAgent: !!q('.agent-panel'),
           gutters: qa('.gutter-v').length,
+          panelsVisible: !q('.sidebar.collapsed') && !q('.agent-wrap.collapsed'),
           icons: qa('.ic svg').length,
           selects: qa('.agent-panel select').length,
           attachBtn: !!q('.composer .attach-btn'),
@@ -431,7 +584,9 @@ async function runUiSmoke() {
           settingsModal: !!q('.settings-overlay .settings-modal select.settings-select'),
           defaultModel: (() => { const s = q('.settings-overlay select.settings-select'); return s ? s.value : null; })(),
           ctxMenu, ctxItems, ctxClosed,
-          diffTab, collapse, statColors, dotAlign, dotDelta, treeBad,
+          diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, openedAtOnce,
+          modalTrail: modalTrail.join(','),
+          aboutVer: (q('.about-ver')?.textContent || '').trim(),
           reasoningShown: qa('.tool-row summary').filter((s) => (s.textContent || '').trim() === 'Reasoning').length,
           stepRows: qa('.tool-row summary').filter((s) => /^step[\\s-_]*(start|finish)?/i.test((s.textContent || '').trim())).length,
           revertBtns: qa('.msg-action').length,
@@ -447,7 +602,7 @@ async function runUiSmoke() {
   console.log('[smoke-ui] console-errors:', errors.length ? errors.slice(0, 10) : 'none');
   const dom = JSON.parse(probe.startsWith('{') ? probe : '{}');
   const pass = dom.brand === 'Barang' && dom.brandImg === true && dom.hasEditor && dom.hasAgent &&
-    dom.gutters === 2 && dom.icons >= 8 && dom.selects === 2 && dom.emoji === 0 &&
+    dom.gutters === 2 && dom.panelsVisible === true && dom.icons >= 8 && dom.selects === 2 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
     dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true &&
@@ -458,17 +613,82 @@ async function runUiSmoke() {
     (dom.collapse === 'ok' || dom.collapse === 'skip') &&
     (dom.statColors === 'ok' || dom.statColors === 'skip') &&
     (dom.dotAlign === 'ok' || dom.dotAlign === 'skip') &&
-    dom.treeBad === 0;
+    dom.treeBad === 0 &&
+    (dom.rail === 'ok' || dom.rail === 'skip') &&
+    (dom.scrollSlim === 'ok' || dom.scrollSlim === 'skip') &&
+    (dom.createFile === 'ok' || dom.createFile === 'skip') &&
+    (dom.renameFile === 'ok' || dom.renameFile === 'skip') &&
+    dom.aboutVer.length > 3;
   console.log(`[smoke-ui] fs-ipc-roundtrip: ${dom.fsRoundtrip}`);
   console.log(`[smoke-ui] composer: attach=${dom.attachBtn} model=${dom.modelMini} sendIcon=${dom.sendIcon} brandAlign=${dom.brandAlign.s} (${typeof dom.brandAlign.d === 'number' ? dom.brandAlign.d.toFixed(2) : dom.brandAlign.d}px)`);
   console.log(`[smoke-ui] ctx-menu: ${dom.ctxMenu} (${dom.ctxItems} items, esc-closes: ${dom.ctxClosed})`);
   console.log(`[smoke-ui] diff-review: ${dom.diffTab}, collapse: ${dom.collapse}, stat-colors: ${dom.statColors}`);
+  console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, about: ${dom.aboutVer}`);
+  console.log(`[smoke-ui] settings-opened-at-once: ${dom.openedAtOnce}, trail: ${dom.modalTrail}`);
   console.log(`[smoke-ui] dot-align: ${dom.dotAlign} (max delta ${typeof dom.dotDelta === 'number' ? dom.dotDelta.toFixed(2) : dom.dotDelta}px)`);
   console.log(`[smoke-ui] tree-nesting-violations: ${dom.treeBad}`);
   console.log(`[smoke-ui] reasoning-shown: ${dom.reasoningShown}, step-rows: ${dom.stepRows}, revert-buttons: ${dom.revertBtns}`);
   if (dom.toolRows > 0) console.log(`[smoke-ui] tool-rows: ${dom.toolRows}, headings: ${dom.headings}`);
   console.log(`[smoke-ui] default-model: ${dom.defaultModel === '' ? '(auto)' : dom.defaultModel}`);
   if (dom.emptySamples?.length) console.log('[smoke-ui] empty-samples:', JSON.stringify(dom.emptySamples, null, 1));
+  // Trusted-input repro: real click into the new-file prompt + physical
+  // Enter via sendInputEvent (synthetic dispatchEvent can mask focus bugs).
+  try {
+    // Dismiss the settings modal left open by earlier assertions — its
+    // overlay would swallow the real clicks below.
+    await w.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`);
+    await new Promise((r) => setTimeout(r, 400));
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const at = await w.webContents.executeJavaScript(`(() => {
+      const side = document.querySelector('.sidebar');
+      const head = document.querySelector('.side-header');
+      const btn = document.querySelector('.side-header [title="New file"]');
+      if (!btn) return { dbg: 'side=' + !!side + ' cls=' + (side?.className || '') + ' head=' + !!head + ' btns=' + document.querySelectorAll('.side-header button').length };
+      const b = btn.getBoundingClientRect();
+      return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+    })()`);
+    if (at && at.dbg) {
+      console.log('[smoke-ui] trusted sidebar dbg: ' + at.dbg);
+    }
+    let trusted = 'skip-no-button';
+    if (at && !at.dbg) {
+      w.webContents.sendInputEvent({ type: 'mouseDown', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      w.webContents.sendInputEvent({ type: 'mouseUp', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      await new Promise((r) => setTimeout(r, 700));
+      const inp = await w.webContents.executeJavaScript(`(() => {
+        const i = document.querySelector('.tree-prompt-input');
+        if (!i) return null;
+        i.value = '.barang-smoke-ui/trusted-file.txt';
+        const r = i.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2, focused: document.activeElement === i };
+      })()`);
+      console.log('[smoke-ui] trusted prompt: ' + JSON.stringify(inp));
+      if (inp) {
+        w.webContents.sendInputEvent({ type: 'mouseDown', x: inp.x, y: inp.y, button: 'left', clickCount: 1 });
+        w.webContents.sendInputEvent({ type: 'mouseUp', x: inp.x, y: inp.y, button: 'left', clickCount: 1 });
+        await new Promise((r) => setTimeout(r, 500));
+        const pre = await w.webContents.executeJavaScript(`(() => {
+          const i = document.querySelector('.tree-prompt-input');
+          return i ? (document.activeElement === i) + '/' + i.value : 'gone';
+        })()`);
+        console.log('[smoke-ui] trusted pre-enter focus/value: ' + pre);
+        w.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter', code: 'Enter', key: 'Enter' });
+        w.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter', code: 'Enter', key: 'Enter' });
+        await new Promise((r) => setTimeout(r, 2500));
+        trusted = await w.webContents.executeJavaScript(`(async () => {
+          let exists = 'unknown';
+          try { await window.barang.fs.read('.barang-smoke-ui/trusted-file.txt'); exists = 'yes'; }
+          catch (e) { exists = 'no:' + e.message; }
+          try { await window.barang.fs.remove('.barang-smoke-ui'); } catch {}
+          return 'exists=' + exists + ' promptGone=' + (!document.querySelector('.tree-prompt-input')) +
+            ' active=' + document.activeElement?.tagName + '.' + document.activeElement?.className;
+        })()`);
+      }
+    }
+    console.log('[smoke-ui] trusted-input: ' + trusted);
+  } catch (e) {
+    console.log('[smoke-ui] trusted-input error: ' + (e.message || e));
+  }
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   app.exit(pass ? 0 : 1);

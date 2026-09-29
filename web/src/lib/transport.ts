@@ -27,10 +27,14 @@ export interface BarangBridge {
   app: {
     state(): Promise<{
       root: string;
+      recent: string[];
+      restore: boolean;
       opencode: { running: boolean; version?: string; cli?: string; port?: number };
       versions: { app: string; electron: string };
     }>;
     openFolder(): Promise<{ root: string }>;
+    openPath(path: string): Promise<{ root: string }>;
+    setRestore(restore: boolean): Promise<{ restore: boolean }>;
     pickFiles(): Promise<{ files: Array<{ path: string; name: string; size: number }> }>;
     onMenu(cb: (kind: 'toggle-agent' | 'palette' | 'new-session' | 'root-changed', payload?: unknown) => void): () => void;
   };

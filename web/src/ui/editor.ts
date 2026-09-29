@@ -74,6 +74,8 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
     lineHeight: 1.55,
     minimap: { enabled: prefs.minimap },
     wordWrap: prefs.wordWrap ? 'on' : 'off',
+    // Slim overlay-style scrollbars (the 14px default dominates the edge).
+    scrollbar: { vertical: 'auto', horizontal: 'auto', verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
     scrollBeyondLastLine: false,
     padding: { top: 10 },
     renderLineHighlight: 'all',
@@ -175,6 +177,7 @@ function ensureDiffEditor() {
     fontSize: prefs.fontSize,
     lineHeight: 1.55,
     minimap: { enabled: false },
+    scrollbar: { vertical: 'auto', horizontal: 'auto', verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
     renderLineHighlight: 'all',
     smoothScrolling: true,
   });

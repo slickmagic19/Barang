@@ -3,7 +3,7 @@
 // grid, 1.8px stroke, round caps — one visual voice across the whole app.
 export type IconName =
   | 'logo' | 'folder' | 'folderOpen' | 'file' | 'filePlus' | 'folderPlus'
-  | 'refresh' | 'trash' | 'plus' | 'x' | 'chevR' | 'chevD'
+  | 'refresh' | 'trash' | 'plus' | 'x' | 'chevL' | 'chevR' | 'chevD'
   | 'send' | 'stop' | 'shield' | 'spark' | 'search' | 'prompt'
   | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip';
 
@@ -21,6 +21,7 @@ export const ICONS: Record<IconName, string> = {
   trash: S('<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l1 13.5h9l1-13.5"/><path d="M10 11v6M14 11v6"/>'),
   plus: S('<path d="M12 5v14M5 12h14"/>'),
   x: S('<path d="M6 6l12 12M18 6L6 18"/>'),
+  chevL: S('<path d="M15 5.5L8.5 12l6.5 6.5"/>'),
   chevR: S('<path d="M9 5.5l6.5 6.5L9 18.5"/>'),
   chevD: S('<path d="M5.5 9L12 15.5 18.5 9"/>'),
   send: S('<path d="M21.5 2.5L11 13"/><path d="M21.5 2.5L15 21.5l-4-8.5-8.5-4z"/>'),

@@ -125,6 +125,13 @@ async function boot() {
       toast((e as Error).message, 'error');
     }
   };
+  const openPathFlow = (path: string) => {
+    try {
+      void barang().app.openPath(path).catch((e) => toast((e as Error).message, 'error'));
+    } catch (e) {
+      toast((e as Error).message, 'error');
+    }
+  };
   btnFolder.onclick = openFolderFlow;
   btnSettings.onclick = () => openSettings({ toast });
   const ocBanner = el('div', { class: 'oc-banner hidden' });
@@ -154,10 +161,64 @@ async function boot() {
   (welcome.querySelector('.welcome-logo') as HTMLElement).append(logoImg(52));
   center.append(tabs, editorHost, welcome);
 
+  // Welcome extras: open entry points + recent projects (from app state below
+  // once loaded — painted by paintWelcome()).
+  const welcomeActions = el('div', { class: 'welcome-actions' });
+  const btnWelcomeOpen = el('button', { class: 'btn btn-primary' }, 'Open folder') as HTMLButtonElement;
+  btnWelcomeOpen.prepend(iconEl('folder', 14));
+  btnWelcomeOpen.onclick = openFolderFlow;
+  welcomeActions.append(btnWelcomeOpen);
+  const welcomeRecent = el('div', { class: 'welcome-recent hidden' });
+  welcome.querySelector('.welcome-inner')?.append(welcomeActions, welcomeRecent);
+
+  const paintWelcome = (recents: string[]) => {
+    welcomeRecent.innerHTML = '';
+    if (!recents.length) {
+      welcomeRecent.classList.add('hidden');
+      return;
+    }
+    welcomeRecent.classList.remove('hidden');
+    welcomeRecent.append(el('p', { class: 'welcome-recent-label' }, 'Recent'));
+    for (const r of recents.slice(0, 5)) {
+      const b = el('button', { class: 'recent-row' }) as HTMLButtonElement;
+      b.append(iconEl('folder', 14));
+      const txt = el('span', { class: 'recent-text' });
+      txt.append(
+        el('span', { class: 'recent-name' }, r.split(/[\\/]/).filter(Boolean).pop() || r),
+        el('span', { class: 'recent-path' }, r),
+      );
+      b.append(txt);
+      b.title = r;
+      b.onclick = () => openPathFlow(r);
+      welcomeRecent.append(b);
+    }
+  };
+
   const agentPanel = el('div', { class: 'agent-wrap' });
   const gutterR = el('div', { class: 'gutter-v', title: 'Drag to resize · double-click to reset' });
   main.append(sidebar, gutterL, center, gutterR, agentPanel);
   initResizable(gutterL, gutterR);
+
+  // Collapsible explorer rail (Ctrl+B). Distinct from `.collapsed`, which is
+  // the welcome state (whole sidebar gone until a project opens).
+  const railBtn = el('button', { class: 'icon-btn rail-btn', title: 'Show explorer (Ctrl+B)' }) as HTMLButtonElement;
+  railBtn.append(iconEl('chevR', 15));
+  sidebar.prepend(railBtn);
+  const setSideRail = (on: boolean) => {
+    sidebar.classList.toggle('rail', on);
+    try {
+      localStorage.setItem('barang:side-rail', on ? '1' : '0');
+    } catch { /* private mode etc. */ }
+    window.dispatchEvent(new Event('resize')); // Monaco re-layout
+  };
+  const toggleSideRail = () => {
+    if (!hasProject) {
+      toast('Open a folder to browse files.', 'info');
+      return;
+    }
+    setSideRail(!sidebar.classList.contains('rail'));
+  };
+  railBtn.onclick = () => setSideRail(false);
   const statusbar = el('div', { class: 'statusbar' });
   const toasts = el('div', { id: 'toasts' });
   app.append(topbar, main, statusbar, toasts);
@@ -169,12 +230,15 @@ async function boot() {
   let root = '';
   let opencodeOk = false;
   let opencodeVersion: string | null = null;
+  let appRecents: string[] = [];
   try {
     const st = await appState();
     root = st.root;
+    appRecents = st.recent ?? [];
     agentStore.set({ root }); // scopes chat sessions to this project
     opencodeOk = st.opencode.running;
     opencodeVersion = st.opencode.version ?? st.opencode.cli ?? null;
+    paintWelcome(appRecents);
   } catch (e) {
     toast(`Desktop backend unreachable: ${(e as Error).message}`, 'error');
   }
@@ -186,6 +250,22 @@ async function boot() {
       el('span', {}, ', then restart Barang. Editing still works; the agent is offline.'),
     );
     ocBanner.classList.remove('hidden');
+  }
+
+  // Welcome state (no project): only the center shows. Explorer and agent
+  // appear once a folder is opened (which reloads into the project layout).
+  const hasProject = root !== '';
+  if (!hasProject) {
+    sidebar.classList.add('collapsed');
+    agentPanel.classList.add('collapsed');
+  } else {
+    // Restore the explorer rail preference (project layout only).
+    try {
+      if (localStorage.getItem('barang:side-rail') === '1') {
+        sidebar.classList.add('rail');
+        window.dispatchEvent(new Event('resize'));
+      }
+    } catch { /* fresh defaults */ }
   }
 
   const status = initStatusbar(statusbar, { root, opencodeVersion, opencodeOk });
@@ -253,6 +333,8 @@ async function boot() {
 
   const explorer = initExplorer(sidebar, {
     onOpenFile: (p) => void openFile(p),
+    onOpenFolder: openFolderFlow,
+    onCollapseSidebar: () => setSideRail(true),
     onPathRenamed: (from, to) => {
       // A renamed file moves its tab along (dirty tab asks first);
       // a renamed folder closes orphaned child tabs (one confirm if dirty).
@@ -288,6 +370,10 @@ async function boot() {
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
 
   const toggleAgent = () => {
+    if (!hasProject) {
+      toast('Open a folder to use the agent panel.', 'info');
+      return;
+    }
     agentPanel.classList.toggle('collapsed');
     // Monaco needs an explicit layout nudge after flex changes.
     window.dispatchEvent(new Event('resize'));
@@ -301,6 +387,8 @@ async function boot() {
       refreshExplorer();
       explorer.repaint();
     },
+    openRecent: (path) => openPathFlow(path),
+    getRecents: () => appRecents,
     toast,
   });
 
@@ -335,6 +423,9 @@ async function boot() {
       void saveActive().then((ok) => {
         if (ok) toast('Saved', 'info');
       });
+    } else if (mod && e.key.toLowerCase() === 'b') {
+      e.preventDefault();
+      toggleSideRail();
     } else if (mod && e.key.toLowerCase() === 'o') {
       e.preventDefault();
       openFolderFlow();

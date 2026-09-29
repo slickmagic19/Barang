@@ -9,6 +9,8 @@ export interface ExplorerHooks {
   onOpenFile(path: string): void;
   onPathRenamed(oldPath: string, newPath: string): void;
   onPathRemoved(path: string): void;
+  onOpenFolder(): void;
+  onCollapseSidebar(): void;
   toast(msg: string, kind?: 'info' | 'error'): void;
 }
 
@@ -91,27 +93,32 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
   ]);
 
   async function submitCreateFile(v: string) {
+    hooks.toast(`Creating ${v}…`, 'info');
     try {
-      await fsApi.write(v, '');
+      const res = await fsApi.write(v, '');
       refreshExplorer();
       await paint(host, hooks);
+      hooks.toast(`Created ${res.path}.`, 'info');
       hooks.onOpenFile(v);
-    } catch (err) {
-      hooks.toast(`Cannot create file: ${(err as Error).message}`, 'error');
+    } catch (e) {
+      hooks.toast(`Cannot create file: ${(e as Error).message}`, 'error');
     }
   }
   async function submitCreateDir(v: string) {
+    hooks.toast(`Creating folder ${v}…`, 'info');
     try {
       await fsApi.mkdir(v);
       refreshExplorer();
       expanded.add(v);
       await paint(host, hooks);
-    } catch (err) {
-      hooks.toast(`Cannot create folder: ${(err as Error).message}`, 'error');
+      hooks.toast(`Created folder ${v}.`, 'info');
+    } catch (e) {
+      hooks.toast(`Cannot create folder: ${(e as Error).message}`, 'error');
     }
   }
   async function submitRename(from: string, to: string) {
     if (!to || to === from) return;
+    hooks.toast(`Renaming to ${to}…`, 'info');
     try {
       const res = await fsApi.rename(from, to);
       refreshExplorer();
@@ -125,6 +132,7 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
         }
       }
       await paint(host, hooks);
+      hooks.toast(`Renamed to ${res.path}.`, 'info');
       hooks.onPathRenamed(from, res.path);
     } catch (err) {
       hooks.toast(`Cannot rename: ${(err as Error).message}`, 'error');
@@ -188,6 +196,9 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
 }
 
 async function paint(host: HTMLElement, hooks: ExplorerHooks) {
+  // Never nuke an inline prompt the user is actively typing in — the next
+  // refresh trigger will repaint once it is submitted or dismissed.
+  if (host.querySelector('.tree-prompt-input:focus')) return;
   host.innerHTML = '';
   await renderTree(host, hooks, '.', 0);
 }
@@ -196,22 +207,49 @@ function inlinePrompt(host: HTMLElement, placeholder: string, initial: string, o
   const wrap = el('div', { class: 'tree-prompt' });
   const input = el('input', { class: 'tree-prompt-input', placeholder }) as HTMLInputElement;
   input.value = initial;
-  wrap.append(input);
+  const okBtn = el('button', { class: 'tree-prompt-ok', title: 'Confirm (Enter)' }) as HTMLButtonElement;
+  okBtn.append(iconEl('check', 13));
+  const submit = () => {
+    const v = input.value.trim();
+    if (!v) return;
+    wrap.remove();
+    onSubmit(v);
+  };
+  // mousedown (not click): clicking would blur the input first, and blur
+  // dismisses the prompt — preventDefault keeps focus until submit runs.
+  okBtn.onmousedown = (e) => {
+    e.preventDefault();
+    submit();
+  };
+  wrap.append(input, okBtn);
   host.prepend(wrap);
   input.focus();
   input.setSelectionRange(initial.length, initial.length);
   input.onkeydown = (e) => {
-    if (e.key === 'Enter' && input.value.trim()) {
-      const v = input.value.trim();
-      wrap.remove();
-      onSubmit(v);
-    } else if (e.key === 'Escape') wrap.remove();
+    if (e.key === 'Enter') submit();
+    else if (e.key === 'Escape') wrap.remove();
   };
   input.onblur = () => wrap.remove();
 }
 
 export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, projectRoot: string) {
-  rootName = projectRoot.split(/[\\/]/).filter(Boolean).pop() || projectRoot;
+  rootName = projectRoot.split(/[\\/]/).filter(Boolean).pop() || '';
+  // Welcome state: no project open yet — offer entry points, not an error.
+  if (!projectRoot) {
+    const empty = el('div', { class: 'tree-empty' });
+    const glyph = iconEl('folderOpen', 30);
+    empty.append(
+      glyph,
+      el('div', { class: 'tree-empty-title' }, 'No folder open'),
+      el('div', { class: 'tree-empty-sub' }, 'Open a project to browse files and start the agent.'),
+    );
+    const btn = el('button', { class: 'btn btn-primary btn-sm' }, 'Open folder');
+    btn.onclick = () => hooks.onOpenFolder();
+    empty.append(btn);
+    sidebar.append(empty);
+    treeCtx = null;
+    return { repaint: () => {} };
+  }
   const header = el('div', { class: 'side-header' });
   const title = el('span', { class: 'side-title' }, rootName);
   const actions = el('div', { class: 'side-actions' });
@@ -221,7 +259,10 @@ export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, project
   btnNewDir.append(iconEl('folderPlus', 15));
   const btnRefresh = el('button', { class: 'icon-btn', title: 'Refresh' }) as HTMLButtonElement;
   btnRefresh.append(iconEl('refresh', 14));
-  actions.append(btnNewFile, btnNewDir, btnRefresh);
+  const btnCollapse = el('button', { class: 'icon-btn side-collapse', title: 'Hide explorer (Ctrl+B)' }) as HTMLButtonElement;
+  btnCollapse.append(iconEl('chevL', 14));
+  btnCollapse.onclick = () => hooks.onCollapseSidebar();
+  actions.append(btnNewFile, btnNewDir, btnRefresh, btnCollapse);
   header.append(title, actions);
   const body = el('div', { class: 'tree' });
   sidebar.append(header, body);
@@ -239,21 +280,25 @@ export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, project
   };
 
   async function createFileAtRoot(v: string) {
+    hooks.toast(`Creating ${v}…`, 'info');
     try {
-      await fsApi.write(v, '');
+      const res = await fsApi.write(v, '');
       refreshExplorer();
       await paint(body, hooks);
+      hooks.toast(`Created ${res.path}.`, 'info');
       hooks.onOpenFile(v);
     } catch (e) {
       hooks.toast(`Cannot create file: ${(e as Error).message}`, 'error');
     }
   }
   async function createDirAtRoot(v: string) {
+    hooks.toast(`Creating folder ${v}…`, 'info');
     try {
       await fsApi.mkdir(v);
       refreshExplorer();
       expanded.add(v);
       await paint(body, hooks);
+      hooks.toast(`Created folder ${v}.`, 'info');
     } catch (e) {
       hooks.toast(`Cannot create folder: ${(e as Error).message}`, 'error');
     }

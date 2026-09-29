@@ -59,6 +59,8 @@ const barang = {
   app: {
     state: () => ipcRenderer.invoke('app:state'),
     openFolder: () => invoke('app:open-folder'),
+    openPath: (path) => invoke('app:open-path', { path }),
+    setRestore: (restore) => invoke('app:set-restore', { restore }),
     pickFiles: () => invoke('app:pick-files'),
     /** Menu + root-change events. cb(kind, payload). */
     onMenu: (cb) => {

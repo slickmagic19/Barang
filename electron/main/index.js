@@ -615,7 +615,9 @@ async function runUiSmoke() {
               if (!inp) { renameFile = 'no-prompt'; }
               else {
                 inp.focus();
-                inp.value = '.barang-smoke-ui/probe-renamed.txt';
+                // VSCode parity: rename takes a bare name, resolved against
+                // the entry's own directory.
+                inp.value = 'probe-renamed.txt';
                 inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
                 await new Promise((rr) => setTimeout(rr, 2500));
                 try {
@@ -747,7 +749,7 @@ async function runUiSmoke() {
       const inp = await w.webContents.executeJavaScript(`(() => {
         const i = document.querySelector('.tree-prompt-input');
         if (!i) return null;
-        i.value = '.barang-smoke-ui/trusted-file.txt';
+        i.value = '.barang-smoke-trusted/trusted-file.txt';
         const r = i.getBoundingClientRect();
         return { x: r.left + r.width / 2, y: r.top + r.height / 2, focused: document.activeElement === i };
       })()`);
@@ -766,9 +768,9 @@ async function runUiSmoke() {
         await new Promise((r) => setTimeout(r, 2500));
         trusted = await w.webContents.executeJavaScript(`(async () => {
           let exists = 'unknown';
-          try { await window.barang.fs.read('.barang-smoke-ui/trusted-file.txt'); exists = 'yes'; }
+          try { await window.barang.fs.read('.barang-smoke-trusted/trusted-file.txt'); exists = 'yes'; }
           catch (e) { exists = 'no:' + e.message; }
-          try { await window.barang.fs.remove('.barang-smoke-ui'); } catch {}
+          try { await window.barang.fs.remove('.barang-smoke-trusted'); } catch {}
           return 'exists=' + exists + ' promptGone=' + (!document.querySelector('.tree-prompt-input')) +
             ' active=' + document.activeElement?.tagName + '.' + document.activeElement?.className;
         })()`);

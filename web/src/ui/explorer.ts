@@ -74,6 +74,40 @@ function dirOf(p: string): string {
   return i < 0 ? '.' : p.slice(0, i) || '.';
 }
 
+/** Join a typed name onto a directory (VSCode allows `a/b.ts` nesting and
+ *  `..` segments in the input); always stays project-relative or fails. */
+export function joinNorm(dir: string, name: string): string {
+  const parts: string[] = [];
+  for (const seg of (dir === '.' ? name : `${dir}/${name}`).split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join('/');
+}
+
+/** VSCode-style name validation: illegal chars, trailing dot/space,
+ *  duplicates (case-insensitive, Windows-safe). Null = OK.
+ *  Always lists FRESH (the render cache may lag external changes). */
+export function nameValidator(dir: string, exclude?: string) {
+  return async (v: string): Promise<string | null> => {
+    if (/[<>:"|?*\x00-\x1f]/.test(v)) return 'Characters < > : " | ? * are not allowed in names.';
+    if (/[. ]$/.test(v)) return 'Names cannot end with a dot or space.';
+    try {
+      const res = await fsApi.tree(dir);
+      const kids = res.children ?? [];
+      const first = v.split('/')[0].toLowerCase();
+      const ex = (exclude ?? '').toLowerCase();
+      if (kids.some((k) => k.name.toLowerCase() === first && k.name.toLowerCase() !== ex)) {
+        return `A file or folder named "${v.split('/')[0]}" already exists.`;
+      }
+    } catch {
+      /* backend is the source of truth when listing fails */
+    }
+    return null;
+  };
+}
+
 /** Always repaint from the ROOT body: painting a sub-container nests the
  *  whole tree inside itself (the classic Barang nesting bug). */
 function repaintRoot(): Promise<void> {
@@ -95,6 +129,53 @@ function findRow(root: HTMLElement, entryPath: string): { row: HTMLElement; labe
 function labelPad(label: HTMLElement): number {
   const v = parseInt(label.style.paddingLeft || '6', 10);
   return Number.isFinite(v) ? v : 6;
+}
+
+async function submitCreateIn(hooks: ExplorerHooks, dir: string, name: string, isDir: boolean) {
+  const full = joinNorm(dir, name);
+  const what = isDir ? 'folder' : 'file';
+  hooks.toast(`Creating ${full}…`, 'info');
+  try {
+    if (isDir) {
+      await fsApi.mkdir(full);
+      refreshExplorer();
+      expanded.add(full);
+    } else {
+      await fsApi.write(full, '');
+      refreshExplorer();
+    }
+    await repaintRoot();
+    hooks.toast(`Created ${full}.`, 'info');
+    if (!isDir) hooks.onOpenFile(full);
+  } catch (e) {
+    hooks.toast(`Cannot create ${what}: ${(e as Error).message}`, 'error');
+  }
+}
+
+async function submitRename(hooks: ExplorerHooks, entry: FsEntry, name: string) {
+  const to = joinNorm(dirOf(entry.path), name);
+  if (to.toLowerCase() === entry.path.toLowerCase()) return; // unchanged
+  const from = entry.path;
+  const isDir = entry.type === 'dir';
+  hooks.toast(`Renaming to ${to}…`, 'info');
+  try {
+    const res = await fsApi.rename(from, to);
+    refreshExplorer();
+    if (isDir) {
+      // Move expansion state along with the folder.
+      for (const k of [...expanded]) {
+        if (k === from || k.startsWith(from + '/')) {
+          expanded.delete(k);
+          expanded.add(res.path + k.slice(from.length));
+        }
+      }
+    }
+    await repaintRoot();
+    hooks.toast(`Renamed to ${res.path}.`, 'info');
+    hooks.onPathRenamed(from, res.path);
+  } catch (err) {
+    hooks.toast(`Cannot rename: ${(err as Error).message}`, 'error');
+  }
 }
 
 function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: number, y: number) {
@@ -137,8 +218,10 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
       ? { parent: sub as HTMLElement, before: sub.firstChild, padLeft: labelPad(found!.label) + 12 }
       : undefined; // fallback: top of tree (toolbar behavior)
     const label = dir ? 'folder' : 'file';
+    // VSCode parity: the input holds just the name; position implies location.
     await settlePrompt(
-      () => inlinePrompt(body, `${pre}${dir ? 'new-folder' : 'new-file.ts'}`, pre, dir ? submitCreateDir : submitCreateFile, place),
+      () => inlinePrompt(body, `Name the new ${label}…`, '', (v) => submitCreateIn(hooks, dirPath, v, dir), place,
+        (v) => nameValidator(dirPath)(v)),
       () => hooks.toast(`Could not open the new-${label} input. Try again.`, 'error'),
     );
   }
@@ -146,69 +229,27 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
   async function renameHere(entry: FsEntry) {
     const body = treeCtx?.body ?? host;
     const found = findRow(body, entry.path);
-    const openTop = () => inlinePrompt(body, `Rename ${entry.name} to…`, entry.path, (v) => submitRename(entry.path, v));
+    const submit = (v: string) => submitRename(hooks, entry, v);
+    const validate = (v: string) => nameValidator(dirOf(entry.path), entry.name)(v);
     if (!found) {
       // Row not currently rendered (filtered/collapsed) — fall back to top.
-      await settlePrompt(openTop, () => hooks.toast('Could not open the rename input. Try again.', 'error'));
+      await settlePrompt(
+        () => inlinePrompt(body, `Rename to…`, entry.name, submit, undefined, validate),
+        () => hooks.toast('Could not open the rename input. Try again.', 'error'),
+      );
       return;
     }
     await settlePrompt(
-      () => inlinePrompt(body, `Rename ${entry.name} to…`, entry.path, (v) => submitRename(entry.path, v), {
+      () => inlinePrompt(body, `Rename to…`, entry.name, submit, {
         parent: found.row.parentElement ?? body,
         before: found.row.nextSibling,
         hideRow: found.row,
         padLeft: labelPad(found.label),
-      }),
+      }, validate),
       () => hooks.toast('Could not open the rename input. Try again.', 'error'),
     );
   }
 
-  async function submitCreateFile(v: string) {
-    hooks.toast(`Creating ${v}…`, 'info');
-    try {
-      await fsApi.write(v, '');
-      refreshExplorer();
-      await repaintRoot();
-      hooks.toast(`Created ${v}.`, 'info');
-      hooks.onOpenFile(v);
-    } catch (e) {
-      hooks.toast(`Cannot create file: ${(e as Error).message}`, 'error');
-    }
-  }
-  async function submitCreateDir(v: string) {
-    hooks.toast(`Creating folder ${v}…`, 'info');
-    try {
-      await fsApi.mkdir(v);
-      refreshExplorer();
-      expanded.add(v);
-      await repaintRoot();
-      hooks.toast(`Created folder ${v}.`, 'info');
-    } catch (e) {
-      hooks.toast(`Cannot create folder: ${(e as Error).message}`, 'error');
-    }
-  }
-  async function submitRename(from: string, to: string) {
-    if (!to || to === from) return;
-    hooks.toast(`Renaming to ${to}…`, 'info');
-    try {
-      const res = await fsApi.rename(from, to);
-      refreshExplorer();
-      if (isDir) {
-        // Move expansion state along with the folder.
-        for (const k of [...expanded]) {
-          if (k === from || k.startsWith(from + '/')) {
-            expanded.delete(k);
-            expanded.add(res.path + k.slice(from.length));
-          }
-        }
-      }
-      await repaintRoot();
-      hooks.toast(`Renamed to ${res.path}.`, 'info');
-      hooks.onPathRenamed(from, res.path);
-    } catch (err) {
-      hooks.toast(`Cannot rename: ${(err as Error).message}`, 'error');
-    }
-  }
 }
 
 async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string, depth: number, my: number): Promise<boolean> {
@@ -310,15 +351,42 @@ function inlinePrompt(
   initial: string,
   onSubmit: (v: string) => void,
   place?: PromptPlace,
-): HTMLElement {
+  validate?: (v: string) => Promise<string | null>,
+) {
   const wrap = el('div', { class: 'tree-prompt' });
-  const input = el('input', { class: 'tree-prompt-input', placeholder }) as HTMLInputElement;
+  const input = el('input', { class: 'tree-prompt-input', placeholder, spellcheck: 'false' }) as HTMLInputElement;
   input.value = initial;
-  const okBtn = el('button', { class: 'tree-prompt-ok', title: 'Confirm (Enter)' }) as HTMLButtonElement;
+  const okBtn = el('button', { class: 'tree-prompt-ok', title: 'Confirm (Enter)', tabindex: '-1' }) as HTMLButtonElement;
   okBtn.append(iconEl('check', 13));
-  const submit = () => {
+  const showError = (msg: string | null) => {
+    wrap.classList.toggle('has-error', !!msg);
+    let err = wrap.querySelector('.tree-prompt-error');
+    if (!msg) {
+      err?.remove();
+      return;
+    }
+    if (!err) {
+      err = el('div', { class: 'tree-prompt-error' });
+      wrap.append(err);
+    }
+    err.textContent = msg;
+  };
+  const submit = async () => {
     const v = input.value.trim();
     if (!v) return;
+    if (validate) {
+      let err: string | null = null;
+      try {
+        err = await validate(v);
+      } catch {
+        err = null; // validation is advisory; the backend decides
+      }
+      if (err) {
+        showError(err);
+        return;
+      }
+    }
+    showError(null);
     cleanup();
     onSubmit(v);
   };
@@ -326,7 +394,7 @@ function inlinePrompt(
   // dismisses the prompt — preventDefault keeps focus until submit runs.
   okBtn.onmousedown = (e) => {
     e.preventDefault();
-    submit();
+    void submit();
   };
   const cleanup = () => {
     // Restore a hidden rename row (no-op if a repaint already replaced it).
@@ -337,7 +405,9 @@ function inlinePrompt(
     } catch { /* detached — nothing to restore */ }
     wrap.remove();
   };
-  wrap.append(input, okBtn);
+  const row = el('div', { class: 'tree-prompt-row' });
+  row.append(input, okBtn);
+  wrap.append(row);
   const target = place ?? { parent: host, before: host.firstChild };
   if (target.hideRow) target.hideRow.style.display = 'none';
   target.parent.insertBefore(wrap, target.before);
@@ -362,9 +432,11 @@ function inlinePrompt(
     if (document.contains(input) && document.activeElement !== input) focusInput();
   });
   input.onkeydown = (e) => {
-    if (e.key === 'Enter') submit();
+    if (e.key === 'Enter') void submit();
     else if (e.key === 'Escape') cleanup();
   };
+  // Typing clears a previous validation error (VSCode behavior).
+  input.oninput = () => showError(null);
   // Dismiss only when focus truly leaves the prompt (tabbing between the
   // input and the confirm button must not destroy it).
   input.onblur = (e) => {
@@ -440,43 +512,18 @@ export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, project
     e.preventDefault();
     e.stopPropagation();
     showContextMenu(e.clientX, e.clientY, [
-      { label: 'New File', icon: 'filePlus', run: () => void settlePrompt(() => inlinePrompt(body, 'new-file.ts (relative to root)', '', createFileAtRoot), () => hooks.toast('Could not open input. Try again.', 'error')) },
-      { label: 'New Folder', icon: 'folderPlus', run: () => void settlePrompt(() => inlinePrompt(body, 'new-folder (relative to root)', '', createDirAtRoot), () => hooks.toast('Could not open input. Try again.', 'error')) },
+      { label: 'New File', icon: 'filePlus', run: () => void settlePrompt(() => inlinePrompt(body, 'Name the new file…', '', (v) => submitCreateIn(hooks, '.', v, false), undefined, (v) => nameValidator('.')(v)), () => hooks.toast('Could not open input. Try again.', 'error')) },
+      { label: 'New Folder', icon: 'folderPlus', run: () => void settlePrompt(() => inlinePrompt(body, 'Name the new folder…', '', (v) => submitCreateIn(hooks, '.', v, true), undefined, (v) => nameValidator('.')(v)), () => hooks.toast('Could not open input. Try again.', 'error')) },
       { label: 'Refresh', icon: 'refresh', run: () => { refreshExplorer(); void paint(body, hooks); } },
     ]);
   };
-
-  async function createFileAtRoot(v: string) {
-    hooks.toast(`Creating ${v}…`, 'info');
-    try {
-      const res = await fsApi.write(v, '');
-      refreshExplorer();
-      await paint(body, hooks);
-      hooks.toast(`Created ${v}.`, 'info');
-      hooks.onOpenFile(v);
-    } catch (e) {
-      hooks.toast(`Cannot create file: ${(e as Error).message}`, 'error');
-    }
-  }
-  async function createDirAtRoot(v: string) {
-    hooks.toast(`Creating folder ${v}…`, 'info');
-    try {
-      await fsApi.mkdir(v);
-      refreshExplorer();
-      expanded.add(v);
-      await paint(body, hooks);
-      hooks.toast(`Created folder ${v}.`, 'info');
-    } catch (e) {
-      hooks.toast(`Cannot create folder: ${(e as Error).message}`, 'error');
-    }
-  }
 
   btnRefresh.onclick = () => {
     refreshExplorer();
     void paint(body, hooks);
   };
-  btnNewFile.onclick = () => void settlePrompt(() => inlinePrompt(body, 'new-file.ts (path relative to root)', '', createFileAtRoot), () => hooks.toast('Could not open input. Try again.', 'error'));
-  btnNewDir.onclick = () => void settlePrompt(() => inlinePrompt(body, 'new-folder (path relative to root)', '', createDirAtRoot), () => hooks.toast('Could not open input. Try again.', 'error'));
+  btnNewFile.onclick = () => void settlePrompt(() => inlinePrompt(body, 'Name the new file…', '', (v) => submitCreateIn(hooks, '.', v, false), undefined, (v) => nameValidator('.')(v)), () => hooks.toast('Could not open input. Try again.', 'error'));
+  btnNewDir.onclick = () => void settlePrompt(() => inlinePrompt(body, 'Name the new folder…', '', (v) => submitCreateIn(hooks, '.', v, true), undefined, (v) => nameValidator('.')(v)), () => hooks.toast('Could not open input. Try again.', 'error'));
 
   void paint(body, hooks);
   return { repaint: () => paint(body, hooks) };

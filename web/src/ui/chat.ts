@@ -338,8 +338,7 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
 export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   panel.classList.add('agent-panel');
 
-  const sessSection = el('div', { class: 'agent-section' });
-  sessSection.append(el('p', { class: 'agent-section-label' }, 'Session'));
+  const sessSection = el('div', { class: 'agent-section sess-section' });
   const sessRow = el('div', { class: 'sess-row' });
   const sessSel = el('select', { class: 'sess-sel', title: 'Session' }) as HTMLSelectElement;
   const btnNew = el('button', { class: 'icon-btn', title: 'New session' }) as HTMLButtonElement;

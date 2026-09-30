@@ -18,6 +18,9 @@ const expanded = new Set<string>(['.']);
 const cache = new Map<string, FsEntry[]>();
 let rootName = '';
 let treeCtx: { body: HTMLElement; hooks: ExplorerHooks } | null = null;
+// VSCode-style selection: toolbar New File/Folder targets the focused entry
+// (inside a focused folder, beside a focused file), not always the root.
+let focusedEntry: { path: string; type: 'file' | 'dir' } | null = null;
 
 async function childrenOf(path: string): Promise<FsEntry[]> {
   if (!cache.has(path)) {
@@ -131,6 +134,36 @@ function labelPad(label: HTMLElement): number {
   return Number.isFinite(v) ? v : 6;
 }
 
+/** Directory targeted by toolbar creation: inside the focused folder, beside
+ *  a focused file, or the root when nothing is focused (VSCode semantics). */
+export function focusedTargetDir(): string {
+  if (!focusedEntry) return '.';
+  return focusedEntry.type === 'dir' ? focusedEntry.path : dirOf(focusedEntry.path);
+}
+
+/** Create flow shared by toolbar, blank-area menu, and context menu:
+ *  expands the target dir, then prompts in place as its first child. */
+export async function promptCreateIn(hooks: ExplorerHooks, dirPath: string, dir: boolean) {
+  expanded.add(dirPath);
+  refreshExplorer();
+  const body = treeCtx?.body;
+  if (!body) return;
+  await paint(body, hooks);
+  const found = findRow(body, dirPath);
+  const sub = found?.row.nextElementSibling;
+  const hasSub = !!sub && sub.classList.contains('tree-sub');
+  const place = hasSub && sub && found
+    ? { parent: sub as HTMLElement, before: sub.firstChild, padLeft: labelPad(found.label) + 12 }
+    : undefined; // fallback: top of tree
+  const label = dir ? 'folder' : 'file';
+  // VSCode parity: the input holds just the name; position implies location.
+  await settlePrompt(
+    () => inlinePrompt(body, `Name the new ${label}…`, '', (v) => submitCreateIn(hooks, dirPath, v, dir), place,
+      (v) => nameValidator(dirPath)(v)),
+    () => hooks.toast(`Could not open the new-${label} input. Try again.`, 'error'),
+  );
+}
+
 async function submitCreateIn(hooks: ExplorerHooks, dir: string, name: string, isDir: boolean) {
   const full = joinNorm(dir, name);
   const what = isDir ? 'folder' : 'file';
@@ -144,9 +177,11 @@ async function submitCreateIn(hooks: ExplorerHooks, dir: string, name: string, i
       await fsApi.write(full, '');
       refreshExplorer();
     }
-    await repaintRoot();
-    hooks.toast(`Created ${full}.`, 'info');
-    if (!isDir) hooks.onOpenFile(full);
+      await repaintRoot();
+      hooks.toast(`Created ${full}.`, 'info');
+      // Focus the new entry so chained creates nest like VSCode.
+      focusedEntry = { path: full, type: isDir ? 'dir' : 'file' };
+      if (!isDir) hooks.onOpenFile(full);
   } catch (e) {
     hooks.toast(`Cannot create ${what}: ${(e as Error).message}`, 'error');
   }
@@ -205,25 +240,7 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
   // VSCode-style in-place flows: the prompt appears where the action is —
   // replacing the renamed row, or as the first child of the target folder.
   async function newHere(entry: FsEntry, dir: boolean) {
-    const dirPath = entry.type === 'dir' ? entry.path : dirOf(entry.path);
-    expanded.add(dirPath);
-    refreshExplorer();
-    const body = treeCtx?.body ?? host;
-    await paint(body, hooks);
-    const found = findRow(body, dirPath);
-    const sub = found?.row.nextElementSibling;
-    const hasSub = !!sub && sub.classList.contains('tree-sub');
-    const pre = dirPath === '.' ? '' : dirPath + '/';
-    const place = hasSub && sub
-      ? { parent: sub as HTMLElement, before: sub.firstChild, padLeft: labelPad(found!.label) + 12 }
-      : undefined; // fallback: top of tree (toolbar behavior)
-    const label = dir ? 'folder' : 'file';
-    // VSCode parity: the input holds just the name; position implies location.
-    await settlePrompt(
-      () => inlinePrompt(body, `Name the new ${label}…`, '', (v) => submitCreateIn(hooks, dirPath, v, dir), place,
-        (v) => nameValidator(dirPath)(v)),
-      () => hooks.toast(`Could not open the new-${label} input. Try again.`, 'error'),
-    );
+    await promptCreateIn(hooks, entry.type === 'dir' ? entry.path : dirOf(entry.path), dir);
   }
 
   async function renameHere(entry: FsEntry) {
@@ -290,6 +307,7 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
       // Re-expand from the ROOT body: repainting into the local sub-div
       // would nest the whole tree inside itself on every click.
       label.onclick = () => {
+        focusedEntry = { path: e.path, type: 'dir' };
         if (expanded.has(e.path)) expanded.delete(e.path);
         else expanded.add(e.path);
         if (treeCtx) void paint(treeCtx.body, treeCtx.hooks);
@@ -302,7 +320,11 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
       }
     } else {
       label.onclick = () => {
-        host.querySelectorAll('.tree-label.active').forEach((n) => n.classList.remove('active'));
+        focusedEntry = { path: e.path, type: 'file' };
+        // Query the LIVE tree: this closure's host may be a superseded
+        // staging container after an atomic swap.
+        const live = treeCtx?.body ?? host;
+        live.querySelectorAll('.tree-label.active').forEach((n) => n.classList.remove('active'));
         label.classList.add('active');
         hooks.onOpenFile(e.path);
       };
@@ -329,11 +351,15 @@ async function paint(host: HTMLElement, hooks: ExplorerHooks) {
   // Never nuke an inline prompt the user is actively typing in — the next
   // refresh trigger will repaint once it is submitted or dismissed.
   if (host.querySelector('.tree-prompt-input:focus')) return;
+  if (!document.contains(host)) return; // detached by a project switch
   const my = ++paintSeq;
-  renderSkeletons(host); // instant placeholder — no blank flash while fetching
-  const ok = await renderTree(host, hooks, '.', 0, my);
-  if (!ok) return; // superseded — a newer paint owns the host now
-  host.querySelectorAll(':scope > .skel-row').forEach((node) => node.remove());
+  // First paint shows skeletons instantly; refreshes render off-DOM and swap
+  // atomically — no clear-then-fill flash, no interleaved rows, ever.
+  if (!host.querySelector('.tree-row, .tree-err')) renderSkeletons(host);
+  const staging = document.createElement('div');
+  const ok = await renderTree(staging, hooks, '.', 0, my);
+  if (!ok || my !== paintSeq || !document.contains(host)) return;
+  host.replaceChildren(...staging.childNodes);
 }
 
 /** Where the inline prompt lives. Default (omitted) = pinned to the top,
@@ -512,8 +538,8 @@ export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, project
     e.preventDefault();
     e.stopPropagation();
     showContextMenu(e.clientX, e.clientY, [
-      { label: 'New File', icon: 'filePlus', run: () => void settlePrompt(() => inlinePrompt(body, 'Name the new file…', '', (v) => submitCreateIn(hooks, '.', v, false), undefined, (v) => nameValidator('.')(v)), () => hooks.toast('Could not open input. Try again.', 'error')) },
-      { label: 'New Folder', icon: 'folderPlus', run: () => void settlePrompt(() => inlinePrompt(body, 'Name the new folder…', '', (v) => submitCreateIn(hooks, '.', v, true), undefined, (v) => nameValidator('.')(v)), () => hooks.toast('Could not open input. Try again.', 'error')) },
+      { label: 'New File', icon: 'filePlus', run: () => void promptCreateIn(hooks, '.', false) },
+      { label: 'New Folder', icon: 'folderPlus', run: () => void promptCreateIn(hooks, '.', true) },
       { label: 'Refresh', icon: 'refresh', run: () => { refreshExplorer(); void paint(body, hooks); } },
     ]);
   };
@@ -522,8 +548,8 @@ export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, project
     refreshExplorer();
     void paint(body, hooks);
   };
-  btnNewFile.onclick = () => void settlePrompt(() => inlinePrompt(body, 'Name the new file…', '', (v) => submitCreateIn(hooks, '.', v, false), undefined, (v) => nameValidator('.')(v)), () => hooks.toast('Could not open input. Try again.', 'error'));
-  btnNewDir.onclick = () => void settlePrompt(() => inlinePrompt(body, 'Name the new folder…', '', (v) => submitCreateIn(hooks, '.', v, true), undefined, (v) => nameValidator('.')(v)), () => hooks.toast('Could not open input. Try again.', 'error'));
+  btnNewFile.onclick = () => void promptCreateIn(hooks, focusedTargetDir(), false);
+  btnNewDir.onclick = () => void promptCreateIn(hooks, focusedTargetDir(), true);
 
   void paint(body, hooks);
   return { repaint: () => paint(body, hooks) };

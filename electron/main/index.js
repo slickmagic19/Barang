@@ -630,6 +630,35 @@ async function runUiSmoke() {
           // NOTE: no Escape dispatch here — the Settings modal is open by now
           // and correctly closes on Escape; stray dispatches kill it.
         } catch (e) { renameFile = 'error: ' + (e.message || e); }
+        // Focus-relative creation (VSCode semantics): focus a dir, hit the
+        // toolbar New File, type a BARE name — it must land inside the dir.
+        let focusCreate = 'skip';
+        try {
+          const dirLbl = [...document.querySelectorAll('.tree-label')].find((b) => (b.title || '') === '.barang-smoke-ui');
+          if (!dirLbl) { focusCreate = 'no-dirrow'; }
+          else {
+            dirLbl.click();
+            await new Promise((rr) => setTimeout(rr, 600));
+            const nf = document.querySelector('.side-header [title="New file"]');
+            if (!nf) { focusCreate = 'no-button'; }
+            else {
+              nf.click();
+              await new Promise((rr) => setTimeout(rr, 600));
+              const inp = document.querySelector('.tree-prompt-input');
+              if (!inp) { focusCreate = 'no-prompt'; }
+              else {
+                inp.focus();
+                inp.value = 'focus-file.txt';
+                inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+                await new Promise((rr) => setTimeout(rr, 2500));
+                try {
+                  await window.barang.fs.read('.barang-smoke-ui/focus-file.txt');
+                  focusCreate = 'ok';
+                } catch (e) { focusCreate = 'missing:' + (e.message || e); }
+              }
+            }
+          }
+        } catch (e) { focusCreate = 'error: ' + (e.message || e); }
         modalAlive('after-rename');
         try { await window.barang.fs.remove('.barang-smoke-ui'); } catch {}
         return JSON.stringify({
@@ -667,7 +696,7 @@ async function runUiSmoke() {
           defaultModel: (() => { const s = q('.settings-overlay select.settings-select'); return s ? s.value : null; })(),
           ctxMenu, ctxItems, ctxClosed,
           diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, renamePlaced, openedAtOnce,
-          modalTrail: modalTrail.join(','), hotSwitch, switchMs,
+          modalTrail: modalTrail.join(','), hotSwitch, switchMs, focusCreate,
           aboutVer: (q('.about-ver')?.textContent || '').trim(),
           reasoningShown: qa('.tool-row summary').filter((s) => (s.textContent || '').trim() === 'Reasoning').length,
           stepRows: qa('.tool-row summary').filter((s) => /^step[\\s-_]*(start|finish)?/i.test((s.textContent || '').trim())).length,
@@ -706,6 +735,7 @@ async function runUiSmoke() {
     (dom.scrollSlim === 'ok' || dom.scrollSlim === 'skip') &&
     (dom.createFile === 'ok' || dom.createFile === 'skip') &&
     (dom.renameFile === 'ok' || dom.renameFile === 'skip') &&
+    (dom.focusCreate === 'ok' || dom.focusCreate === 'skip') &&
     (dom.renameFile === 'skip' || dom.renamePlaced === true) &&
     (typeof dom.hotSwitch === 'string' && (dom.hotSwitch === 'ok' || dom.hotSwitch === 'skip')) &&
     dom.aboutVer.length > 3;
@@ -713,7 +743,7 @@ async function runUiSmoke() {
   console.log(`[smoke-ui] composer: attach=${dom.attachBtn} model=${dom.modelMini} sendIcon=${dom.sendIcon} brandAlign=${dom.brandAlign.s} (${typeof dom.brandAlign.d === 'number' ? dom.brandAlign.d.toFixed(2) : dom.brandAlign.d}px)`);
   console.log(`[smoke-ui] ctx-menu: ${dom.ctxMenu} (${dom.ctxItems} items, esc-closes: ${dom.ctxClosed})`);
   console.log(`[smoke-ui] diff-review: ${dom.diffTab}, collapse: ${dom.collapse}, stat-colors: ${dom.statColors}`);
-  console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, in-place: ${dom.renamePlaced}, about: ${dom.aboutVer}`);
+  console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, in-place: ${dom.renamePlaced}, focus-create: ${dom.focusCreate}, about: ${dom.aboutVer}`);
   console.log(`[smoke-ui] hot-switch: ${dom.hotSwitch} (${dom.switchMs}ms)`);
   console.log(`[smoke-ui] settings-opened-at-once: ${dom.openedAtOnce}, trail: ${dom.modalTrail}`);
   console.log(`[smoke-ui] dot-align: ${dom.dotAlign} (max delta ${typeof dom.dotDelta === 'number' ? dom.dotDelta.toFixed(2) : dom.dotDelta}px)`);
@@ -782,6 +812,9 @@ async function runUiSmoke() {
   }
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
+  // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise
+  // truncate trailing log lines nondeterministically.
+  await new Promise((r) => setTimeout(r, 800));
   app.exit(pass ? 0 : 1);
 }
 

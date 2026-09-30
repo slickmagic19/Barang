@@ -6,8 +6,10 @@ import { readSettings } from '../lib/agent';
 import { createStore } from '../lib/util';
 
 export interface Tab {
-  path: string; // unique tab id (file path, or `diff:<file>` for change review)
+  path: string; // unique tab id (file path, `diff:<file>`, or `untitled:<n>`)
   file?: string; // real workspace file (== path for normal tabs)
+  title?: string; // display label override (untitled tabs)
+  untitled?: boolean; // unsaved scratch tab (VSCode Ctrl+N model)
   dirty: boolean;
   mtime?: number;
   diff?: { before: string; after: string }; // present on session-diff review tabs
@@ -311,6 +313,8 @@ export function closePathAndChildren(prefix: string): boolean {
 export async function saveActive(): Promise<boolean> {
   const { active } = editorStore.get();
   if (!active || !editor) return false;
+  const tab = editorStore.get().tabs.find((t) => t.path === active);
+  if (tab?.untitled) return saveUntitledAs(tab);
   const model = models.get(active);
   if (!model) return false;
   try {
@@ -327,8 +331,69 @@ export async function saveActive(): Promise<boolean> {
   }
 }
 
+/** Untitled Save-As: native dialog, then adopt the path (or close + note
+ *  when saved outside the project, where the workspace cannot track it). */
+async function saveUntitledAs(tab: Tab): Promise<boolean> {
+  const model = models.get(tab.path);
+  if (!model) return false;
+  let picked: { path: string };
+  try {
+    picked = await awaitSaveDialog();
+  } catch (e) {
+    if (!/cancelled/i.test((e as Error).message)) hooks?.toast((e as Error).message, 'error');
+    return false;
+  }
+  const content = model.getValue();
+  try {
+    const res = await fsApi.writeAbsolute(picked.path, content);
+    dropTabs([tab.path]);
+    if (res.rootRel) {
+      await openFile(res.rootRel);
+      hooks?.toast(`Saved ${res.rootRel}.`, 'info');
+    } else {
+      hooks?.toast(`Saved outside the project: ${res.path}. Open its folder to keep editing it.`, 'info');
+    }
+    return true;
+  } catch (e) {
+    hooks?.toast(`Save failed: ${(e as Error).message}`, 'error');
+    return false;
+  }
+}
+
+async function awaitSaveDialog(): Promise<{ path: string }> {
+  const { barang } = await import('../lib/transport');
+  return barang().app.saveDialog();
+}
+
+let untitledSeq = 0;
+
+/** New untitled scratch tab (VSCode Ctrl+N). No disk footprint until saved. */
+export function openUntitled() {
+  if (!editor || !monaco) return;
+  untitledSeq++;
+  let n = untitledSeq;
+  while (editorStore.get().tabs.some((t) => t.path === `untitled:${n}`)) n++;
+  untitledSeq = n;
+  const path = `untitled:${n}`;
+  const model = monaco.editor.createModel('', 'plaintext', monaco.Uri.parse(`inmemory://barang/${path}`));
+  models.set(path, model);
+  editorStore.set((s) => ({
+    tabs: [...s.tabs, { path, title: `Untitled-${n}`, untitled: true, dirty: false }],
+    active: path,
+  }));
+  showNormal();
+  suppressDirty = true;
+  editor.setModel(model);
+  suppressDirty = false;
+  hooks?.onTabs();
+  editor.focus();
+}
+
 export async function saveAll() {
-  for (const t of editorStore.get().tabs.filter((t) => t.dirty)) {
+  const tabs = editorStore.get().tabs.filter((t) => t.dirty);
+  const skipped = tabs.filter((t) => t.untitled);
+  for (const t of tabs) {
+    if (t.untitled) continue; // untitled needs its own Save-As dialog (Ctrl+S)
     const m = models.get(t.path);
     if (!m) continue;
     try {
@@ -339,6 +404,7 @@ export async function saveAll() {
       hooks?.toast(`Save failed (${t.path}): ${(e as Error).message}`, 'error');
     }
   }
+  if (skipped.length) hooks?.toast(`${skipped.length} untitled tab(s) skipped — use Ctrl+S for Save As.`, 'info');
   editorStore.set((s) => ({ ...s }));
   hooks?.onTabs();
 }

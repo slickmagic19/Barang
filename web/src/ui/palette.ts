@@ -25,8 +25,9 @@ const COMMANDS = [
 ];
 
 const SHORTCUTS = `Ctrl+P — quick open · Ctrl+Shift+P — commands · Ctrl+Shift+F — search in files
-Enter — send agent message · Shift+Enter — newline · Ctrl+S — save file
-@ — attach file in agent input · Esc — close palette`;
+Enter — send agent message · Shift+Enter — newline · Ctrl+S — save file · Ctrl+Shift+S — save all
+Ctrl+N — new untitled tab · Ctrl+W — close tab · Ctrl+B — explorer · Ctrl+\` — agent panel
+Delete — delete focused file · @ — attach file in agent input · Esc — close palette`;
 
 export function initPalette(hooks: PaletteHooks) {
   const overlay = el('div', { class: 'palette-overlay hidden' });

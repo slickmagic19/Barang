@@ -236,6 +236,7 @@ function registerIpc() {
   ipcMain.handle('fs:mkdir', ok(needRoot((p) => files.mkdir(root, p.path))));
   ipcMain.handle('fs:rename', ok(needRoot((p) => files.renamePath(root, p.from, p.to))));
   ipcMain.handle('fs:remove', ok(needRoot((p) => files.removePath(root, p.path))));
+  ipcMain.handle('fs:write-absolute', ok((p) => files.writeAbsolute(p.path, p.content, root)));
   ipcMain.handle('fs:read-external', ok((p) => files.readExternal(p.path)));
   ipcMain.handle('fs:find', ok(needRoot((p) => files.find(root, p))));
   ipcMain.handle('fs:search', ok(needRoot((p) => files.search(root, p))));
@@ -292,6 +293,18 @@ function registerIpc() {
       } catch { /* skip unreadable picks */ }
     }
     return { ok: true, data: { files: out } };
+  });
+  ipcMain.handle('app:save-dialog', async (_ev, p = {}) => {
+    // Untitled Save-As: native dialog, explicit user consent for the path.
+    const picked = await dialog.showSaveDialog(win ?? undefined, {
+      defaultPath: p.defaultPath || root || undefined,
+      filters: [
+        { name: 'All files', extensions: ['*'] },
+        { name: 'Text', extensions: ['txt', 'md'] },
+      ],
+    });
+    if (picked.canceled || !picked.filePath) return { ok: false, error: 'cancelled' };
+    return { ok: true, data: { path: picked.filePath } };
   });
 }
 
@@ -667,6 +680,51 @@ async function runUiSmoke() {
             }
           }
         } catch (e) { focusCreate = 'error: ' + (e.message || e); }
+        // Untitled tabs (Ctrl+N) + close (Ctrl+W). Skipped if Monaco never booted.
+        let untitled = 'skip';
+        try {
+          if (!document.querySelector('.monaco-editor')) { untitled = 'skip-no-monaco'; }
+          else {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', ctrlKey: true, bubbles: true, cancelable: true }));
+            await new Promise((rr) => setTimeout(rr, 800));
+            const tab = [...document.querySelectorAll('.tabs .tab')].find((b) => (b.textContent || '').includes('Untitled'));
+            if (!tab) { untitled = 'no-tab'; }
+            else {
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true }));
+              await new Promise((rr) => setTimeout(rr, 800));
+              const gone = ![...document.querySelectorAll('.tabs .tab')].some((b) => (b.textContent || '').includes('Untitled'));
+              untitled = gone ? 'ok' : 'not-closed';
+            }
+          }
+        } catch (e) { untitled = 'error: ' + (e.message || e); }
+        // Delete key: stub the native confirm, focus the DIR row itself (clicking
+        // a file would open it in Monaco and steal focus, correctly skipping),
+        // press Delete, expect the whole staging dir gone.
+        let delKey = 'skip';
+        try {
+          await window.barang.fs.write('.barang-smoke-ui/del-me.txt', 'x');
+          const refresher = document.querySelector('.side-header [title="Refresh"]');
+          if (refresher) refresher.click();
+          await new Promise((rr) => setTimeout(rr, 1000));
+          const dirRow = [...document.querySelectorAll('.tree-label')].find((b) => (b.title || '') === '.barang-smoke-ui');
+          if (!dirRow) { delKey = 'no-row'; }
+          else {
+            dirRow.click();
+            await new Promise((rr) => setTimeout(rr, 400));
+            const realConfirm = window.confirm;
+            window.confirm = () => true;
+            try {
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+              await new Promise((rr) => setTimeout(rr, 1500));
+            } finally {
+              window.confirm = realConfirm;
+            }
+            try {
+              await window.barang.fs.read('.barang-smoke-ui/del-me.txt');
+              delKey = 'not-deleted';
+            } catch { delKey = 'ok'; }
+          }
+        } catch (e) { delKey = 'error: ' + (e.message || e); }
         modalAlive('after-rename');
         try { await window.barang.fs.remove('.barang-smoke-ui'); } catch {}
         return JSON.stringify({
@@ -704,7 +762,7 @@ async function runUiSmoke() {
           defaultModel: (() => { const s = q('.settings-overlay select.settings-select'); return s ? s.value : null; })(),
           ctxMenu, ctxItems, ctxClosed,
           diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, renamePlaced, openedAtOnce,
-          modalTrail: modalTrail.join(','), hotSwitch, switchMs, focusCreate,
+          modalTrail: modalTrail.join(','), hotSwitch, switchMs, focusCreate, untitled, delKey,
           aboutVer: (q('.about-ver')?.textContent || '').trim(),
           reasoningShown: qa('.tool-row summary').filter((s) => (s.textContent || '').trim() === 'Reasoning').length,
           stepRows: qa('.tool-row summary').filter((s) => /^step[\\s-_]*(start|finish)?/i.test((s.textContent || '').trim())).length,
@@ -744,6 +802,8 @@ async function runUiSmoke() {
     (dom.createFile === 'ok' || dom.createFile === 'skip') &&
     (dom.renameFile === 'ok' || dom.renameFile === 'skip') &&
     (dom.focusCreate === 'ok' || dom.focusCreate === 'skip') &&
+    (dom.untitled === 'ok' || dom.untitled === 'skip' || dom.untitled === 'skip-no-monaco') &&
+    (dom.delKey === 'ok' || dom.delKey === 'skip') &&
     (dom.renameFile === 'skip' || dom.renamePlaced === true) &&
     (typeof dom.hotSwitch === 'string' && (dom.hotSwitch === 'ok' || dom.hotSwitch === 'skip')) &&
     dom.aboutVer.length > 3;
@@ -751,7 +811,7 @@ async function runUiSmoke() {
   console.log(`[smoke-ui] composer: attach=${dom.attachBtn} model=${dom.modelMini} sendIcon=${dom.sendIcon} brandAlign=${dom.brandAlign.s} (${typeof dom.brandAlign.d === 'number' ? dom.brandAlign.d.toFixed(2) : dom.brandAlign.d}px)`);
   console.log(`[smoke-ui] ctx-menu: ${dom.ctxMenu} (${dom.ctxItems} items, esc-closes: ${dom.ctxClosed})`);
   console.log(`[smoke-ui] diff-review: ${dom.diffTab}, collapse: ${dom.collapse}, stat-colors: ${dom.statColors}`);
-  console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, in-place: ${dom.renamePlaced}, focus-create: ${dom.focusCreate}, about: ${dom.aboutVer}`);
+  console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, in-place: ${dom.renamePlaced}, focus-create: ${dom.focusCreate}, untitled: ${dom.untitled}, delkey: ${dom.delKey}, about: ${dom.aboutVer}`);
   console.log(`[smoke-ui] hot-switch: ${dom.hotSwitch} (${dom.switchMs}ms)`);
   console.log(`[smoke-ui] settings-opened-at-once: ${dom.openedAtOnce}, trail: ${dom.modalTrail}`);
   console.log(`[smoke-ui] dot-align: ${dom.dotAlign} (max delta ${typeof dom.dotDelta === 'number' ? dom.dotDelta.toFixed(2) : dom.dotDelta}px)`);

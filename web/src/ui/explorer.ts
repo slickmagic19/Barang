@@ -29,6 +29,19 @@ export function clearFocusedEntry(prefix: string) {
   }
 }
 
+/** Delete the focused entry (Delete/Backspace key). False when inapplicable
+ *  or the user cancels — the shared confirm dialog is the only UI. */
+export function deleteFocusedEntry(): boolean {
+  const hooks = treeCtx?.hooks;
+  if (!treeCtx || !focusedEntry || !hooks) return false;
+  const target = { ...focusedEntry };
+  if (!confirm(`Delete ${target.path}?${target.type === 'dir' ? ' This removes the folder and everything inside it.' : ''}`)) {
+    return false;
+  }
+  hooks.onPathRemoved(target.path);
+  return true;
+}
+
 async function childrenOf(path: string): Promise<FsEntry[]> {
   if (!cache.has(path)) {
     const res = await fsApi.tree(path);
@@ -463,6 +476,15 @@ function inlinePrompt(
   requestAnimationFrame(() => {
     if (document.contains(input) && document.activeElement !== input) focusInput();
   });
+  // Last resort, and a built-in diagnostic: if focus still hasn't arrived
+  // after everything settles, pulse the box so the user clicks into it —
+  // and a screenshot of the pulse proves an environment focus failure.
+  setTimeout(() => {
+    if (document.contains(input) && document.activeElement !== input && !wrap.contains(document.activeElement)) {
+      wrap.classList.add('needs-focus');
+    }
+  }, 350);
+  input.onfocus = () => wrap.classList.remove('needs-focus');
   input.onkeydown = (e) => {
     if (e.key === 'Enter') void submit();
     else if (e.key === 'Escape') cleanup();

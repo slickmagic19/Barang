@@ -20,6 +20,7 @@ const barang = {
     mkdir: (path) => invoke('fs:mkdir', { path }),
     rename: (from, to) => invoke('fs:rename', { from, to }),
     remove: (path) => invoke('fs:remove', { path }),
+    writeAbsolute: (path, content) => invoke('fs:write-absolute', { path, content }),
     readExternal: (path) => invoke('fs:read-external', { path }),
     find: (query, limit = 50) => invoke('fs:find', { query, limit }),
     search: (q, path = '', limit = 50) => invoke('fs:search', { q, path, limit }),
@@ -63,6 +64,7 @@ const barang = {
     setRestore: (restore) => invoke('app:set-restore', { restore }),
     checkUpdates: () => invoke('app:check-updates'),
     pickFiles: () => invoke('app:pick-files'),
+    saveDialog: (defaultPath) => invoke('app:save-dialog', { defaultPath }),
     /** Menu + root-change events. cb(kind, payload). */
     onMenu: (cb) => {
       const handlers = {

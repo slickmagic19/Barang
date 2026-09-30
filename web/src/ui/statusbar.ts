@@ -58,7 +58,7 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo) {
     if (dirty) dirtyEl.append(dot('warn'), el('span', {}, `${dirty} unsaved`));
 
     const active = e.tabs.find((t) => t.path === e.active);
-    posEl.textContent = active ? `${active.path.split('/').pop()} · ${posEl.dataset.pos || 'Ln 1, Col 1'}` : 'no file';
+    posEl.textContent = active ? `${active.title ?? active.path.split('/').pop()} · ${posEl.dataset.pos || 'Ln 1, Col 1'}` : 'no file';
   };
   agentStore.subscribe(paint);
   editorStore.subscribe(paint);

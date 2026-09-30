@@ -9,6 +9,7 @@ export interface FsBridge {
   rename(from: string, to: string): Promise<{ ok: boolean; path: string }>;
   remove(path: string): Promise<{ ok: boolean; path: string }>;
   readExternal(path: string): Promise<{ ok: boolean; path: string; name: string; mime: string; size: number; base64: string }>;
+  writeAbsolute(path: string, content: string): Promise<{ ok: boolean; path: string; rootRel: string | null; size: number; mtime: number }>;
   find(query: string, limit?: number): Promise<{ results: Array<{ path: string; score: number }> }>;
   search(q: string, path?: string, limit?: number): Promise<{
     results: Array<{ path: string; line: number; text: string }>;
@@ -37,6 +38,7 @@ export interface BarangBridge {
     setRestore(restore: boolean): Promise<{ restore: boolean }>;
     checkUpdates(): Promise<{ update: boolean; current: string; version?: string; url?: string; error?: string }>;
     pickFiles(): Promise<{ files: Array<{ path: string; name: string; size: number }> }>;
+    saveDialog(defaultPath?: string): Promise<{ path: string }>;
     onMenu(cb: (kind: 'toggle-agent' | 'palette' | 'new-session' | 'root-changed' | 'opencode:ready' | 'opencode:error', payload?: unknown) => void): () => void;
   };
 }

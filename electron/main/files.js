@@ -240,6 +240,28 @@ export async function removePath(root, rel) {
   return { ok: true, path: rel };
 }
 
+/**
+ * Write an absolute path (untitled Save-As only). NOT root-confined by
+ * design: the path always comes from the native save dialog, which is
+ * explicit user consent for that exact location.
+ */
+export async function writeAbsolute(absPath, content, root) {
+  if (!absPath || !path.isAbsolute(absPath)) throw new Error('Need an absolute {path}');
+  if (typeof content !== 'string') throw new Error('Need {content}');
+  await fs.mkdir(path.dirname(absPath), { recursive: true });
+  const tmp = absPath + `.barang-tmp-${process.pid}`;
+  await fs.writeFile(tmp, content, 'utf8');
+  await fs.rename(tmp, absPath);
+  const stat = await fs.stat(absPath);
+  const fwd = absPath.split(path.sep).join('/');
+  let rootRel = null;
+  try {
+    const rel = path.relative(root, absPath).split(path.sep).join('/');
+    if (rel && !rel.startsWith('..')) rootRel = rel;
+  } catch { /* outside project */ }
+  return { ok: true, path: fwd, rootRel, size: stat.size, mtime: stat.mtimeMs };
+}
+
 const IMAGE_MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',

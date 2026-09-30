@@ -13,8 +13,8 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
   const img = el('img', { class: `brand-logo ${cls}`.trim(), src: logoUrl, alt: 'Barang logo', width: String(size), height: String(size) }) as HTMLImageElement;
   return img;
 }
-import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry } from './ui/explorer';
-import { initEditor, openFile, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore } from './ui/editor';
+import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry, deleteFocusedEntry } from './ui/explorer';
+import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initStatusbar } from './ui/statusbar';
@@ -229,6 +229,8 @@ async function boot() {
         <div><kbd>Ctrl+Shift+F</kbd><span>search in files</span></div>
         <div><kbd>Enter</kbd><span>send to agent</span></div>
         <div><kbd>Ctrl+S</kbd><span>save file</span></div>
+        <div><kbd>Ctrl+N</kbd><span>new untitled tab</span></div>
+        <div><kbd>Ctrl+W</kbd><span>close tab</span></div>
         <div><kbd>Ctrl+\`</kbd><span>agent panel</span></div>
       </div>
     </div>`;
@@ -353,7 +355,7 @@ async function boot() {
     editorHost.classList.toggle('hidden', ts.length === 0);
     for (const t of ts) {
       const file = t.file ?? t.path;
-      const name = file.split('/').pop() || file;
+      const name = t.title ?? file.split('/').pop() ?? file;
       const isDiff = !!t.diff;
       const b = el('button', {
         class: `tab${t.path === active ? ' active' : ''}${isDiff ? ' is-diff' : ''}`,
@@ -528,7 +530,12 @@ async function boot() {
     toast((e as Error).message, 'error');
   }
 
-  // --- keybindings -------------------------------------------------------
+  // --- keybindings (VSCode-style) ----------------------------------------
+  // Text-entry targets (inputs, Monaco, palette, menus) keep their keys.
+  const isTypingTarget = () => {
+    const a = document.activeElement as HTMLElement | null;
+    return !!a && !!a.closest('input, textarea, select, [contenteditable="true"], .monaco-editor, .monaco-menu');
+  };
   document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
     if (mod && e.key.toLowerCase() === 'p' && !e.shiftKey) {
@@ -542,9 +549,23 @@ async function boot() {
       palette.isOpen() ? palette.close() : palette.open('# ');
     } else if (mod && e.key.toLowerCase() === 's') {
       e.preventDefault();
-      void saveActive().then((ok) => {
-        if (ok) toast('Saved', 'info');
-      });
+      if (e.shiftKey) {
+        void saveAll();
+      } else {
+        void saveActive().then((ok) => {
+          if (ok) toast('Saved', 'info');
+        });
+      }
+    } else if (mod && e.key.toLowerCase() === 'n' && !e.shiftKey) {
+      e.preventDefault();
+      openUntitled();
+    } else if (mod && e.key.toLowerCase() === 'w' && !e.shiftKey) {
+      e.preventDefault();
+      const active = editorStore.get().active;
+      if (active) closeTab(active);
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && !isTypingTarget()) {
+      e.preventDefault();
+      deleteFocusedEntry();
     } else if (mod && e.key.toLowerCase() === 'b') {
       e.preventDefault();
       toggleSideRail();

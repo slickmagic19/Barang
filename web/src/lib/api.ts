@@ -17,6 +17,7 @@ export const fsApi = {
   rename: (from: string, to: string) => barang().fs.rename(from, to),
   remove: (path: string) => barang().fs.remove(path),
   readExternal: (path: string) => barang().fs.readExternal(path),
+  writeAbsolute: (path: string, content: string) => barang().fs.writeAbsolute(path, content),
   find: (query: string, limit = 50) => barang().fs.find(query, limit),
   search: (q: string, path = '', limit = 50) => barang().fs.search(q, path, limit),
 };

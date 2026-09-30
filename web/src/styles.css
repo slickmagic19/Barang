@@ -185,6 +185,13 @@ button { font-family: inherit; }
 }
 .tree-prompt.has-error .tree-prompt-input { border-color: var(--red); }
 .tree-prompt-error { font-size: 11px; line-height: 1.5; color: var(--red); padding: 0 2px; }
+.tree-prompt.needs-focus .tree-prompt-input {
+  border-color: var(--yellow);
+  animation: prompt-nudge 1s ease-in-out infinite;
+}
+@keyframes prompt-nudge {
+  50% { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+}
 
 /* tabs + editor */
 .tabs {

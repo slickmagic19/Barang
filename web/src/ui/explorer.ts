@@ -74,17 +74,39 @@ function dirOf(p: string): string {
   return i < 0 ? '.' : p.slice(0, i) || '.';
 }
 
+/** Always repaint from the ROOT body: painting a sub-container nests the
+ *  whole tree inside itself (the classic Barang nesting bug). */
+function repaintRoot(): Promise<void> {
+  if (treeCtx) return paint(treeCtx.body, treeCtx.hooks).then(() => undefined);
+  return Promise.resolve();
+}
+
+function findRow(root: HTMLElement, entryPath: string): { row: HTMLElement; label: HTMLButtonElement } | null {
+  try {
+    const label = root.querySelector(`.tree-label[title="${CSS.escape(entryPath)}"]`) as HTMLButtonElement | null;
+    const row = label?.closest('.tree-row') as HTMLElement | null;
+    if (!label || !row) return null;
+    return { row, label };
+  } catch {
+    return null;
+  }
+}
+
+function labelPad(label: HTMLElement): number {
+  const v = parseInt(label.style.paddingLeft || '6', 10);
+  return Number.isFinite(v) ? v : 6;
+}
+
 function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: number, y: number) {
   const isDir = e.type === 'dir';
-  const base = isDir ? e.path : dirOf(e.path);
   showContextMenu(x, y, [
     ...(isDir
       ? []
       : [{ label: 'Open', icon: 'file' as const, run: () => hooks.onOpenFile(e.path) }]),
-    { label: 'New File Here', icon: 'filePlus', run: () => inlinePrompt(host, `${base === '.' ? '' : base + '/'}new-file.ts`, `${base === '.' ? '' : base + '/'}`, submitCreateFile) },
-    { label: 'New Folder Here', icon: 'folderPlus', run: () => inlinePrompt(host, `${base === '.' ? '' : base + '/'}new-folder`, `${base === '.' ? '' : base + '/'}`, submitCreateDir) },
+    { label: 'New File Here', icon: 'filePlus', run: () => void newHere(e, false) },
+    { label: 'New Folder Here', icon: 'folderPlus', run: () => void newHere(e, true) },
     { sep: true },
-    { label: 'Rename', icon: 'prompt', run: () => inlinePrompt(host, `Rename ${e.name} to…`, e.path, (v) => submitRename(e.path, v)) },
+    { label: 'Rename', icon: 'prompt', run: () => renameHere(e) },
     {
       label: `Delete`, icon: 'trash', danger: true,
       run: () => {
@@ -99,12 +121,54 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
     },
   ]);
 
+  // VSCode-style in-place flows: the prompt appears where the action is —
+  // replacing the renamed row, or as the first child of the target folder.
+  async function newHere(entry: FsEntry, dir: boolean) {
+    const dirPath = entry.type === 'dir' ? entry.path : dirOf(entry.path);
+    expanded.add(dirPath);
+    refreshExplorer();
+    const body = treeCtx?.body ?? host;
+    await paint(body, hooks);
+    const found = findRow(body, dirPath);
+    const sub = found?.row.nextElementSibling;
+    const hasSub = !!sub && sub.classList.contains('tree-sub');
+    const pre = dirPath === '.' ? '' : dirPath + '/';
+    const place = hasSub && sub
+      ? { parent: sub as HTMLElement, before: sub.firstChild, padLeft: labelPad(found!.label) + 12 }
+      : undefined; // fallback: top of tree (toolbar behavior)
+    const label = dir ? 'folder' : 'file';
+    await settlePrompt(
+      () => inlinePrompt(body, `${pre}${dir ? 'new-folder' : 'new-file.ts'}`, pre, dir ? submitCreateDir : submitCreateFile, place),
+      () => hooks.toast(`Could not open the new-${label} input. Try again.`, 'error'),
+    );
+  }
+
+  async function renameHere(entry: FsEntry) {
+    const body = treeCtx?.body ?? host;
+    const found = findRow(body, entry.path);
+    const openTop = () => inlinePrompt(body, `Rename ${entry.name} to…`, entry.path, (v) => submitRename(entry.path, v));
+    if (!found) {
+      // Row not currently rendered (filtered/collapsed) — fall back to top.
+      await settlePrompt(openTop, () => hooks.toast('Could not open the rename input. Try again.', 'error'));
+      return;
+    }
+    await settlePrompt(
+      () => inlinePrompt(body, `Rename ${entry.name} to…`, entry.path, (v) => submitRename(entry.path, v), {
+        parent: found.row.parentElement ?? body,
+        before: found.row.nextSibling,
+        hideRow: found.row,
+        padLeft: labelPad(found.label),
+      }),
+      () => hooks.toast('Could not open the rename input. Try again.', 'error'),
+    );
+  }
+
   async function submitCreateFile(v: string) {
     hooks.toast(`Creating ${v}…`, 'info');
     try {
-      const res = await fsApi.write(v, '');
+      await fsApi.write(v, '');
       refreshExplorer();
-      await paint(host, hooks);
+      await repaintRoot();
       hooks.toast(`Created ${v}.`, 'info');
       hooks.onOpenFile(v);
     } catch (e) {
@@ -117,7 +181,7 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
       await fsApi.mkdir(v);
       refreshExplorer();
       expanded.add(v);
-      await paint(host, hooks);
+      await repaintRoot();
       hooks.toast(`Created folder ${v}.`, 'info');
     } catch (e) {
       hooks.toast(`Cannot create folder: ${(e as Error).message}`, 'error');
@@ -138,7 +202,7 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
           }
         }
       }
-      await paint(host, hooks);
+      await repaintRoot();
       hooks.toast(`Renamed to ${res.path}.`, 'info');
       hooks.onPathRenamed(from, res.path);
     } catch (err) {
@@ -231,7 +295,22 @@ async function paint(host: HTMLElement, hooks: ExplorerHooks) {
   host.querySelectorAll(':scope > .skel-row').forEach((node) => node.remove());
 }
 
-function inlinePrompt(host: HTMLElement, placeholder: string, initial: string, onSubmit: (v: string) => void) {
+/** Where the inline prompt lives. Default (omitted) = pinned to the top,
+ *  like the toolbar flows. Rename replaces the row; new-here nests inside. */
+export interface PromptPlace {
+  parent: HTMLElement;
+  before: Node | null;
+  hideRow?: HTMLElement | null;
+  padLeft?: number;
+}
+
+function inlinePrompt(
+  host: HTMLElement,
+  placeholder: string,
+  initial: string,
+  onSubmit: (v: string) => void,
+  place?: PromptPlace,
+): HTMLElement {
   const wrap = el('div', { class: 'tree-prompt' });
   const input = el('input', { class: 'tree-prompt-input', placeholder }) as HTMLInputElement;
   input.value = initial;
@@ -240,7 +319,7 @@ function inlinePrompt(host: HTMLElement, placeholder: string, initial: string, o
   const submit = () => {
     const v = input.value.trim();
     if (!v) return;
-    wrap.remove();
+    cleanup();
     onSubmit(v);
   };
   // mousedown (not click): clicking would blur the input first, and blur
@@ -249,12 +328,31 @@ function inlinePrompt(host: HTMLElement, placeholder: string, initial: string, o
     e.preventDefault();
     submit();
   };
+  const cleanup = () => {
+    // Restore a hidden rename row (no-op if a repaint already replaced it).
+    try {
+      if (place?.hideRow && place.hideRow.style.display === 'none') {
+        place.hideRow.style.display = '';
+      }
+    } catch { /* detached — nothing to restore */ }
+    wrap.remove();
+  };
   wrap.append(input, okBtn);
-  host.prepend(wrap);
+  const target = place ?? { parent: host, before: host.firstChild };
+  if (target.hideRow) target.hideRow.style.display = 'none';
+  target.parent.insertBefore(wrap, target.before);
+  if (target.padLeft !== undefined) wrap.style.paddingLeft = `${target.padLeft}px`;
+  wrap.scrollIntoView({ block: 'nearest' });
   const focusInput = () => {
     input.focus({ preventScroll: true });
     try {
-      input.setSelectionRange(input.value.length, input.value.length);
+      // VSCode-style: select the basename without extension (rename) or park
+      // the caret at the end (fresh path with trailing dir prefix).
+      const baseStart = initial.lastIndexOf('/') + 1;
+      let selEnd = initial.length;
+      const dot = initial.lastIndexOf('.');
+      if (dot > baseStart) selEnd = dot;
+      input.setSelectionRange(baseStart, selEnd);
     } catch { /* non-text input types — ignore */ }
   };
   focusInput();
@@ -265,7 +363,7 @@ function inlinePrompt(host: HTMLElement, placeholder: string, initial: string, o
   });
   input.onkeydown = (e) => {
     if (e.key === 'Enter') submit();
-    else if (e.key === 'Escape') wrap.remove();
+    else if (e.key === 'Escape') cleanup();
   };
   // Dismiss only when focus truly leaves the prompt (tabbing between the
   // input and the confirm button must not destroy it).
@@ -274,9 +372,31 @@ function inlinePrompt(host: HTMLElement, placeholder: string, initial: string, o
     if (to && wrap.contains(to)) return;
     // Give the confirm mousedown (preventDefaulted, no blur) a beat first.
     setTimeout(() => {
-      if (document.activeElement !== input && !wrap.contains(document.activeElement)) wrap.remove();
+      if (document.activeElement !== input && !wrap.contains(document.activeElement)) cleanup();
     }, 150);
   };
+  return wrap;
+}
+
+/**
+ * Open a prompt and verify it survived focus settlement. Opening from a
+ * context menu races Chromium's focus fixup for the removed menu node: the
+ * fresh prompt can lose focus and self-dismiss within milliseconds. On
+ * failure the prompt is re-opened once; if it still won't stick, onFail
+ * fires (visible error — never a silent nothing).
+ */
+async function settlePrompt(open: () => HTMLElement, onFail: () => void): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const wrap = open();
+      // Let focus fixup + one repaint cycle settle, then check attachment.
+      await new Promise((r) => setTimeout(r, 200));
+      if (document.contains(wrap) && wrap.querySelector('.tree-prompt-input')) return;
+    } catch {
+      /* retry once below */
+    }
+  }
+  onFail();
 }
 
 export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, projectRoot: string) {
@@ -320,8 +440,8 @@ export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, project
     e.preventDefault();
     e.stopPropagation();
     showContextMenu(e.clientX, e.clientY, [
-      { label: 'New File', icon: 'filePlus', run: () => inlinePrompt(body, 'new-file.ts (relative to root)', '', createFileAtRoot) },
-      { label: 'New Folder', icon: 'folderPlus', run: () => inlinePrompt(body, 'new-folder (relative to root)', '', createDirAtRoot) },
+      { label: 'New File', icon: 'filePlus', run: () => void settlePrompt(() => inlinePrompt(body, 'new-file.ts (relative to root)', '', createFileAtRoot), () => hooks.toast('Could not open input. Try again.', 'error')) },
+      { label: 'New Folder', icon: 'folderPlus', run: () => void settlePrompt(() => inlinePrompt(body, 'new-folder (relative to root)', '', createDirAtRoot), () => hooks.toast('Could not open input. Try again.', 'error')) },
       { label: 'Refresh', icon: 'refresh', run: () => { refreshExplorer(); void paint(body, hooks); } },
     ]);
   };
@@ -355,8 +475,8 @@ export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, project
     refreshExplorer();
     void paint(body, hooks);
   };
-  btnNewFile.onclick = () => inlinePrompt(body, 'new-file.ts (path relative to root)', '', createFileAtRoot);
-  btnNewDir.onclick = () => inlinePrompt(body, 'new-folder (path relative to root)', '', createDirAtRoot);
+  btnNewFile.onclick = () => void settlePrompt(() => inlinePrompt(body, 'new-file.ts (path relative to root)', '', createFileAtRoot), () => hooks.toast('Could not open input. Try again.', 'error'));
+  btnNewDir.onclick = () => void settlePrompt(() => inlinePrompt(body, 'new-folder (path relative to root)', '', createDirAtRoot), () => hooks.toast('Could not open input. Try again.', 'error'));
 
   void paint(body, hooks);
   return { repaint: () => paint(body, hooks) };

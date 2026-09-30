@@ -589,7 +589,7 @@ async function runUiSmoke() {
         } catch (e) { createFile = 'error: ' + (e.message || e); }
         modalAlive('after-create');
         // Rename-via-context-menu: expand the dir, right-click row, Rename item, retype, Enter.
-        let renameFile = 'skip';
+        let renameFile = 'skip', renamePlaced = false;
         try {
           const labels = [...document.querySelectorAll('.tree-label')];
           const dirRow = labels.find((b) => (b.title || '') === '.barang-smoke-ui');
@@ -607,7 +607,10 @@ async function runUiSmoke() {
             if (!item) { renameFile = 'no-item'; }
             else {
               item.click();
-              await new Promise((rr) => setTimeout(rr, 400));
+              await new Promise((rr) => setTimeout(rr, 600));
+              // VSCode parity: the rename prompt must sit in place (inside
+              // the sub-tree), not pinned to the top of the explorer.
+              renamePlaced = !!q('.tree-sub .tree-prompt');
               const inp = document.querySelector('.tree-prompt-input');
               if (!inp) { renameFile = 'no-prompt'; }
               else {
@@ -661,7 +664,7 @@ async function runUiSmoke() {
           settingsModal: !!q('.settings-overlay .settings-modal select.settings-select'),
           defaultModel: (() => { const s = q('.settings-overlay select.settings-select'); return s ? s.value : null; })(),
           ctxMenu, ctxItems, ctxClosed,
-          diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, openedAtOnce,
+          diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, renamePlaced, openedAtOnce,
           modalTrail: modalTrail.join(','), hotSwitch, switchMs,
           aboutVer: (q('.about-ver')?.textContent || '').trim(),
           reasoningShown: qa('.tool-row summary').filter((s) => (s.textContent || '').trim() === 'Reasoning').length,
@@ -701,13 +704,14 @@ async function runUiSmoke() {
     (dom.scrollSlim === 'ok' || dom.scrollSlim === 'skip') &&
     (dom.createFile === 'ok' || dom.createFile === 'skip') &&
     (dom.renameFile === 'ok' || dom.renameFile === 'skip') &&
+    (dom.renameFile === 'skip' || dom.renamePlaced === true) &&
     (typeof dom.hotSwitch === 'string' && (dom.hotSwitch === 'ok' || dom.hotSwitch === 'skip')) &&
     dom.aboutVer.length > 3;
   console.log(`[smoke-ui] fs-ipc-roundtrip: ${dom.fsRoundtrip}`);
   console.log(`[smoke-ui] composer: attach=${dom.attachBtn} model=${dom.modelMini} sendIcon=${dom.sendIcon} brandAlign=${dom.brandAlign.s} (${typeof dom.brandAlign.d === 'number' ? dom.brandAlign.d.toFixed(2) : dom.brandAlign.d}px)`);
   console.log(`[smoke-ui] ctx-menu: ${dom.ctxMenu} (${dom.ctxItems} items, esc-closes: ${dom.ctxClosed})`);
   console.log(`[smoke-ui] diff-review: ${dom.diffTab}, collapse: ${dom.collapse}, stat-colors: ${dom.statColors}`);
-  console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, about: ${dom.aboutVer}`);
+  console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, in-place: ${dom.renamePlaced}, about: ${dom.aboutVer}`);
   console.log(`[smoke-ui] hot-switch: ${dom.hotSwitch} (${dom.switchMs}ms)`);
   console.log(`[smoke-ui] settings-opened-at-once: ${dom.openedAtOnce}, trail: ${dom.modalTrail}`);
   console.log(`[smoke-ui] dot-align: ${dom.dotAlign} (max delta ${typeof dom.dotDelta === 'number' ? dom.dotDelta.toFixed(2) : dom.dotDelta}px)`);

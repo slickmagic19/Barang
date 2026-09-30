@@ -176,14 +176,14 @@ button { font-family: inherit; }
 .tree-name { overflow: hidden; text-overflow: ellipsis; }
 .tree-sub { border-left: 1px solid var(--border); margin-left: 15px; padding-left: 2px; }
 .tree-err { color: var(--red); padding: 8px 12px; font-size: 12px; }
-.tree-prompt { display: flex; gap: 5px; padding: 6px 8px; align-items: center; }
+.tree-prompt { display: flex; gap: 5px; padding: 2px 8px; align-items: center; min-height: 29px; }
 .tree-prompt-input {
   flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--accent-line);
-  color: var(--text); border-radius: var(--radius-sm); padding: 6px 9px; font-size: 12px; outline: none;
+  color: var(--text); border-radius: var(--radius-sm); padding: 4px 8px; font-size: 12px; outline: none;
 }
 .tree-prompt-ok {
   display: inline-flex; align-items: center; justify-content: center;
-  flex: 0 0 auto; width: 27px; height: 27px;
+  flex: 0 0 auto; width: 24px; height: 24px;
   background: var(--accent-dim); border: 1px solid var(--accent-line); color: var(--text);
   border-radius: var(--radius-sm); cursor: pointer;
 }

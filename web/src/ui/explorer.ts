@@ -163,12 +163,10 @@ export async function promptCreateIn(hooks: ExplorerHooks, dirPath: string, dir:
     ? { parent: sub as HTMLElement, before: sub.firstChild, padLeft: labelPad(found.label) + 12 }
     : undefined; // fallback: top of tree
   const label = dir ? 'folder' : 'file';
-  // The placeholder names the target dir unless it is the root — top-placed
-  // prompts otherwise hide where the file will land.
-  const hint = dirPath === '.' ? `Name the new ${label}…` : `Name the new ${label} in ${dirPath}…`;
-  // VSCode parity: the input holds just the name; position implies location.
+  // VSCode parity: a bare input holding just the name; the focused row +
+  // prompt position imply the location. No placeholder, no buttons.
   await settlePrompt(
-    () => inlinePrompt(body, hint, '', (v) => submitCreateIn(hooks, dirPath, v, dir), place,
+    () => inlinePrompt(body, '', (v) => submitCreateIn(hooks, dirPath, v, dir), place,
       (v) => nameValidator(dirPath)(v)),
     () => hooks.toast(`Could not open the new-${label} input. Try again.`, 'error'),
   );
@@ -262,13 +260,13 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
     if (!found) {
       // Row not currently rendered (filtered/collapsed) — fall back to top.
       await settlePrompt(
-        () => inlinePrompt(body, `Rename to…`, entry.name, submit, undefined, validate),
+        () => inlinePrompt(body, entry.name, submit, undefined, validate),
         () => hooks.toast('Could not open the rename input. Try again.', 'error'),
       );
       return;
     }
     await settlePrompt(
-      () => inlinePrompt(body, `Rename to…`, entry.name, submit, {
+      () => inlinePrompt(body, entry.name, submit, {
         parent: found.row.parentElement ?? body,
         before: found.row.nextSibling,
         hideRow: found.row,
@@ -384,17 +382,18 @@ export interface PromptPlace {
 
 function inlinePrompt(
   host: HTMLElement,
-  placeholder: string,
   initial: string,
   onSubmit: (v: string) => void,
   place?: PromptPlace,
   validate?: (v: string) => Promise<string | null>,
 ) {
   const wrap = el('div', { class: 'tree-prompt' });
-  const input = el('input', { class: 'tree-prompt-input', placeholder, spellcheck: 'false' }) as HTMLInputElement;
+  const input = el('input', {
+    class: 'tree-prompt-input',
+    spellcheck: 'false',
+    'aria-label': 'File or folder name',
+  }) as HTMLInputElement;
   input.value = initial;
-  const okBtn = el('button', { class: 'tree-prompt-ok', title: 'Confirm (Enter)', tabindex: '-1' }) as HTMLButtonElement;
-  okBtn.append(iconEl('check', 13));
   const showError = (msg: string | null) => {
     wrap.classList.toggle('has-error', !!msg);
     let err = wrap.querySelector('.tree-prompt-error');
@@ -427,12 +426,8 @@ function inlinePrompt(
     cleanup();
     onSubmit(v);
   };
-  // mousedown (not click): clicking would blur the input first, and blur
-  // dismisses the prompt — preventDefault keeps focus until submit runs.
-  okBtn.onmousedown = (e) => {
-    e.preventDefault();
-    void submit();
-  };
+  // Enter commits, Escape cancels — the only two gestures, like VSCode.
+  // (No confirm button: it fought the blur-to-dismiss it was meant to help.)
   const cleanup = () => {
     // Restore a hidden rename row (no-op if a repaint already replaced it).
     try {
@@ -443,7 +438,7 @@ function inlinePrompt(
     wrap.remove();
   };
   const row = el('div', { class: 'tree-prompt-row' });
-  row.append(input, okBtn);
+  row.append(input);
   wrap.append(row);
   const target = place ?? { parent: host, before: host.firstChild };
   if (target.hideRow) target.hideRow.style.display = 'none';

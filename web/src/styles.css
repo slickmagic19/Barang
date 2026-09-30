@@ -177,18 +177,14 @@ button { font-family: inherit; }
 .tree-name { overflow: hidden; text-overflow: ellipsis; }
 .tree-sub { border-left: 1px solid var(--border); margin-left: 15px; padding-left: 2px; }
 .tree-err { color: var(--red); padding: 8px 12px; font-size: 12px; }
-.tree-prompt { display: flex; gap: 5px; padding: 2px 8px; align-items: center; min-height: 29px; }
+.tree-prompt { display: flex; flex-direction: column; gap: 3px; padding: 2px 8px; }
+.tree-prompt-row { display: flex; width: 100%; }
 .tree-prompt-input {
   flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--accent-line);
   color: var(--text); border-radius: var(--radius-sm); padding: 4px 8px; font-size: 12px; outline: none;
 }
-.tree-prompt-ok {
-  display: inline-flex; align-items: center; justify-content: center;
-  flex: 0 0 auto; width: 24px; height: 24px;
-  background: var(--accent-dim); border: 1px solid var(--accent-line); color: var(--text);
-  border-radius: var(--radius-sm); cursor: pointer;
-}
-.tree-prompt-ok:hover { border-color: var(--accent); }
+.tree-prompt.has-error .tree-prompt-input { border-color: var(--red); }
+.tree-prompt-error { font-size: 11px; line-height: 1.5; color: var(--red); padding: 0 2px; }
 
 /* tabs + editor */
 .tabs {

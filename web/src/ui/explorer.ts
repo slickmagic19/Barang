@@ -476,6 +476,29 @@ function inlinePrompt(
   requestAnimationFrame(() => {
     if (document.contains(input) && document.activeElement !== input) focusInput();
   });
+  // Belt and suspenders: while focus NEVER entered the input, keep pulling
+  // it in for a few seconds (covers environments where the initial focus
+  // silently fails). Once the user has focused (or dismissed), stop — never
+  // fight deliberate navigation away, which must still dismiss via blur.
+  let everFocused = document.activeElement === input;
+  const focusStart = Date.now();
+  const focusTimer = setInterval(() => {
+    if (!document.contains(input)) {
+      clearInterval(focusTimer);
+      return;
+    }
+    if (!everFocused && document.activeElement !== input && !wrap.contains(document.activeElement)) {
+      focusInput();
+    }
+    if (everFocused || Date.now() - focusStart > 3000) clearInterval(focusTimer);
+  }, 250);
+  // Clicking anywhere on the prompt row focuses the input (covers cases
+  // where the programmatic focus above never landed).
+  wrap.onmousedown = () => {
+    requestAnimationFrame(() => {
+      if (document.contains(input) && document.activeElement !== input) focusInput();
+    });
+  };
   // Last resort, and a built-in diagnostic: if focus still hasn't arrived
   // after everything settles, pulse the box so the user clicks into it —
   // and a screenshot of the pulse proves an environment focus failure.
@@ -484,7 +507,10 @@ function inlinePrompt(
       wrap.classList.add('needs-focus');
     }
   }, 350);
-  input.onfocus = () => wrap.classList.remove('needs-focus');
+  input.onfocus = () => {
+    everFocused = true;
+    wrap.classList.remove('needs-focus');
+  };
   input.onkeydown = (e) => {
     if (e.key === 'Enter') void submit();
     else if (e.key === 'Escape') cleanup();

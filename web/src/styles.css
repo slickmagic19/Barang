@@ -645,6 +645,24 @@ kbd {
 .patch-ctx { color: var(--text-dim); }
 .patch-foot { display: flex; justify-content: flex-end; padding: 10px 18px 14px; }
 
+/* themed confirm dialog (replaces native confirm()) */
+.confirm-overlay {
+  position: fixed; inset: 0; background: #04060acc; backdrop-filter: blur(2px); z-index: 80;
+  display: flex; justify-content: center; align-items: flex-start; padding-top: 22vh;
+  animation: fade .12s ease-out;
+}
+.confirm-modal {
+  width: min(400px, 90vw); background: var(--panel-2); border: 1px solid var(--border-strong);
+  border-radius: 14px; box-shadow: var(--shadow-pop); padding: 16px 18px;
+  animation: pop .14s ease-out;
+}
+.confirm-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.confirm-mark { display: inline-flex; color: var(--yellow); }
+.confirm-mark.is-danger { color: var(--red); }
+.confirm-title { font-size: 13.5px; font-weight: 700; }
+.confirm-message { margin: 0 0 14px; font-size: 12.5px; line-height: 1.6; color: var(--text-dim); word-break: break-word; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
 /* welcome entry points */
 .welcome-actions { display: flex; justify-content: center; margin-bottom: 18px; }
 .welcome-recent { max-width: 460px; margin: 0 auto; text-align: left; }

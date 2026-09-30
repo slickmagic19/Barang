@@ -4,6 +4,7 @@ import { fsApi, type FsEntry } from '../lib/api';
 import { el, copyText } from '../lib/util';
 import { iconEl, fileTone } from './icons';
 import { showContextMenu } from './menu';
+import { confirmDialog } from './dialog';
 
 export interface ExplorerHooks {
   onOpenFile(path: string, opts?: { focus?: boolean }): void;
@@ -30,14 +31,18 @@ export function clearFocusedEntry(prefix: string) {
 }
 
 /** Delete the focused entry (Delete/Backspace key). False when inapplicable
- *  or the user cancels — the shared confirm dialog is the only UI. */
-export function deleteFocusedEntry(): boolean {
+ *  or the user cancels — the themed confirm dialog is the only UI. */
+export async function deleteFocusedEntry(): Promise<boolean> {
   const hooks = treeCtx?.hooks;
   if (!treeCtx || !focusedEntry || !hooks) return false;
   const target = { ...focusedEntry };
-  if (!confirm(`Delete ${target.path}?${target.type === 'dir' ? ' This removes the folder and everything inside it.' : ''}`)) {
-    return false;
-  }
+  const ok = await confirmDialog({
+    title: `Delete ${target.type === 'dir' ? 'folder' : 'file'}?`,
+    message: `${target.path}${target.type === 'dir' ? ' This removes the folder and everything inside it.' : ''}`,
+    confirmLabel: 'Delete',
+    danger: true,
+  });
+  if (!ok) return false;
   hooks.onPathRemoved(target.path);
   return true;
 }
@@ -248,8 +253,15 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
     {
       label: `Delete`, icon: 'trash', danger: true,
       run: () => {
-        if (!confirm(`Delete ${e.path}?${isDir ? ' This removes the folder and everything inside it.' : ''}`)) return;
-        hooks.onPathRemoved(e.path);
+        void (async () => {
+          const ok = await confirmDialog({
+            title: `Delete ${isDir ? 'folder' : 'file'}?`,
+            message: `${e.path}${isDir ? ' This removes the folder and everything inside it.' : ''}`,
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (ok) hooks.onPathRemoved(e.path);
+        })();
       },
     },
     { sep: true },

@@ -186,7 +186,7 @@ async function boot() {
   void refreshUpdateBadge(false);
   const openFolderFlow = async () => {
     try {
-      if (!closeAllTabs()) return; // user kept unsaved work — abort the switch
+      if (!(await closeAllTabs())) return; // user kept unsaved work — abort the switch
       const res = await barang().app.openFolder().catch((e) => {
         if (/cancelled/i.test((e as Error).message)) return null;
         throw e;
@@ -199,7 +199,7 @@ async function boot() {
   };
   const openPathFlow = async (path: string) => {
     try {
-      if (!closeAllTabs()) return;
+      if (!(await closeAllTabs())) return;
       const res = await barang().app.openPath(path);
       await switchRoot(res.root);
     } catch (e) {
@@ -370,7 +370,7 @@ async function boot() {
         else void openFile(t.path);
       };
       b.onauxclick = (e) => {
-        if (e.button === 1) closeTab(t.path);
+        if (e.button === 1) void closeTab(t.path);
       };
       b.oncontextmenu = (e) => {
         e.preventDefault();
@@ -378,10 +378,10 @@ async function boot() {
         const p = t.path;
         const f = t.file ?? t.path;
         showContextMenu(e.clientX, e.clientY, [
-          { label: 'Close', icon: 'x', run: () => closeTab(p) },
-          { label: 'Close Others', icon: 'x', run: () => closeOtherTabs(p) },
+          { label: 'Close', icon: 'x', run: () => void closeTab(p) },
+          { label: 'Close Others', icon: 'x', run: () => void closeOtherTabs(p) },
           { label: 'Close Saved', icon: 'check', run: () => closeSavedTabs() },
-          { label: 'Close All', icon: 'x', run: () => closeAllTabs() },
+          { label: 'Close All', icon: 'x', run: () => void closeAllTabs() },
           { sep: true },
           {
             label: 'Copy Path', icon: 'file',
@@ -394,7 +394,7 @@ async function boot() {
       x.append(iconEl('x', 12));
       x.onclick = (e) => {
         e.stopPropagation();
-        closeTab(t.path);
+        void closeTab(t.path);
       };
       b.append(x);
       tabs.append(b);
@@ -416,21 +416,23 @@ async function boot() {
     onPathRenamed: (from: string, to: string) => {
       // A renamed file moves its tab along (dirty tab asks first);
       // a renamed folder closes orphaned child tabs (one confirm if dirty).
-      if (editorStore.get().tabs.some((t) => t.path === from)) {
-        closeTab(from);
-        closePathAndChildren(`diff:${from}`); // drop its stale review tab too
-        if (!editorStore.get().tabs.some((t) => t.path === from)) void openFile(to);
-      } else {
-        closePathAndChildren(from);
-      }
-      refreshExplorer();
-      explorer.repaint();
+      void (async () => {
+        if (editorStore.get().tabs.some((t) => t.path === from)) {
+          await closeTab(from);
+          await closePathAndChildren(`diff:${from}`); // drop its stale review tab too
+          if (!editorStore.get().tabs.some((t) => t.path === from)) void openFile(to);
+        } else {
+          await closePathAndChildren(from);
+        }
+        refreshExplorer();
+        explorer.repaint();
+      })();
     },
     onPathRemoved: (p: string) => {
       clearFocusedEntry(p);
       void (async () => {
         try {
-          if (!closePathAndChildren(p)) return; // user cancelled (dirty tabs)
+          if (!(await closePathAndChildren(p))) return; // user cancelled (dirty tabs)
           await fsApi.remove(p);
           refreshExplorer();
           explorer.repaint();
@@ -562,7 +564,7 @@ async function boot() {
     } else if (mod && e.key.toLowerCase() === 'w' && !e.shiftKey) {
       e.preventDefault();
       const active = editorStore.get().active;
-      if (active) closeTab(active);
+      if (active) void closeTab(active);
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && !isTypingTarget()) {
       e.preventDefault();
       deleteFocusedEntry();

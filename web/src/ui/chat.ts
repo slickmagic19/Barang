@@ -12,6 +12,7 @@ import { fsApi } from '../lib/api';
 import { barang } from '../lib/transport';
 import { el, md, timeAgo, debounce, roundTripChange } from '../lib/util';
 import { iconEl } from './icons';
+import { confirmDialog } from './dialog';
 import { revealInEditor, openDiffTab } from './editor';
 
 export interface ChatHooks {
@@ -566,11 +567,21 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
 
   btnNew.onclick = () => void createSession().catch((e) => hooks.toast(e.message, 'error'));
   btnDel.onclick = () => {
-    const id = agentStore.get().activeId;
-    if (!id) return;
-    if (!readSettings().confirmDelete || confirm('Delete this session?')) {
+    void (async () => {
+      const id = agentStore.get().activeId;
+      if (!id) return;
+      const sess = agentStore.get().sessions.find((x) => x.id === id);
+      if (readSettings().confirmDelete) {
+        const ok = await confirmDialog({
+          title: 'Delete session?',
+          message: `Delete "${sess?.title || 'Untitled'}" and all its messages? This cannot be undone.`,
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (!ok) return;
+      }
       void deleteSession(id).catch((e) => hooks.toast(e.message, 'error'));
-    }
+    })();
   };
   btnUnrevert.onclick = () => {
     const id = agentStore.get().activeId;

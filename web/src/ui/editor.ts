@@ -4,6 +4,7 @@ import * as monacoLoader from './monaco';
 import { fsApi } from '../lib/api';
 import { readSettings } from '../lib/agent';
 import { createStore } from '../lib/util';
+import { confirmDialog } from './dialog';
 
 export interface Tab {
   path: string; // unique tab id (file path, `diff:<file>`, or `untitled:<n>`)
@@ -230,10 +231,19 @@ export function showDiffTab(path: string) {
   hooks?.onTabs();
 }
 
-export function closeTab(path: string) {
+export async function closeTab(path: string) {
   const s = editorStore.get();
   const tab = s.tabs.find((t) => t.path === path);
-  if (tab?.dirty && !confirm(`Discard unsaved changes to ${path}?`)) return;
+  if (tab?.dirty) {
+    const name = tab.title ?? path.split('/').pop() ?? path;
+    const ok = await confirmDialog({
+      title: 'Discard unsaved changes?',
+      message: `${name} has unsaved changes that will be lost.`,
+      confirmLabel: 'Discard',
+      danger: true,
+    });
+    if (!ok) return;
+  }
   dropTabs([path]);
 }
 
@@ -275,23 +285,28 @@ function dirtyAmong(paths: string[]) {
 }
 
 /** One confirm for a batch (VSCode-style) instead of per-tab prompts. */
-function confirmDiscard(paths: string[]): boolean {
+async function confirmDiscard(paths: string[]): Promise<boolean> {
   const dirty = dirtyAmong(paths);
   if (!dirty.length) return true;
-  const names = dirty.slice(0, 4).map((t) => t.path.split('/').pop()).join(', ') +
+  const names = dirty.slice(0, 4).map((t) => t.title ?? t.path.split('/').pop()).join(', ') +
     (dirty.length > 4 ? `, +${dirty.length - 4} more` : '');
-  return confirm(`Discard unsaved changes in ${dirty.length} file(s)? (${names})`);
+  return confirmDialog({
+    title: 'Discard unsaved changes?',
+    message: `${dirty.length} file(s) have unsaved changes that will be lost: ${names}.`,
+    confirmLabel: 'Discard',
+    danger: true,
+  });
 }
 
-export function closeOtherTabs(keep: string) {
+export async function closeOtherTabs(keep: string) {
   const others = editorStore.get().tabs.map((t) => t.path).filter((p) => p !== keep);
-  if (!confirmDiscard(others)) return;
+  if (!(await confirmDiscard(others))) return;
   dropTabs(others);
 }
 
-export function closeAllTabs(): boolean {
+export async function closeAllTabs(): Promise<boolean> {
   const all = editorStore.get().tabs.map((t) => t.path);
-  if (!confirmDiscard(all)) return false;
+  if (!(await confirmDiscard(all))) return false;
   dropTabs(all);
   return true;
 }
@@ -301,12 +316,12 @@ export function closeSavedTabs() {
 }
 
 /** Close a tab and any tabs under it (deleted/renamed folder). False = user cancelled. */
-export function closePathAndChildren(prefix: string): boolean {
+export async function closePathAndChildren(prefix: string): Promise<boolean> {
   const hit = editorStore.get().tabs
     .map((t) => t.path)
     .filter((p) => p === prefix || p.startsWith(prefix + '/') || p === `diff:${prefix}` || p.startsWith(`diff:${prefix}/`));
   if (!hit.length) return true;
-  if (!confirmDiscard(hit)) return false;
+  if (!(await confirmDiscard(hit))) return false;
   dropTabs(hit);
   return true;
 }

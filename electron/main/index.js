@@ -697,9 +697,9 @@ async function runUiSmoke() {
             }
           }
         } catch (e) { untitled = 'error: ' + (e.message || e); }
-        // Delete key: stub the native confirm, focus the DIR row itself (clicking
-        // a file would open it in Monaco and steal focus, correctly skipping),
-        // press Delete, expect the whole staging dir gone.
+        // Delete key: focus the DIR row itself (clicking a file would open
+        // it in Monaco and steal focus, correctly skipping), press Delete,
+        // confirm in the themed modal (never a native dialog).
         let delKey = 'skip';
         try {
           await window.barang.fs.write('.barang-smoke-ui/del-me.txt', 'x');
@@ -711,18 +711,18 @@ async function runUiSmoke() {
           else {
             dirRow.click();
             await new Promise((rr) => setTimeout(rr, 400));
-            const realConfirm = window.confirm;
-            window.confirm = () => true;
-            try {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+            await new Promise((rr) => setTimeout(rr, 600));
+            const okBtn = [...document.querySelectorAll('.confirm-modal button')].find((b) => (b.textContent || '').trim() === 'Delete');
+            if (!okBtn) { delKey = 'no-confirm'; }
+            else {
+              okBtn.click();
               await new Promise((rr) => setTimeout(rr, 1500));
-            } finally {
-              window.confirm = realConfirm;
+              try {
+                await window.barang.fs.read('.barang-smoke-ui/del-me.txt');
+                delKey = 'not-deleted';
+              } catch { delKey = 'ok'; }
             }
-            try {
-              await window.barang.fs.read('.barang-smoke-ui/del-me.txt');
-              delKey = 'not-deleted';
-            } catch { delKey = 'ok'; }
           }
         } catch (e) { delKey = 'error: ' + (e.message || e); }
         modalAlive('after-rename');

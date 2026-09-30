@@ -6,3 +6,5 @@ vendor/
 *.log
 .DS_Store
 Thumbs.db
+# smoke-test staging dirs (must never commit)
+.barang-smoke*

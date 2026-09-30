@@ -169,6 +169,7 @@ button { font-family: inherit; }
 }
 .tree-label:hover { background: #ffffff08; color: var(--text); }
 .tree-label.active { background: var(--accent-dim); color: var(--text); }
+.tree-label.focused:not(.active) { background: #ffffff06; box-shadow: inset 2px 0 0 var(--text-faint); }
 .tree-label .ic { margin-left: 2px; }
 .tree-label .tw { color: var(--text-faint); display: inline-flex; width: 14px; }
 .tree-label .tw svg { transition: transform .13s; }

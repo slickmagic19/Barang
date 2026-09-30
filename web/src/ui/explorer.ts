@@ -22,6 +22,13 @@ let treeCtx: { body: HTMLElement; hooks: ExplorerHooks } | null = null;
 // (inside a focused folder, beside a focused file), not always the root.
 let focusedEntry: { path: string; type: 'file' | 'dir' } | null = null;
 
+/** Drop focus if it points at a removed path (stale focus mis-targets creates). */
+export function clearFocusedEntry(prefix: string) {
+  if (focusedEntry && (focusedEntry.path === prefix || focusedEntry.path.startsWith(prefix + '/'))) {
+    focusedEntry = null;
+  }
+}
+
 async function childrenOf(path: string): Promise<FsEntry[]> {
   if (!cache.has(path)) {
     const res = await fsApi.tree(path);
@@ -156,9 +163,12 @@ export async function promptCreateIn(hooks: ExplorerHooks, dirPath: string, dir:
     ? { parent: sub as HTMLElement, before: sub.firstChild, padLeft: labelPad(found.label) + 12 }
     : undefined; // fallback: top of tree
   const label = dir ? 'folder' : 'file';
+  // The placeholder names the target dir unless it is the root — top-placed
+  // prompts otherwise hide where the file will land.
+  const hint = dirPath === '.' ? `Name the new ${label}…` : `Name the new ${label} in ${dirPath}…`;
   // VSCode parity: the input holds just the name; position implies location.
   await settlePrompt(
-    () => inlinePrompt(body, `Name the new ${label}…`, '', (v) => submitCreateIn(hooks, dirPath, v, dir), place,
+    () => inlinePrompt(body, hint, '', (v) => submitCreateIn(hooks, dirPath, v, dir), place,
       (v) => nameValidator(dirPath)(v)),
     () => hooks.toast(`Could not open the new-${label} input. Try again.`, 'error'),
   );
@@ -207,6 +217,7 @@ async function submitRename(hooks: ExplorerHooks, entry: FsEntry, name: string) 
     }
     await repaintRoot();
     hooks.toast(`Renamed to ${res.path}.`, 'info');
+    focusedEntry = { path: res.path, type: entry.type };
     hooks.onPathRenamed(from, res.path);
   } catch (err) {
     hooks.toast(`Cannot rename: ${(err as Error).message}`, 'error');
@@ -284,7 +295,7 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
     const isDir = e.type === 'dir';
     const open = isDir && expanded.has(e.path);
     const label = el('button', {
-      class: `tree-label${open ? ' open' : ''}`,
+      class: `tree-label${open ? ' open' : ''}${focusedEntry && focusedEntry.path === e.path ? ' focused' : ''}`,
       title: e.path,
       style: `padding-left:${6 + depth * 12}px`,
     }) as HTMLButtonElement;

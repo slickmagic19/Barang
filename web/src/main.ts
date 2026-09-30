@@ -13,7 +13,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
   const img = el('img', { class: `brand-logo ${cls}`.trim(), src: logoUrl, alt: 'Barang logo', width: String(size), height: String(size) }) as HTMLImageElement;
   return img;
 }
-import { initExplorer, refreshExplorer, revealInTree, resetExplorerState } from './ui/explorer';
+import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry } from './ui/explorer';
 import { initEditor, openFile, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
@@ -425,6 +425,7 @@ async function boot() {
       explorer.repaint();
     },
     onPathRemoved: (p: string) => {
+      clearFocusedEntry(p);
       void (async () => {
         try {
           if (!closePathAndChildren(p)) return; // user cancelled (dirty tabs)

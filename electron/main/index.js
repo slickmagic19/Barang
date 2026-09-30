@@ -567,8 +567,16 @@ async function runUiSmoke() {
         try { await window.barang.fs.remove('.barang-smoke-ui'); } catch {}
         // New-file-via-prompt: the exact UI path users take (button, type, Enter).
         modalAlive('after-fs');
+        // Toolbar create targets the FOCUSED entry (VSCode); anchor focus on
+        // a root file first so the new file lands at root, not in whatever
+        // folder an earlier step expanded.
         let createFile = 'skip';
         try {
+          const rootFile = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));
+          if (rootFile) {
+            rootFile.click();
+            await new Promise((rr) => setTimeout(rr, 400));
+          }
           const btn = document.querySelector('.side-header [title="New file"]');
           if (btn) {
             btn.click();
@@ -754,7 +762,14 @@ async function runUiSmoke() {
   if (dom.emptySamples?.length) console.log('[smoke-ui] empty-samples:', JSON.stringify(dom.emptySamples, null, 1));
   // Trusted-input repro: real click into the new-file prompt + physical
   // Enter via sendInputEvent (synthetic dispatchEvent can mask focus bugs).
+  // Focus is anchored on a root file first, exactly like a user click.
   try {
+    const anchor = await w.webContents.executeJavaScript(`(() => {
+      const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));
+      if (f) f.click();
+      return !!f;
+    })()`);
+    console.log('[smoke-ui] trusted focus-anchor: ' + anchor);
     // Dismiss the settings modal left open by earlier assertions — its
     // overlay would swallow the real clicks below.
     await w.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`);

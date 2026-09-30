@@ -147,14 +147,16 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
   }
 }
 
-async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string, depth: number) {
+async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string, depth: number, my: number): Promise<boolean> {
   let kids: FsEntry[];
   try {
     kids = await childrenOf(path);
   } catch (e) {
+    if (my !== paintSeq) return false;
     host.append(el('div', { class: 'tree-err' }, `Failed to list ${path}: ${(e as Error).message}`));
-    return;
+    return true;
   }
+  if (my !== paintSeq) return false; // superseded mid-fetch — never touch the DOM
   for (const e of kids) {
     const row = el('div', { class: 'tree-row' });
     const isDir = e.type === 'dir';
@@ -190,7 +192,8 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
       if (open) {
         const sub = el('div', { class: 'tree-sub' });
         host.append(sub);
-        await renderTree(sub, hooks, e.path, depth + 1);
+        const ok = await renderTree(sub, hooks, e.path, depth + 1, my);
+        if (!ok) return false;
       }
     } else {
       label.onclick = () => {
@@ -200,14 +203,32 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
       };
     }
   }
+  return true;
+}
+
+let paintSeq = 0;
+
+function renderSkeletons(host: HTMLElement, n = 12) {
+  host.innerHTML = '';
+  for (let i = 0; i < n; i++) {
+    const r = el('div', { class: 'skel-row' });
+    // Stagger widths/indents for a tree-like shimmer.
+    const w = 42 + ((i * 37) % 44);
+    const pad = (i % 4) * 10;
+    r.append(el('span', { class: 'skel-ic' }), el('span', { class: 'skel-bar', style: `width:${w}%;margin-left:${pad}px` }));
+    host.append(r);
+  }
 }
 
 async function paint(host: HTMLElement, hooks: ExplorerHooks) {
   // Never nuke an inline prompt the user is actively typing in — the next
   // refresh trigger will repaint once it is submitted or dismissed.
   if (host.querySelector('.tree-prompt-input:focus')) return;
-  host.innerHTML = '';
-  await renderTree(host, hooks, '.', 0);
+  const my = ++paintSeq;
+  renderSkeletons(host); // instant placeholder — no blank flash while fetching
+  const ok = await renderTree(host, hooks, '.', 0, my);
+  if (!ok) return; // superseded — a newer paint owns the host now
+  host.querySelectorAll(':scope > .skel-row').forEach((node) => node.remove());
 }
 
 function inlinePrompt(host: HTMLElement, placeholder: string, initial: string, onSubmit: (v: string) => void) {

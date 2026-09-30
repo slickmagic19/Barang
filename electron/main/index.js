@@ -636,6 +636,8 @@ async function runUiSmoke() {
           hasAgent: !!q('.agent-panel'),
           gutters: qa('.gutter-v').length,
           panelsVisible: !q('.sidebar.collapsed') && !q('.agent-wrap.collapsed'),
+          welcomeHidden: !!q('.welcome.hidden'),
+          openSplit: !!q('.top-split') && !!q('.top-split .top-split-chev'),
           icons: qa('.ic svg').length,
           selects: qa('.agent-panel select').length,
           updateBtn: !!q('.topbar .update-btn'),
@@ -678,7 +680,7 @@ async function runUiSmoke() {
   console.log('[smoke-ui] console-errors:', errors.length ? errors.slice(0, 10) : 'none');
   const dom = JSON.parse(probe.startsWith('{') ? probe : '{}');
   const pass = dom.brand === 'Barang' && dom.brandImg === true && dom.hasEditor && dom.hasAgent &&
-    dom.gutters === 2 && dom.panelsVisible === true && dom.updateBtn === true && dom.icons >= 8 && dom.selects === 2 && dom.emoji === 0 &&
+    dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.icons >= 8 && dom.selects === 2 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
     dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true &&

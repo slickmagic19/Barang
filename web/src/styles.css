@@ -79,6 +79,10 @@ button { font-family: inherit; }
 }
 .top-btn:hover { color: var(--text); background: #ffffff0a; border-color: var(--border); }
 .top-btn:active { transform: translateY(1px); }
+.top-split { display: inline-flex; align-items: stretch; }
+.top-split .top-btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.top-split-chev { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid var(--border); padding-left: 7px; padding-right: 7px; }
+.top-split-chev:hover { border-left-color: var(--border); }
 .update-btn { position: relative; }
 .update-dot {
   position: absolute; top: 5px; right: 7px; width: 7px; height: 7px;
@@ -579,6 +583,18 @@ kbd {
 .ctx-pad { width: 14px; flex: 0 0 auto; }
 .ctx-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctx-sep { height: 1px; background: var(--border); margin: 5px 8px; }
+
+/* skeleton loading (explorer tree + agent messages) */
+.skel-row { display: flex; align-items: center; height: 29px; padding: 0 12px; }
+.skel-ic { width: 15px; height: 15px; border-radius: 4px; flex: 0 0 auto; }
+.skel-bar { height: 11px; border-radius: 5px; }
+.skel-ic, .skel-bar, .skel-msg {
+  background: linear-gradient(90deg, #ffffff09 25%, #ffffff14 50%, #ffffff09 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.3s ease-in-out infinite;
+}
+.skel-msg { border-radius: 12px; padding: 26px 12px; }
+@keyframes shimmer { to { background-position: -200% 0; } }
 
 /* reveal-in-tree flash */
 .tree-label.flash { background: var(--accent-dim); color: var(--text); animation: treeflash 1.6s ease-out; }

@@ -4,7 +4,7 @@ import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
 import { connectEvents, agentStore, createSession, loadMeta, loadSessions } from './lib/agent';
-import { el } from './lib/util';
+import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
 import { openSettings } from './ui/settings';
 import logoUrl from './assets/barang-logo.png';
@@ -20,7 +20,6 @@ import { initPalette } from './ui/palette';
 import { initStatusbar } from './ui/statusbar';
 import { showContextMenu } from './ui/menu';
 import { fsApi } from './lib/api';
-import { copyText } from './lib/util';
 
 function toast(msg: string, kind: 'info' | 'error' = 'info') {
   const host = document.getElementById('toasts')!;
@@ -107,6 +106,25 @@ async function boot() {
   const topActions = el('div', { class: 'top-actions' });
   const btnFolder = el('button', { class: 'top-btn', title: 'Open folder (Ctrl+O)' }) as HTMLButtonElement;
   btnFolder.append(iconEl('folder', 14), el('span', {}, 'Open'));
+  const btnRecent = el('button', { class: 'top-btn top-split-chev', title: 'Recent projects' }) as HTMLButtonElement;
+  btnRecent.append(iconEl('chevD', 13));
+  btnRecent.onclick = (e) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const recents = appRecents.filter((p) => p !== root);
+    showContextMenu(r.left, r.bottom + 6, [
+      { label: 'Open folder…', icon: 'folder', run: () => openFolderFlow() },
+      { sep: true },
+      ...(recents.length
+        ? recents.slice(0, 8).map((p) => ({
+            label: p,
+            icon: 'history' as const,
+            run: () => openPathFlow(p),
+          }))
+        : [{ label: 'No recent projects', run: () => {} }]),
+    ]);
+  };
+  const openSplit = el('div', { class: 'top-split' });
+  openSplit.append(btnFolder, btnRecent);
   const btnPalette = el('button', { class: 'top-btn', title: 'Command palette (Ctrl+Shift+P)' }) as HTMLButtonElement;
   btnPalette.append(iconEl('prompt', 14), el('span', {}, 'Palette'));
   const btnAgent = el('button', { class: 'top-btn', title: 'Toggle agent panel (Ctrl+`)' }) as HTMLButtonElement;
@@ -117,7 +135,7 @@ async function boot() {
   btnUpdate.append(iconEl('download', 14));
   const updateDot = el('span', { class: 'update-dot hidden', title: 'Update available' });
   btnUpdate.append(updateDot);
-  topActions.append(btnFolder, btnPalette, btnAgent, btnSettings, btnUpdate);
+  topActions.append(openSplit, btnPalette, btnAgent, btnSettings, btnUpdate);
 
   // Update checker (opencode-style): badge when a newer release exists,
   // popover with the download link. Silent when offline.
@@ -329,7 +347,9 @@ async function boot() {
   const paintTabs = () => {
     const { tabs: ts, active } = editorStore.get();
     tabs.innerHTML = '';
-    welcome.classList.toggle('hidden', ts.length > 0);
+    // Welcome (shortcuts + recents) is an empty-state screen only: hidden
+    // once any tab is open OR a project is loaded.
+    welcome.classList.toggle('hidden', ts.length > 0 || root !== '');
     editorHost.classList.toggle('hidden', ts.length === 0);
     for (const t of ts) {
       const file = t.file ?? t.path;
@@ -555,14 +575,17 @@ async function boot() {
     });
   });
 
-  // Keep the "agent changed files" loop tight while busy too.
-  agentStore.subscribe(() => {
+  // Keep the "agent changed files" loop tight while busy too. Debounced:
+  // every message part would otherwise trigger a full tree repaint + stat
+  // roundtrip mid-stream.
+  const syncOnIdle = debounce(() => {
     if (!agentStore.get().busy) {
       void checkExternalChanges();
       refreshExplorer();
       explorer.repaint();
     }
-  });
+  }, 400);
+  agentStore.subscribe(syncOnIdle);
 
   if (opencodeOk) toast(`Connected to opencode ${opencodeVersion ?? ''} — agent online`, 'info');
 }

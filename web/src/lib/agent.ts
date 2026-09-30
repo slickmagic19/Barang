@@ -256,22 +256,26 @@ export async function deleteSession(id: string) {
 export async function refreshStatus(sessionId: string) {
   try {
     const st = await oc.get<Record<string, { type?: string }>>('/session/status');
+    // Switched mid-flight — a stale session's busy flag must not leak in.
+    if (agentStore.get().activeId !== sessionId) return;
     const cur = st?.[sessionId];
-    const busy = !!cur && cur.type !== 'idle' && cur.type !== 'done' && cur.type !== undefined ? true : cur?.type === 'busy';
     agentStore.set({ busy: !!cur && cur.type !== 'idle', status: cur?.type ?? (agentStore.get().busy ? 'busy' : 'idle') });
-    void busy;
   } catch { /* non-fatal */ }
 }
 
 export async function refreshActive() {
   const s = agentStore.get();
   if (!s.activeId) return;
+  const id = s.activeId;
   const [msgs, _st] = await Promise.all([
-    oc.get<ChatMessage[] | { value?: ChatMessage[] }>(`/session/${s.activeId}/message?limit=200`).catch(() => []),
-    refreshStatus(s.activeId),
+    oc.get<ChatMessage[] | { value?: ChatMessage[] }>(`/session/${id}/message?limit=200`).catch(() => []),
+    refreshStatus(id),
   ]);
+  // Switched projects/sessions mid-flight — discard stale results instead of
+  // painting another session's messages into the current view.
+  if (agentStore.get().activeId !== id) return;
   const messages = Array.isArray(msgs) ? msgs : [];
-  agentStore.set({ messages, permissions: extractPermissions(s.activeId, messages), error: null });
+  agentStore.set({ messages, permissions: extractPermissions(id, messages), error: null });
 }
 
 /** Best-effort permission-request extractor across opencode part schemas. */

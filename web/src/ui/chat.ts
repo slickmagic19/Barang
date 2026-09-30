@@ -281,10 +281,19 @@ let prevBusy = false;
 const changesCollapsed = new Set<string>();
 
 function renderMessages(list: HTMLElement, hooks: ChatHooks) {
-  const { messages, activeId } = agentStore.get();
+  const { messages, activeId, busy, status } = agentStore.get();
   const showReasoning = readSettings().showReasoning;
   const showActivity = readSettings().showActivity;
   list.innerHTML = '';
+  if (!messages.length && (busy || status === 'connecting')) {
+    // Loading skeleton (connecting / first response streaming in).
+    for (let i = 0; i < 2; i++) {
+      const sk = el('div', { class: 'msg is-agent' });
+      sk.append(el('div', { class: 'skel-msg' }));
+      list.append(sk);
+    }
+    return;
+  }
   if (!messages.length) {
     const empty = el('div', { class: 'chat-empty' });
     empty.append(

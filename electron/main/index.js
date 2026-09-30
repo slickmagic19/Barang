@@ -784,7 +784,7 @@ async function runUiSmoke() {
   console.log('[smoke-ui] dom:', probe);
   console.log('[smoke-ui] console-errors:', errors.length ? errors.slice(0, 10) : 'none');
   const dom = JSON.parse(probe.startsWith('{') ? probe : '{}');
-  const pass = dom.brand === 'Barang' && dom.brandImg === true && dom.hasEditor && dom.hasAgent &&
+  let pass = dom.brand === 'Barang' && dom.brandImg === true && dom.hasEditor && dom.hasAgent &&
     dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true && dom.icons >= 8 && dom.selects === 2 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
@@ -822,7 +822,21 @@ async function runUiSmoke() {
   if (dom.emptySamples?.length) console.log('[smoke-ui] empty-samples:', JSON.stringify(dom.emptySamples, null, 1));
   // Trusted-input repro: real click into the new-file prompt + physical
   // Enter via sendInputEvent (synthetic dispatchEvent can mask focus bugs).
-  // Focus is anchored on a root file first, exactly like a user click.
+  // Single-click focus contract first: opening a file from the tree must NOT
+  // move focus into Monaco (otherwise tree keys like Delete go nowhere).
+  let singleClickFocus = 'skip';
+  try {
+    singleClickFocus = await w.webContents.executeJavaScript(`(async () => {
+      const frow = [...document.querySelectorAll('.tree-label')].find((b) => (b.title || '').endsWith('.json') && !b.querySelector('.tw'));
+      if (!frow) return 'skip-no-row';
+      frow.click();
+      await new Promise((r) => setTimeout(r, 800));
+      const inMonaco = !!document.querySelector('.monaco-editor')?.contains(document.activeElement);
+      return inMonaco ? 'steals-focus' : 'ok';
+    })()`);
+  } catch (e) { singleClickFocus = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] single-click-focus: ' + singleClickFocus);
+  pass = pass && (singleClickFocus === 'ok' || singleClickFocus === 'skip-no-row');
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

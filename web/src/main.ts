@@ -410,7 +410,7 @@ async function boot() {
   paintTabs();
 
   const explorerHooks = {
-    onOpenFile: (p: string) => void openFile(p),
+    onOpenFile: (p: string, opts?: { focus?: boolean }) => void openFile(p, opts),
     onOpenFolder: () => void openFolderFlow(),
     onCollapseSidebar: () => setSideRail(true),
     onPathRenamed: (from: string, to: string) => {

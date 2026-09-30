@@ -6,7 +6,7 @@ import { iconEl, fileTone } from './icons';
 import { showContextMenu } from './menu';
 
 export interface ExplorerHooks {
-  onOpenFile(path: string): void;
+  onOpenFile(path: string, opts?: { focus?: boolean }): void;
   onPathRenamed(oldPath: string, newPath: string): void;
   onPathRemoved(path: string): void;
   onOpenFolder(): void;
@@ -240,7 +240,7 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
   showContextMenu(x, y, [
     ...(isDir
       ? []
-      : [{ label: 'Open', icon: 'file' as const, run: () => hooks.onOpenFile(e.path) }]),
+      : [{ label: 'Open', icon: 'file' as const, run: () => hooks.onOpenFile(e.path, { focus: true }) }]),
     { label: 'New File Here', icon: 'filePlus', run: () => void newHere(e, false) },
     { label: 'New Folder Here', icon: 'folderPlus', run: () => void newHere(e, true) },
     { sep: true },
@@ -348,7 +348,13 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
         const live = treeCtx?.body ?? host;
         live.querySelectorAll('.tree-label.active').forEach((n) => n.classList.remove('active'));
         label.classList.add('active');
-        hooks.onOpenFile(e.path);
+        // VSCode parity: single click selects + opens WITHOUT stealing
+        // focus, so Delete and other tree keys keep working. Double-click
+        // (or Enter) moves into the editor.
+        hooks.onOpenFile(e.path, { focus: false });
+      };
+      label.ondblclick = () => {
+        hooks.onOpenFile(e.path, { focus: true });
       };
     }
   }

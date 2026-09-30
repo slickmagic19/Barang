@@ -114,8 +114,9 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
   editor.onDidChangeCursorPosition((e) => hooks?.onCursor({ line: e.position.lineNumber, col: e.position.column }));
 }
 
-export async function openFile(path: string) {
+export async function openFile(path: string, opts?: { focus?: boolean }) {
   if (!editor || !monaco) return;
+  const wantFocus = opts?.focus ?? true;
   let tab = editorStore.get().tabs.find((t) => t.path === path);
   if (!tab) {
     tab = { path, file: path, dirty: false };
@@ -149,7 +150,7 @@ export async function openFile(path: string) {
   editor.setModel(model);
   suppressDirty = false;
   hooks?.onTabs();
-  editor.focus();
+  if (wantFocus) editor.focus();
 }
 
 /** Show the normal editor pane (hide the diff pane). */

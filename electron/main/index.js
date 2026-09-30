@@ -156,7 +156,44 @@ async function handleOpenFolder() {
   return openPath(picked.filePaths[0]);
 }
 
-/** Open a project directly (recent list, welcome screen, palette). */
+let updateCache = null; // { at, info } — releases check, 1h TTL
+
+function cmpVersions(a, b) {
+  const pa = String(a || '').split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = String(b || '').split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0) ? 1 : -1;
+  }
+  return 0;
+}
+
+/** Check slickmagic19/Barang releases for a newer tag. Never throws fatally
+ *  (offline/blocked networks just report no update). */
+async function checkForUpdates() {
+  const now = Date.now();
+  if (updateCache && now - updateCache.at < 3600000) return updateCache.info;
+  const info = { update: false, current: app.getVersion() };
+  try {
+    const res = await fetch('https://api.github.com/slickmagic19/Barang/releases/latest', {
+      headers: { 'user-agent': 'barang-updater', accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rel = await res.json();
+    const latest = String(rel.tag_name || '').replace(/^v/, '');
+    info.version = String(rel.tag_name || '');
+    info.url = rel.html_url || '';
+    info.update = !!latest && cmpVersions(latest, info.current) > 0;
+  } catch (e) {
+    info.error = e?.message || String(e);
+  }
+  updateCache = { at: now, info };
+  return info;
+}
+
+/** Open a project directly (recent list, welcome screen, palette).
+ *  Fast path: the UI switches instantly (files are local); the agent server
+ *  reboots in the background and announces readiness separately. */
 async function openPath(dir) {
   let stat;
   try {
@@ -167,8 +204,13 @@ async function openPath(dir) {
   if (!stat.isDirectory()) throw new Error('Not a folder: ' + dir);
   root = dir;
   await touchRecent(root);
-  await restartServer(root, { onLog: (line) => console.log(line.trimEnd()) });
   broadcast('app:root-changed', { root });
+  restartServer(root, { onLog: (line) => console.log(line.trimEnd()) }).then(
+    () => broadcast('opencode:ready', { root }),
+    (e) => {
+      if (!/superseded/.test(e?.message || '')) broadcast('opencode:error', { error: e?.message || String(e) });
+    },
+  );
   return { root };
 }
 
@@ -223,6 +265,13 @@ function registerIpc() {
     restoreProject = p.restore === true;
     await saveState();
     return { ok: true, data: { restore: restoreProject } };
+  });
+  ipcMain.handle('app:check-updates', async () => {
+    try {
+      return { ok: true, data: await checkForUpdates() };
+    } catch (e) {
+      return { ok: false, error: e?.message || String(e) };
+    }
   });
   ipcMain.handle('app:pick-files', async () => {
     // Composer attachments: images (inline) or any file (@mention).
@@ -398,6 +447,26 @@ async function runUiSmoke() {
             dotAlign = dotDelta <= 2 ? 'ok' : 'off';
           }
         } catch { dotAlign = 'error'; }
+        // Hot project switch: openPath must swap the explorer WITHOUT a page
+        // reload (evaluate surviving proves it) and fast (<5s, not ~15s+).
+        let hotSwitch = 'skip', switchMs = -1;
+        try {
+          const tmp = 'C:\\\\Users\\\\Achi\\\\AppData\\\\Local\\\\Temp\\\\opencode';
+          const home = 'C:\\\\Users\\\\Achi\\\\Desktop\\\\Barang';
+          const t0 = performance.now();
+          await window.barang.app.openPath(tmp);
+          for (let i = 0; i < 25; i++) {
+            await new Promise((r) => setTimeout(r, 200));
+            if (document.querySelector('.side-title')?.textContent === 'opencode') {
+              switchMs = Math.round(performance.now() - t0);
+              break;
+            }
+          }
+          await window.barang.app.openPath(home);
+          await new Promise((r) => setTimeout(r, 2000));
+          const back = document.querySelector('.side-title')?.textContent;
+          hotSwitch = switchMs >= 0 && switchMs < 5000 && back === 'Barang' ? 'ok' : 'slow-or-wrong:' + switchMs + '/' + back;
+        } catch (e) { hotSwitch = 'error:' + (e.message || e); }
         // Explorer rail: collapse button rails the sidebar, rail button restores.
         // Monaco scrollbars: slim (<=10px) once any editor has booted.
         let rail = 'skip', scrollSlim = 'skip';
@@ -569,6 +638,7 @@ async function runUiSmoke() {
           panelsVisible: !q('.sidebar.collapsed') && !q('.agent-wrap.collapsed'),
           icons: qa('.ic svg').length,
           selects: qa('.agent-panel select').length,
+          updateBtn: !!q('.topbar .update-btn'),
           attachBtn: !!q('.composer .attach-btn'),
           modelMini: !!q('.composer .model-mini'),
           sendIcon: (() => { const b = q('.composer .btn-primary'); return !!b && !((b.textContent || '').trim()); })(),
@@ -585,7 +655,7 @@ async function runUiSmoke() {
           defaultModel: (() => { const s = q('.settings-overlay select.settings-select'); return s ? s.value : null; })(),
           ctxMenu, ctxItems, ctxClosed,
           diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, openedAtOnce,
-          modalTrail: modalTrail.join(','),
+          modalTrail: modalTrail.join(','), hotSwitch, switchMs,
           aboutVer: (q('.about-ver')?.textContent || '').trim(),
           reasoningShown: qa('.tool-row summary').filter((s) => (s.textContent || '').trim() === 'Reasoning').length,
           stepRows: qa('.tool-row summary').filter((s) => /^step[\\s-_]*(start|finish)?/i.test((s.textContent || '').trim())).length,
@@ -608,7 +678,7 @@ async function runUiSmoke() {
   console.log('[smoke-ui] console-errors:', errors.length ? errors.slice(0, 10) : 'none');
   const dom = JSON.parse(probe.startsWith('{') ? probe : '{}');
   const pass = dom.brand === 'Barang' && dom.brandImg === true && dom.hasEditor && dom.hasAgent &&
-    dom.gutters === 2 && dom.panelsVisible === true && dom.icons >= 8 && dom.selects === 2 && dom.emoji === 0 &&
+    dom.gutters === 2 && dom.panelsVisible === true && dom.updateBtn === true && dom.icons >= 8 && dom.selects === 2 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
     dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true &&
@@ -624,12 +694,14 @@ async function runUiSmoke() {
     (dom.scrollSlim === 'ok' || dom.scrollSlim === 'skip') &&
     (dom.createFile === 'ok' || dom.createFile === 'skip') &&
     (dom.renameFile === 'ok' || dom.renameFile === 'skip') &&
+    (typeof dom.hotSwitch === 'string' && (dom.hotSwitch === 'ok' || dom.hotSwitch === 'skip')) &&
     dom.aboutVer.length > 3;
   console.log(`[smoke-ui] fs-ipc-roundtrip: ${dom.fsRoundtrip}`);
   console.log(`[smoke-ui] composer: attach=${dom.attachBtn} model=${dom.modelMini} sendIcon=${dom.sendIcon} brandAlign=${dom.brandAlign.s} (${typeof dom.brandAlign.d === 'number' ? dom.brandAlign.d.toFixed(2) : dom.brandAlign.d}px)`);
   console.log(`[smoke-ui] ctx-menu: ${dom.ctxMenu} (${dom.ctxItems} items, esc-closes: ${dom.ctxClosed})`);
   console.log(`[smoke-ui] diff-review: ${dom.diffTab}, collapse: ${dom.collapse}, stat-colors: ${dom.statColors}`);
   console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, about: ${dom.aboutVer}`);
+  console.log(`[smoke-ui] hot-switch: ${dom.hotSwitch} (${dom.switchMs}ms)`);
   console.log(`[smoke-ui] settings-opened-at-once: ${dom.openedAtOnce}, trail: ${dom.modalTrail}`);
   console.log(`[smoke-ui] dot-align: ${dom.dotAlign} (max delta ${typeof dom.dotDelta === 'number' ? dom.dotDelta.toFixed(2) : dom.dotDelta}px)`);
   console.log(`[smoke-ui] tree-nesting-violations: ${dom.treeBad}`);

@@ -5,7 +5,7 @@ export type IconName =
   | 'logo' | 'folder' | 'folderOpen' | 'file' | 'filePlus' | 'folderPlus'
   | 'refresh' | 'trash' | 'plus' | 'x' | 'chevL' | 'chevR' | 'chevD'
   | 'send' | 'stop' | 'shield' | 'spark' | 'search' | 'prompt'
-  | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip';
+  | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip' | 'download';
 
 const S = (inner: string) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
@@ -39,6 +39,7 @@ export const ICONS: Record<IconName, string> = {
   dot: `<svg viewBox="0 0 8 8" fill="currentColor"><circle cx="4" cy="4" r="3.2"/></svg>`,
   pencil: S('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
   clip: S('<path d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>'),
+  download: S('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10.5l5 5 5-5"/><path d="M12 15.5V3"/>'),
 };
 
 /** Span wrapper sized for flex layouts (icons align to text baseline). */

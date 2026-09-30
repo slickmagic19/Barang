@@ -35,8 +35,9 @@ export interface BarangBridge {
     openFolder(): Promise<{ root: string }>;
     openPath(path: string): Promise<{ root: string }>;
     setRestore(restore: boolean): Promise<{ restore: boolean }>;
+    checkUpdates(): Promise<{ update: boolean; current: string; version?: string; url?: string; error?: string }>;
     pickFiles(): Promise<{ files: Array<{ path: string; name: string; size: number }> }>;
-    onMenu(cb: (kind: 'toggle-agent' | 'palette' | 'new-session' | 'root-changed', payload?: unknown) => void): () => void;
+    onMenu(cb: (kind: 'toggle-agent' | 'palette' | 'new-session' | 'root-changed' | 'opencode:ready' | 'opencode:error', payload?: unknown) => void): () => void;
   };
 }
 

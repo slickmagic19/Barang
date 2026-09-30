@@ -286,10 +286,11 @@ export function closeOtherTabs(keep: string) {
   dropTabs(others);
 }
 
-export function closeAllTabs() {
+export function closeAllTabs(): boolean {
   const all = editorStore.get().tabs.map((t) => t.path);
-  if (!confirmDiscard(all)) return;
+  if (!confirmDiscard(all)) return false;
   dropTabs(all);
+  return true;
 }
 
 export function closeSavedTabs() {

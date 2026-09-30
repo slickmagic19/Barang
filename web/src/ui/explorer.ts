@@ -31,6 +31,13 @@ export function refreshExplorer() {
   cache.clear();
 }
 
+/** Drop expansion + cache (project switch re-inits from scratch). */
+export function resetExplorerState() {
+  cache.clear();
+  expanded.clear();
+  expanded.add('.');
+}
+
 /** Expand ancestors, repaint, and flash-highlight a path (reveal in tree). */
 export async function revealInTree(path: string) {
   if (!treeCtx) return;

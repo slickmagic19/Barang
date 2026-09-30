@@ -61,6 +61,7 @@ const barang = {
     openFolder: () => invoke('app:open-folder'),
     openPath: (path) => invoke('app:open-path', { path }),
     setRestore: (restore) => invoke('app:set-restore', { restore }),
+    checkUpdates: () => invoke('app:check-updates'),
     pickFiles: () => invoke('app:pick-files'),
     /** Menu + root-change events. cb(kind, payload). */
     onMenu: (cb) => {
@@ -69,6 +70,8 @@ const barang = {
         'menu:palette': (_ev, prefill) => cb('palette', prefill),
         'menu:new-session': () => cb('new-session'),
         'app:root-changed': (_ev, payload) => cb('root-changed', payload),
+        'opencode:ready': (_ev, payload) => cb('opencode:ready', payload),
+        'opencode:error': (_ev, payload) => cb('opencode:error', payload),
       };
       for (const [ch, h] of Object.entries(handlers)) ipcRenderer.on(ch, h);
       return () => {

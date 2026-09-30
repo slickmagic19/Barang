@@ -39,10 +39,18 @@ export async function ocCall(path, { method = 'GET', body } = {}) {
   throw new Error('opencode upstream failed: ' + (lastErr?.message || 'unreachable'));
 }
 
+let bootSeq = 0; // guards rapid project switches: only the latest boot wins
+
 /** (Re)start the server rooted at cwd. Restarts the event pump too. */
 export async function ensureServer(cwd, { port = 0, onLog = () => {} } = {}) {
   if (server) return server;
-  server = await startOpencodeServer({ cwd, port, onLog });
+  const my = ++bootSeq;
+  const s = await startOpencodeServer({ cwd, port, onLog });
+  if (my !== bootSeq) {
+    try { s.stop(); } catch { /* noop */ }
+    throw new Error('superseded');
+  }
+  server = s;
   startPump();
   return server;
 }

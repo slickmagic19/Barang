@@ -3,7 +3,7 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, loadMeta } from './lib/agent';
+import { connectEvents, agentStore, createSession, loadMeta, loadSessions } from './lib/agent';
 import { el } from './lib/util';
 import { iconEl } from './ui/icons';
 import { openSettings } from './ui/settings';
@@ -13,7 +13,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
   const img = el('img', { class: `brand-logo ${cls}`.trim(), src: logoUrl, alt: 'Barang logo', width: String(size), height: String(size) }) as HTMLImageElement;
   return img;
 }
-import { initExplorer, refreshExplorer, revealInTree } from './ui/explorer';
+import { initExplorer, refreshExplorer, revealInTree, resetExplorerState } from './ui/explorer';
 import { initEditor, openFile, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
@@ -113,21 +113,77 @@ async function boot() {
   btnAgent.append(iconEl('spark', 14), el('span', {}, 'Agent'));
   const btnSettings = el('button', { class: 'top-btn settings-btn', title: 'Settings' }) as HTMLButtonElement;
   btnSettings.append(iconEl('gear', 15));
-  topActions.append(btnFolder, btnPalette, btnAgent, btnSettings);
-  const openFolderFlow = () => {
+  const btnUpdate = el('button', { class: 'top-btn update-btn', title: 'Check for updates' }) as HTMLButtonElement;
+  btnUpdate.append(iconEl('download', 14));
+  const updateDot = el('span', { class: 'update-dot hidden', title: 'Update available' });
+  btnUpdate.append(updateDot);
+  topActions.append(btnFolder, btnPalette, btnAgent, btnSettings, btnUpdate);
+
+  // Update checker (opencode-style): badge when a newer release exists,
+  // popover with the download link. Silent when offline.
+  let updateInfo: { update: boolean; current: string; version?: string; url?: string } | null = null;
+  const updatePop = el('div', { class: 'update-pop hidden' });
+  document.body.append(updatePop);
+  const closeUpdatePop = () => updatePop.classList.add('hidden');
+  const openUpdatePop = () => {
+    updatePop.innerHTML = '';
+    const head = el('div', { class: 'update-pop-head' });
+    head.append(el('span', { class: 'update-pop-title' }, 'Update available'));
+    const x = el('button', { class: 'icon-btn', title: 'Close' }) as HTMLButtonElement;
+    x.append(iconEl('x', 13));
+    x.onclick = closeUpdatePop;
+    head.append(x);
+    updatePop.append(head);
+    updatePop.append(el('p', { class: 'update-pop-text' }, `Barang ${updateInfo?.version ?? ''} is available — you have v${updateInfo?.current ?? ''}.`));
+    if (updateInfo?.url) {
+      const link = el('a', { class: 'btn btn-primary btn-sm', href: updateInfo.url, target: '_blank', rel: 'noreferrer' }, 'Download update');
+      updatePop.append(link);
+    }
+    updatePop.classList.remove('hidden');
+  };
+  document.addEventListener('mousedown', (e) => {
+    if (!updatePop.classList.contains('hidden') && !updatePop.contains(e.target as Node) && !(e.target as HTMLElement).closest?.('.update-btn')) {
+      closeUpdatePop();
+    }
+  });
+  const refreshUpdateBadge = async (manual: boolean) => {
     try {
-      void barang().app.openFolder().catch((e) => {
-        if (!/cancelled/i.test((e as Error).message)) toast((e as Error).message, 'error');
+      updateInfo = await barang().app.checkUpdates();
+    } catch (e) {
+      if (manual) toast(`Update check failed: ${(e as Error).message}`, 'error');
+      return;
+    }
+    updateDot.classList.toggle('hidden', !updateInfo.update);
+    btnUpdate.title = updateInfo.update ? `Update available: ${updateInfo.version}` : 'Check for updates';
+    if (manual) {
+      if (updateInfo.update) openUpdatePop();
+      else toast(`You're on the latest version (v${updateInfo.current}).`, 'info');
+    }
+  };
+  btnUpdate.onclick = () => {
+    if (updateInfo?.update) openUpdatePop();
+    else void refreshUpdateBadge(true);
+  };
+  // Boot check in the background — never blocks startup.
+  void refreshUpdateBadge(false);
+  const openFolderFlow = async () => {
+    try {
+      if (!closeAllTabs()) return; // user kept unsaved work — abort the switch
+      const res = await barang().app.openFolder().catch((e) => {
+        if (/cancelled/i.test((e as Error).message)) return null;
+        throw e;
       });
-      // Main restarts `opencode serve` on the new root and sends
-      // 'root-changed' — the UI reloads there. Nothing else to do here.
+      if (!res) return; // dialog cancelled — nothing closed, nothing switched
+      await switchRoot(res.root);
     } catch (e) {
       toast((e as Error).message, 'error');
     }
   };
-  const openPathFlow = (path: string) => {
+  const openPathFlow = async (path: string) => {
     try {
-      void barang().app.openPath(path).catch((e) => toast((e as Error).message, 'error'));
+      if (!closeAllTabs()) return;
+      const res = await barang().app.openPath(path);
+      await switchRoot(res.root);
     } catch (e) {
       toast((e as Error).message, 'error');
     }
@@ -212,7 +268,7 @@ async function boot() {
     window.dispatchEvent(new Event('resize')); // Monaco re-layout
   };
   const toggleSideRail = () => {
-    if (!hasProject) {
+    if (!root) {
       toast('Open a folder to browse files.', 'info');
       return;
     }
@@ -331,11 +387,11 @@ async function boot() {
   });
   paintTabs();
 
-  const explorer = initExplorer(sidebar, {
-    onOpenFile: (p) => void openFile(p),
-    onOpenFolder: openFolderFlow,
+  const explorerHooks = {
+    onOpenFile: (p: string) => void openFile(p),
+    onOpenFolder: () => void openFolderFlow(),
     onCollapseSidebar: () => setSideRail(true),
-    onPathRenamed: (from, to) => {
+    onPathRenamed: (from: string, to: string) => {
       // A renamed file moves its tab along (dirty tab asks first);
       // a renamed folder closes orphaned child tabs (one confirm if dirty).
       if (editorStore.get().tabs.some((t) => t.path === from)) {
@@ -348,7 +404,7 @@ async function boot() {
       refreshExplorer();
       explorer.repaint();
     },
-    onPathRemoved: (p) => {
+    onPathRemoved: (p: string) => {
       void (async () => {
         try {
           if (!closePathAndChildren(p)) return; // user cancelled (dirty tabs)
@@ -362,7 +418,34 @@ async function boot() {
       })();
     },
     toast,
-  }, root);
+  };
+
+  let explorer = initExplorer(sidebar, explorerHooks, root);
+
+  // Hot project switch: no page reload (Monaco stays warm, no bundle
+  // re-parse). Explorer re-inits, tabs reset, sessions reload scoped.
+  let currentRoot = root;
+  async function switchRoot(newRoot: string) {
+    currentRoot = newRoot;
+    root = newRoot;
+    agentStore.set({
+      root: newRoot, sessions: [], activeId: null, messages: [],
+      permissions: [], busy: false, status: 'connecting', error: null,
+    });
+    status.setRoot(newRoot);
+    sidebar.classList.remove('collapsed');
+    agentPanel.classList.remove('collapsed');
+    sidebar.innerHTML = '';
+    sidebar.prepend(railBtn);
+    resetExplorerState();
+    explorer = initExplorer(sidebar, explorerHooks, newRoot);
+    try {
+      const st = await appState();
+      appRecents = st.recent ?? [];
+      paintWelcome(appRecents);
+    } catch { /* recents stay as-is */ }
+    await loadSessions().catch((e) => toast(`Sessions: ${(e as Error).message}`, 'error'));
+  }
 
   initChat(agentPanel, { toast });
   connectEvents();
@@ -370,7 +453,7 @@ async function boot() {
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
 
   const toggleAgent = () => {
-    if (!hasProject) {
+    if (!root) {
       toast('Open a folder to use the agent panel.', 'info');
       return;
     }
@@ -396,11 +479,29 @@ async function boot() {
   btnAgent.onclick = toggleAgent;
 
   // Native events from main (no app menu: topbar owns these actions).
-  // Only 'root-changed' still arrives — Open Folder restarts the agent
-  // server on the new root, then tells us to reload.
+  // root-changed arrives for externally-triggered switches; our own flows
+  // hot-switch directly. opencode:ready/error track the background server.
   try {
-    barang().app.onMenu((kind) => {
-      if (kind === 'root-changed') location.reload();
+    barang().app.onMenu((kind, payload) => {
+      if (kind === 'root-changed') {
+        const r = (payload as { root?: string } | undefined)?.root;
+        if (r && r !== currentRoot) void switchRoot(r);
+      } else if (kind === 'opencode:ready') {
+        void (async () => {
+          try {
+            const st = await appState();
+            status.setOpencode(st.opencode.running, st.opencode.version ?? st.opencode.cli ?? null);
+            await loadSessions();
+            toast('Agent connected.', 'info');
+          } catch (e) {
+            toast(`Agent state: ${(e as Error).message}`, 'error');
+          }
+        })();
+      } else if (kind === 'opencode:error') {
+        const msg = (payload as { error?: string } | undefined)?.error || 'Agent failed to start';
+        status.setOpencode(false, null);
+        toast(`Agent offline: ${msg}`, 'error');
+      }
     });
   } catch (e) {
     toast((e as Error).message, 'error');

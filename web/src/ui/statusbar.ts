@@ -22,7 +22,8 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo) {
   bar.append(left, right);
 
   const rootEl = el('span', { class: 'status-item', title: info.root || 'No folder open' });
-  rootEl.append(iconEl('folder', 13), el('span', {}, info.root.split(/[\\/]/).pop() || 'No folder open'));
+  const rootName = el('span', {}, info.root.split(/[\\/]/).pop() || 'No folder open');
+  rootEl.append(iconEl('folder', 13), rootName);
   const ocEl = el('span', { class: 'status-item' });
   const sessEl = el('span', { class: 'status-item' });
   const modelEl = el('span', { class: 'status-item' });
@@ -71,6 +72,12 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo) {
     setOpencode(ok: boolean, version: string | null) {
       info.opencodeOk = ok;
       info.opencodeVersion = version;
+      paint();
+    },
+    setRoot(next: string) {
+      info.root = next;
+      rootEl.title = next || 'No folder open';
+      rootName.textContent = next.split(/[\\/]/).pop() || 'No folder open';
       paint();
     },
   };

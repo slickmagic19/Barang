@@ -593,7 +593,13 @@ async function runUiSmoke() {
           headings: qa('.msg-md h1,.msg-md h2,.msg-md h3,.msg-md h4').length,
           toolRows: qa('.tool-row').length,
           emptyRows: qa('.tool-row').filter((d) => { const b = d.querySelector('.tool-body'); return !b || !b.textContent.trim(); }).length,
-          emoji: (document.body.innerText.match(/[\\u{1F300}-\\u{1FAFF}\\u{2600}-\\u{27BF}]/u) || []).length,
+          // Our chrome must be emoji-free; user/agent message CONTENT is
+          // exempt (live data may contain anything).
+          emoji: (() => {
+            const clone = document.body.cloneNode(true);
+            clone.querySelectorAll('.chat-list, .msg').forEach((n) => n.remove());
+            return (clone.innerText.match(/[\\u{1F300}-\\u{1FAFF}\\u{2600}-\\u{27BF}]/u) || []).length;
+          })(),
         });
       })()`,
     )

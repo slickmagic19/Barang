@@ -98,7 +98,7 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
       const res = await fsApi.write(v, '');
       refreshExplorer();
       await paint(host, hooks);
-      hooks.toast(`Created ${res.path}.`, 'info');
+      hooks.toast(`Created ${v}.`, 'info');
       hooks.onOpenFile(v);
     } catch (e) {
       hooks.toast(`Cannot create file: ${(e as Error).message}`, 'error');
@@ -223,13 +223,32 @@ function inlinePrompt(host: HTMLElement, placeholder: string, initial: string, o
   };
   wrap.append(input, okBtn);
   host.prepend(wrap);
-  input.focus();
-  input.setSelectionRange(initial.length, initial.length);
+  const focusInput = () => {
+    input.focus({ preventScroll: true });
+    try {
+      input.setSelectionRange(input.value.length, input.value.length);
+    } catch { /* non-text input types — ignore */ }
+  };
+  focusInput();
+  // Re-assert focus on the next frame: the opening click's mouseup/focus
+  // restoration can otherwise land focus back on the toolbar button.
+  requestAnimationFrame(() => {
+    if (document.contains(input) && document.activeElement !== input) focusInput();
+  });
   input.onkeydown = (e) => {
     if (e.key === 'Enter') submit();
     else if (e.key === 'Escape') wrap.remove();
   };
-  input.onblur = () => wrap.remove();
+  // Dismiss only when focus truly leaves the prompt (tabbing between the
+  // input and the confirm button must not destroy it).
+  input.onblur = (e) => {
+    const to = e.relatedTarget as Node | null;
+    if (to && wrap.contains(to)) return;
+    // Give the confirm mousedown (preventDefaulted, no blur) a beat first.
+    setTimeout(() => {
+      if (document.activeElement !== input && !wrap.contains(document.activeElement)) wrap.remove();
+    }, 150);
+  };
 }
 
 export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, projectRoot: string) {
@@ -285,7 +304,7 @@ export function initExplorer(sidebar: HTMLElement, hooks: ExplorerHooks, project
       const res = await fsApi.write(v, '');
       refreshExplorer();
       await paint(body, hooks);
-      hooks.toast(`Created ${res.path}.`, 'info');
+      hooks.toast(`Created ${v}.`, 'info');
       hooks.onOpenFile(v);
     } catch (e) {
       hooks.toast(`Cannot create file: ${(e as Error).message}`, 'error');

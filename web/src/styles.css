@@ -198,10 +198,11 @@ button { font-family: inherit; }
 .side-view-btn:hover { opacity: 1; color: var(--text); }
 .side-view-btn.active { opacity: 1; color: var(--text); border-bottom-color: var(--accent); }
 .side-view-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Change-count badge on the Source Control tab. */
+/* Change-count badge on the Source Control tab (VSCode activity blue —
+   fixed colors, not theme accents, so the number stays legible). */
 .scm-badge {
-  min-width: 16px; height: 16px; border-radius: 8px; background: var(--accent-strong); color: #fff;
-  font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; padding: 0 4px;
+  min-width: 17px; height: 17px; border-radius: 9px; background: #0078d4; color: #fff;
+  font-size: 10.5px; font-weight: 700; line-height: 17px; text-align: center; padding: 0 4px;
   letter-spacing: 0; text-transform: none;
 }
 .scm-badge.hidden { display: none; }

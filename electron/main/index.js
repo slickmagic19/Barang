@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import * as files from './files.js';
 import { ensureServer, restartServer, stopServer, ocCall, opencodeState, attachPumpHandlers } from './opencodeClient.js';
 import * as term from './terminal.js';
+import * as scm from './git.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // electron/main
 const APP_DIR = path.resolve(here, '..', '..');
@@ -276,6 +277,34 @@ function registerIpc() {
     void shell.openExternal(url);
     return { ok: true };
   }));
+  // --- source control (single channel; op dispatch, project-root cwd) ---
+  const gitOps = {
+    info: (a) => scm.info(gitCwd()),
+    diff: (a) => scm.fileDiff(gitCwd(), String(a.path || '')),
+    stage: (a) => scm.stage(gitCwd(), [].concat(a.paths ?? [])),
+    unstage: (a) => scm.unstage(gitCwd(), [].concat(a.paths ?? [])),
+    discard: (a) => scm.discard(gitCwd(), [].concat(a.paths ?? [])),
+    commit: (a) => scm.commit(gitCwd(), a.message, a.amend === true),
+    branches: (a) => scm.branches(gitCwd()),
+    checkout: (a) => scm.checkout(gitCwd(), String(a.name || '')),
+    'create-branch': (a) => scm.createBranch(gitCwd(), String(a.name || '')),
+    fetch: (a) => scm.fetchAll(gitCwd()),
+    pull: (a) => scm.pull(gitCwd()),
+    push: (a) => scm.push(gitCwd()),
+    sync: (a) => scm.sync(gitCwd()),
+    'stash-list': (a) => scm.stashList(gitCwd()),
+    'stash-push': (a) => scm.stashPush(gitCwd(), a.message),
+    'stash-pop': (a) => scm.stashPop(gitCwd()),
+    'stash-drop': (a) => scm.stashDrop(gitCwd()),
+    log: (a) => scm.log(gitCwd(), a.n),
+    init: (a) => scm.init(gitCwd()),
+  };
+  const gitCwd = () => root || path.join(app.getPath('userData'), 'scratch');
+  ipcMain.handle('git:run', ok(async (p = {}) => {
+    const fn = gitOps[p.op];
+    if (!fn) throw new Error(`Unknown git op: ${p.op}`);
+    return fn(p.args ?? {});
+  }));
 
   ipcMain.handle('oc:call', async (_ev, p = {}) => {
     try {
@@ -414,6 +443,23 @@ async function runMainSmoke() {
     term.kill(t.id);
     if (!out.includes('barang-pty-ping-8675309')) throw new Error(`no echo in PTY output (${out.length} chars)`);
     return `echo ok, shell=${term.shellLabel(t.shell)}`;
+  });
+  await check('git-status', async () => {
+    // Barang's own folder is a git repo — status must resolve against it.
+    const cwd = root || path.join(app.getPath('userData'), 'scratch');
+    const i = await scm.info(cwd);
+    if (!i.gitFound) throw new Error('git binary not found');
+    if (!i.isRepo) {
+      let why = '';
+      try {
+        await scm.branches(cwd);
+      } catch (e) {
+        why = ' branches-err: ' + String(e?.message || e).split('\n')[0].slice(0, 200);
+      }
+      throw new Error('expected a git repo here.' + why);
+    }
+    if (!i.branch) throw new Error('no branch resolved');
+    return `${i.branch} +${(i.staged ?? []).length} ~${(i.changes ?? []).length}`;
   });
   let failed = 0;
   for (const r of results) {
@@ -993,6 +1039,38 @@ async function runUiSmoke() {
   } catch (e) { termProbe = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] terminal: ' + termProbe);
   pass = pass && termProbe === 'ok';
+  // Source control: seed a real worktree change, open SCM from the
+  // statusbar, open its diff tab, then clean up.
+  let scmProbe = 'skip';
+  try {
+    scmProbe = await w.webContents.executeJavaScript(`(async () => {
+      const btn = document.querySelector('.status-git');
+      if (!btn || btn.classList.contains('hidden')) return 'skip-no-git-btn';
+      await window.barang.fs.write('.barang-smoke-scm/probe.txt', 'v1');
+      btn.click();
+      await new Promise((r) => setTimeout(r, 3000));
+      const scm = document.getElementById('view-scm');
+      if (!scm || scm.classList.contains('hidden')) return 'scm-view-did-not-open';
+      const branch = document.querySelector('.scm-branch span:not(.ic)')?.textContent?.trim() ?? '';
+      const rows = document.querySelectorAll('.scm-row').length;
+      const commit = !!document.querySelector('.scm-commit-btn');
+      let diff = 'no-rows';
+      const row = [...document.querySelectorAll('.scm-sec .scm-row')].find((r) => r.querySelector('.git-badge'));
+      if (row) {
+        row.click();
+        await new Promise((r) => setTimeout(r, 2500));
+        const tab = document.querySelector('.tab.is-diff');
+        diff = tab ? 'ok' : 'no-diff-tab';
+        tab?.querySelector('.tab-x')?.click();
+        await new Promise((r) => setTimeout(r, 600));
+      }
+      try { await window.barang.fs.remove('.barang-smoke-scm'); } catch {}
+      document.querySelector('.side-view-btn')?.click();
+      return 'branch=' + branch + ' rows=' + rows + ' commit=' + commit + ' diff=' + diff;
+    })()`);
+  } catch (e) { scmProbe = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] scm: ' + scmProbe);
+  pass = pass && /^branch=\S+ rows=\d+ commit=true diff=ok$/.test(scmProbe);
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

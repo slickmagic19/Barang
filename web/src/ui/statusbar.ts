@@ -1,6 +1,7 @@
 // Bottom status bar: project, opencode link state, session state, cursor.
 import { agentStore } from '../lib/agent';
 import { editorStore } from './editor';
+import type { GitRepoInfo } from './scm';
 import { el } from '../lib/util';
 import { iconEl } from './icons';
 
@@ -16,7 +17,7 @@ function dot(cls: string): HTMLElement {
   return s;
 }
 
-export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void } = {}) {
+export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void; onOpenScm?: () => void } = {}) {
   const left = el('div', { class: 'status-left' });
   const right = el('div', { class: 'status-right' });
   bar.append(left, right);
@@ -24,6 +25,10 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   const rootEl = el('span', { class: 'status-item', title: info.root || 'No folder open' });
   const rootName = el('span', {}, info.root.split(/[\\/]/).pop() || 'No folder open');
   rootEl.append(iconEl('folder', 13), rootName);
+  const gitEl = el('button', { class: 'status-item status-git hidden', title: 'Source control' }) as HTMLButtonElement;
+  const gitLabel = el('span', {}, '');
+  gitEl.append(iconEl('branch', 12), gitLabel);
+  gitEl.onclick = () => hooks.onOpenScm?.();
   const ocEl = el('span', { class: 'status-item' });
   const termEl = el('button', { class: 'status-item status-term', title: 'Toggle terminal (Ctrl+`)' }) as HTMLButtonElement;
   const termLabel = el('span', {}, 'Terminal');
@@ -33,16 +38,27 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   const modelEl = el('span', { class: 'status-item' });
   const dirtyEl = el('span', { class: 'status-item' });
   const posEl = el('span', { class: 'status-item' }, 'Ln 1, Col 1');
-  left.append(rootEl, ocEl);
+  left.append(rootEl, gitEl, ocEl);
   right.append(termEl, sessEl, modelEl, dirtyEl, posEl);
   let termCount = 0;
   let termOpen = false;
+  let git: GitRepoInfo | null = null;
 
   const paint = () => {
     const a = agentStore.get();
     const e = editorStore.get();
     termLabel.textContent = termCount > 0 ? `Terminal (${termCount})` : 'Terminal';
     termEl.classList.toggle('is-open', termOpen);
+    // Git branch (VSCode left-side indicator): hidden outside repos.
+    gitEl.classList.toggle('hidden', !git);
+    if (git) {
+      const bits = [git.branch];
+      if (git.dirty) bits.push('*');
+      if (git.ahead > 0) bits.push(`↑${git.ahead}`);
+      if (git.behind > 0) bits.push(`↓${git.behind}`);
+      gitLabel.textContent = bits.join(' ');
+      gitEl.title = `Git: ${git.branch}${git.tracking ? ` → ${git.tracking}` : ''} — open source control`;
+    }
     ocEl.innerHTML = '';
     if (info.opencodeOk) {
       ocEl.append(dot('ok'), el('span', {}, `opencode ${info.opencodeVersion ?? ''}`.trim()));
@@ -91,6 +107,10 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
     setTerminal(count: number, open: boolean) {
       termCount = count;
       termOpen = open;
+      paint();
+    },
+    setGit(next: GitRepoInfo | null) {
+      git = next;
       paint();
     },
   };

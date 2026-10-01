@@ -6,7 +6,7 @@ export type IconName =
   | 'refresh' | 'trash' | 'plus' | 'x' | 'chevL' | 'chevR' | 'chevD'
   | 'send' | 'stop' | 'shield' | 'spark' | 'search' | 'prompt'
   | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip' | 'download'
-  | 'splitV' | 'maximize';
+  | 'splitV' | 'maximize' | 'branch' | 'minus' | 'upload';
 
 const S = (inner: string) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
@@ -43,6 +43,9 @@ export const ICONS: Record<IconName, string> = {
   download: S('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10.5l5 5 5-5"/><path d="M12 15.5V3"/>'),
   splitV: S('<rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M12 4v16"/>'),
   maximize: S('<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>'),
+  branch: S('<circle cx="6.5" cy="6" r="2"/><circle cx="6.5" cy="18" r="2"/><circle cx="17.5" cy="8" r="2"/><path d="M6.5 8v8"/><path d="M17.5 10c0 4.5-5.5 3.5-7.5 5.5"/>'),
+  minus: S('<path d="M5 12h14"/>'),
+  upload: S('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8.5l-5-5-5 5"/><path d="M12 3.5V15"/>'),
 };
 
 /** Span wrapper sized for flex layouts (icons align to text baseline). */

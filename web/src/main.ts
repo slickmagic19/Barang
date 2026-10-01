@@ -19,6 +19,7 @@ import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTa
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initTerminal, type TerminalApi } from './ui/terminal';
+import { initScm, decoration, type ScmApi } from './ui/scm';
 import { initStatusbar } from './ui/statusbar';
 import { showContextMenu } from './ui/menu';
 import { fsApi } from './lib/api';
@@ -351,6 +352,7 @@ async function boot() {
 
   const status = initStatusbar(statusbar, { root, opencodeVersion, opencodeOk }, {
     onToggleTerminal: () => termApi.toggle(),
+    onOpenScm: () => setSideView('scm'),
   });
 
   // Integrated terminal (bottom panel). Statusbar toggle lives next to agent-idle.
@@ -455,9 +457,53 @@ async function boot() {
       })();
     },
     toast,
+    gitStatusOf: (p: string) => decoration(p, false),
   };
 
-  let explorer = initExplorer(sidebar, explorerHooks, root);
+  // Sidebar views: Explorer | Source Control (VSCode activity switch).
+  const viewBar = el('div', { class: 'side-viewbar' });
+  const btnViewExplorer = el('button', { class: 'icon-btn side-view-btn active', title: 'Explorer' }) as HTMLButtonElement;
+  btnViewExplorer.append(iconEl('file', 15));
+  const btnViewScm = el('button', { class: 'icon-btn side-view-btn', title: 'Source control' }) as HTMLButtonElement;
+  btnViewScm.append(iconEl('branch', 15));
+  viewBar.append(btnViewExplorer, btnViewScm);
+  const explorerHost = el('div', { class: 'side-view', id: 'view-explorer' });
+  const scmHost = el('div', { class: 'side-view hidden', id: 'view-scm' });
+  type SideView = 'explorer' | 'scm';
+  const setSideView = (v: SideView) => {
+    explorerHost.classList.toggle('hidden', v !== 'explorer');
+    scmHost.classList.toggle('hidden', v !== 'scm');
+    btnViewExplorer.classList.toggle('active', v === 'explorer');
+    btnViewScm.classList.toggle('active', v === 'scm');
+    try {
+      localStorage.setItem('barang:side-view', v);
+    } catch { /* private mode */ }
+    if (v === 'scm') void scmApi.refresh();
+  };
+  btnViewExplorer.onclick = () => setSideView('explorer');
+  btnViewScm.onclick = () => setSideView('scm');
+  const buildSideViews = () => {
+    // Hosts persist across switches (view state lives on them) — clear their
+    // painted content so re-init never stacks duplicate headers/trees.
+    explorerHost.innerHTML = '';
+    sidebar.innerHTML = '';
+    sidebar.append(railBtn, viewBar, explorerHost, scmHost);
+  };
+  buildSideViews();
+
+  let explorer = initExplorer(explorerHost, explorerHooks, root);
+  const scmApi: ScmApi = initScm(scmHost, {
+    toast,
+    revealInExplorer: (p) => void revealInTree(p),
+    refreshExplorer: () => {
+      refreshExplorer();
+      explorer.repaint();
+    },
+    onRepo: (info) => status.setGit(info),
+  });
+  try {
+    if (localStorage.getItem('barang:side-view') === 'scm') setSideView('scm');
+  } catch { /* fresh default */ }
 
   // Hot project switch: no page reload (Monaco stays warm, no bundle
   // re-parse). Explorer re-inits, tabs reset, sessions reload scoped.
@@ -472,10 +518,10 @@ async function boot() {
     status.setRoot(newRoot);
     sidebar.classList.remove('collapsed');
     agentPanel.classList.remove('collapsed');
-    sidebar.innerHTML = '';
-    sidebar.prepend(railBtn);
+    buildSideViews();
     resetExplorerState();
-    explorer = initExplorer(sidebar, explorerHooks, newRoot);
+    explorer = initExplorer(explorerHost, explorerHooks, newRoot);
+    void scmApi.refresh();
     try {
       const st = await appState();
       appRecents = st.recent ?? [];
@@ -621,6 +667,7 @@ async function boot() {
       refreshExplorer();
       explorer.repaint();
     });
+    void scmApi.refresh();
   });
 
   // Keep the "agent changed files" loop tight while busy too. Debounced:

@@ -35,6 +35,7 @@ export interface BarangBridge {
     read(): Promise<{ text: string }>;
     write(text: string): Promise<{ ok: boolean }>;
   };
+  git(op: string, args?: Record<string, unknown>): Promise<any>;
   events: {
     subscribe(cb: (data: string) => void): () => void;
     onConn(cb: (connected: boolean) => void): () => void;

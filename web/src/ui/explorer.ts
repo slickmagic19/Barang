@@ -13,6 +13,8 @@ export interface ExplorerHooks {
   onPathRemoved(path: string): void;
   onOpenFolder(): void;
   onCollapseSidebar(): void;
+  /** SCM worktree status letter for a project-relative path (badge). */
+  gitStatusOf?(path: string): string | null;
   toast(msg: string, kind?: 'info' | 'error'): void;
 }
 
@@ -330,6 +332,11 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
     const glyph = rowIcon(e);
     if (isDir) glyph.classList.add('ft-folder');
     label.append(glyph, el('span', { class: 'tree-name' }, e.name));
+    // SCM worktree badge (VSCode gutter letters): file exact, dir rolled up.
+    if (!isDir) {
+      const st = hooks.gitStatusOf?.(e.path);
+      if (st) label.append(el('span', { class: `git-badge git-${st}`, title: `Git: ${st}` }, st));
+    }
     row.append(label);
     host.append(row);
     label.oncontextmenu = (ev) => {

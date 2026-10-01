@@ -81,6 +81,8 @@ const barang = {
     read: () => invoke('app:clip-read'),
     write: (text) => invoke('app:clip-write', { text }),
   },
+  /** Source control: single channel, op dispatch (info/diff/stage/…/log/init). */
+  git: (op, args = {}) => invoke('git:run', { op, args }),
   app: {
     state: () => ipcRenderer.invoke('app:state'),
     openFolder: () => invoke('app:open-folder'),

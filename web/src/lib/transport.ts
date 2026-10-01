@@ -21,6 +21,20 @@ export interface FsBridge {
 export interface BarangBridge {
   fs: FsBridge;
   oc(path: string, opts?: { method?: string; body?: unknown }): Promise<unknown>;
+  term: {
+    list(): Promise<Array<{ id: string; pid: number | null; shell: string; cwd: string; dead: boolean; exitCode: number | null }>>;
+    defaultShell(): Promise<{ shell: string; label: string }>;
+    create(opts?: { shell?: string; cols?: number; rows?: number }): Promise<{ id: string; pid: number | null; shell: string; cwd: string }>;
+    write(id: string, data: string): Promise<boolean>;
+    resize(id: string, cols: number, rows: number): Promise<boolean>;
+    kill(id: string): Promise<'killed' | 'disposed' | false>;
+    onData(cb: (ev: { id: string; data: string }) => void): () => void;
+    onExit(cb: (ev: { id: string; code: number | null; signal: string | null }) => void): () => void;
+  };
+  clip: {
+    read(): Promise<{ text: string }>;
+    write(text: string): Promise<{ ok: boolean }>;
+  };
   events: {
     subscribe(cb: (data: string) => void): () => void;
     onConn(cb: (connected: boolean) => void): () => void;
@@ -39,6 +53,7 @@ export interface BarangBridge {
     checkUpdates(): Promise<{ update: boolean; current: string; version?: string; url?: string; error?: string }>;
     pickFiles(): Promise<{ files: Array<{ path: string; name: string; size: number }> }>;
     saveDialog(defaultPath?: string): Promise<{ path: string }>;
+    openExternal(url: string): Promise<{ ok: boolean }>;
     onMenu(cb: (kind: 'toggle-agent' | 'palette' | 'new-session' | 'root-changed' | 'opencode:ready' | 'opencode:error', payload?: unknown) => void): () => void;
   };
 }

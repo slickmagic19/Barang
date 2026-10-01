@@ -18,6 +18,7 @@ import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearF
 import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
+import { initTerminal, type TerminalApi } from './ui/terminal';
 import { initStatusbar } from './ui/statusbar';
 import { showContextMenu } from './ui/menu';
 import { fsApi } from './lib/api';
@@ -128,7 +129,7 @@ async function boot() {
   openSplit.append(btnFolder, btnRecent);
   const btnPalette = el('button', { class: 'top-btn', title: 'Command palette (Ctrl+Shift+P)' }) as HTMLButtonElement;
   btnPalette.append(iconEl('prompt', 14), el('span', {}, 'Palette'));
-  const btnAgent = el('button', { class: 'top-btn', title: 'Toggle agent panel (Ctrl+`)' }) as HTMLButtonElement;
+  const btnAgent = el('button', { class: 'top-btn', title: 'Toggle agent panel (Ctrl+J)' }) as HTMLButtonElement;
   btnAgent.append(iconEl('spark', 14), el('span', {}, 'Agent'));
   const btnSettings = el('button', { class: 'top-btn settings-btn', title: 'Settings' }) as HTMLButtonElement;
   btnSettings.append(iconEl('gear', 15));
@@ -232,7 +233,9 @@ async function boot() {
         <div><kbd>Ctrl+S</kbd><span>save file</span></div>
         <div><kbd>Ctrl+N</kbd><span>new untitled tab</span></div>
         <div><kbd>Ctrl+W</kbd><span>close tab</span></div>
-        <div><kbd>Ctrl+\`</kbd><span>agent panel</span></div>
+        <div><kbd>Ctrl+\`</kbd><span>terminal</span></div>
+        <div><kbd>Ctrl+Shift+\`</kbd><span>new terminal</span></div>
+        <div><kbd>Ctrl+J</kbd><span>agent panel</span></div>
       </div>
     </div>`;
   (welcome.querySelector('.welcome-logo') as HTMLElement).append(logoImg(52));
@@ -297,8 +300,9 @@ async function boot() {
   };
   railBtn.onclick = () => setSideRail(false);
   const statusbar = el('div', { class: 'statusbar' });
+  const termPanel = el('div', { id: 'term-panel' });
   const toasts = el('div', { id: 'toasts' });
-  app.append(topbar, main, statusbar, toasts);
+  app.append(topbar, main, termPanel, statusbar, toasts);
 
   // --- desktop backend state ------------------------------------------
   if (!window.barang) {
@@ -345,7 +349,13 @@ async function boot() {
     } catch { /* fresh defaults */ }
   }
 
-  const status = initStatusbar(statusbar, { root, opencodeVersion, opencodeOk });
+  const status = initStatusbar(statusbar, { root, opencodeVersion, opencodeOk }, {
+    onToggleTerminal: () => termApi.toggle(),
+  });
+
+  // Integrated terminal (bottom panel). Statusbar toggle lives next to agent-idle.
+  const termApi: TerminalApi = initTerminal(termPanel, { toast });
+  termApi.onChange(({ count, open }) => status.setTerminal(count, open));
 
   const paintTabs = () => {
     const { tabs: ts, active } = editorStore.get();
@@ -493,6 +503,10 @@ async function boot() {
     newSession: () => void createSession().catch((e) => toast(e.message, 'error')),
     saveAll: () => void saveAll(),
     toggleAgent,
+    toggleTerminalPanel: () => termApi.toggle(),
+    terminalNew: () => termApi.newTerminal(true),
+    terminalClear: () => termApi.clearActive(),
+    terminalKill: () => termApi.killActive(),
     refreshExplorer: () => {
       refreshExplorer();
       explorer.repaint();
@@ -535,13 +549,16 @@ async function boot() {
   }
 
   // --- keybindings (VSCode-style) ----------------------------------------
-  // Text-entry targets (inputs, Monaco, palette, menus) keep their keys.
+  // Text-entry targets (inputs, Monaco, palette, menus, terminal) keep their keys.
   const isTypingTarget = () => {
     const a = document.activeElement as HTMLElement | null;
-    return !!a && !!a.closest('input, textarea, select, [contenteditable="true"], .monaco-editor, .monaco-menu');
+    return !!a && !!a.closest('input, textarea, select, [contenteditable="true"], .monaco-editor, .monaco-menu, .xterm');
   };
   document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
+    // A focused shell owns its keys (VSCode): workbench file ops stay out,
+    // palette + terminal chords still work.
+    const termFocus = termApi.hasFocus();
     if (mod && e.key.toLowerCase() === 'p' && !e.shiftKey) {
       e.preventDefault();
       palette.isOpen() ? palette.close() : palette.open('');
@@ -551,7 +568,7 @@ async function boot() {
     } else if (mod && e.key.toLowerCase() === 'f' && e.shiftKey) {
       e.preventDefault();
       palette.isOpen() ? palette.close() : palette.open('# ');
-    } else if (mod && e.key.toLowerCase() === 's') {
+    } else if (mod && e.key.toLowerCase() === 's' && !termFocus) {
       e.preventDefault();
       if (e.shiftKey) {
         void saveAll();
@@ -560,23 +577,28 @@ async function boot() {
           if (ok) toast('Saved', 'info');
         });
       }
-    } else if (mod && e.key.toLowerCase() === 'n' && !e.shiftKey) {
+    } else if (mod && e.key.toLowerCase() === 'n' && !e.shiftKey && !termFocus) {
       e.preventDefault();
       openUntitled();
-    } else if (mod && e.key.toLowerCase() === 'w' && !e.shiftKey) {
+    } else if (mod && e.key.toLowerCase() === 'w' && !e.shiftKey && !termFocus) {
       e.preventDefault();
       const active = editorStore.get().active;
       if (active) void closeTab(active);
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && !isTypingTarget()) {
       e.preventDefault();
       deleteFocusedEntry();
-    } else if (mod && e.key.toLowerCase() === 'b') {
+    } else if (mod && e.key.toLowerCase() === 'b' && !termFocus) {
       e.preventDefault();
       toggleSideRail();
-    } else if (mod && e.key.toLowerCase() === 'o') {
+    } else if (mod && e.key.toLowerCase() === 'o' && !termFocus) {
       e.preventDefault();
       openFolderFlow();
-    } else if (mod && e.key === '`') {
+    } else if (mod && e.code === 'Backquote') {
+      // VSCode terminal chords: Ctrl+` toggle panel, Ctrl+Shift+` new terminal.
+      e.preventDefault();
+      if (e.shiftKey) termApi.newTerminal(true);
+      else termApi.toggle();
+    } else if (mod && e.key.toLowerCase() === 'j' && !e.shiftKey) {
       e.preventDefault();
       toggleAgent();
     } else if (e.key === 'Escape' && palette.isOpen()) {

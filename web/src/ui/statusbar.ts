@@ -16,7 +16,7 @@ function dot(cls: string): HTMLElement {
   return s;
 }
 
-export function initStatusbar(bar: HTMLElement, info: StatusInfo) {
+export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void } = {}) {
   const left = el('div', { class: 'status-left' });
   const right = el('div', { class: 'status-right' });
   bar.append(left, right);
@@ -25,16 +25,24 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo) {
   const rootName = el('span', {}, info.root.split(/[\\/]/).pop() || 'No folder open');
   rootEl.append(iconEl('folder', 13), rootName);
   const ocEl = el('span', { class: 'status-item' });
+  const termEl = el('button', { class: 'status-item status-term', title: 'Toggle terminal (Ctrl+`)' }) as HTMLButtonElement;
+  const termLabel = el('span', {}, 'Terminal');
+  termEl.append(iconEl('prompt', 12), termLabel);
+  termEl.onclick = () => hooks.onToggleTerminal?.();
   const sessEl = el('span', { class: 'status-item' });
   const modelEl = el('span', { class: 'status-item' });
   const dirtyEl = el('span', { class: 'status-item' });
   const posEl = el('span', { class: 'status-item' }, 'Ln 1, Col 1');
   left.append(rootEl, ocEl);
-  right.append(sessEl, modelEl, dirtyEl, posEl);
+  right.append(termEl, sessEl, modelEl, dirtyEl, posEl);
+  let termCount = 0;
+  let termOpen = false;
 
   const paint = () => {
     const a = agentStore.get();
     const e = editorStore.get();
+    termLabel.textContent = termCount > 0 ? `Terminal (${termCount})` : 'Terminal';
+    termEl.classList.toggle('is-open', termOpen);
     ocEl.innerHTML = '';
     if (info.opencodeOk) {
       ocEl.append(dot('ok'), el('span', {}, `opencode ${info.opencodeVersion ?? ''}`.trim()));
@@ -78,6 +86,11 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo) {
       info.root = next;
       rootEl.title = next || 'No folder open';
       rootName.textContent = next.split(/[\\/]/).pop() || 'No folder open';
+      paint();
+    },
+    setTerminal(count: number, open: boolean) {
+      termCount = count;
+      termOpen = open;
       paint();
     },
   };

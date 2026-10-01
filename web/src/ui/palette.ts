@@ -10,6 +10,10 @@ export interface PaletteHooks {
   newSession(): void;
   saveAll(): void;
   toggleAgent(): void;
+  toggleTerminalPanel(): void;
+  terminalNew(): void;
+  terminalClear(): void;
+  terminalKill(): void;
   refreshExplorer(): void;
   openRecent(path: string): void;
   getRecents(): string[];
@@ -19,6 +23,10 @@ export interface PaletteHooks {
 const COMMANDS = [
   { id: 'session.new', label: 'Agent: New session' },
   { id: 'agent.toggle', label: 'View: Toggle agent panel' },
+  { id: 'terminal.toggle', label: 'Terminal: Toggle panel' },
+  { id: 'terminal.new', label: 'Terminal: New terminal' },
+  { id: 'terminal.clear', label: 'Terminal: Clear' },
+  { id: 'terminal.kill', label: 'Terminal: Kill active' },
   { id: 'file.saveAll', label: 'File: Save all' },
   { id: 'file.openRecent', label: 'File: Open recent…' },
   { id: 'explorer.refresh', label: 'Explorer: Refresh' },
@@ -27,7 +35,8 @@ const COMMANDS = [
 
 const SHORTCUTS = `Ctrl+P — quick open · Ctrl+Shift+P — commands · Ctrl+Shift+F — search in files
 Enter — send agent message · Shift+Enter — newline · Ctrl+S — save file · Ctrl+Shift+S — save all
-Ctrl+N — new untitled tab · Ctrl+W — close tab · Ctrl+B — explorer · Ctrl+\` — agent panel
+Ctrl+N — new untitled tab · Ctrl+W — close tab · Ctrl+B — explorer · Ctrl+J — agent panel
+Ctrl+\` — terminal · Ctrl+Shift+\` — new terminal · Ctrl+C/V — copy/paste in terminal · Ctrl+F — find in terminal
 Delete — delete focused file · @ — attach file in agent input · Esc — close palette`;
 
 export function initPalette(hooks: PaletteHooks) {
@@ -142,6 +151,10 @@ export function initPalette(hooks: PaletteHooks) {
   const runCommand = (id: string) => {
     if (id === 'session.new') hooks.newSession();
     else if (id === 'agent.toggle') hooks.toggleAgent();
+    else if (id === 'terminal.toggle') hooks.toggleTerminalPanel();
+    else if (id === 'terminal.new') hooks.terminalNew();
+    else if (id === 'terminal.clear') hooks.terminalClear();
+    else if (id === 'terminal.kill') hooks.terminalKill();
     else if (id === 'file.saveAll') void hooks.saveAll();
     else if (id === 'file.openRecent') open('~ ');
     else if (id === 'explorer.refresh') hooks.refreshExplorer();

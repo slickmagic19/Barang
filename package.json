@@ -52,5 +52,8 @@
       "output": "release"
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  }
 }

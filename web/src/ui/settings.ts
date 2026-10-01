@@ -11,6 +11,7 @@ import { barang } from '../lib/transport';
 import { el } from '../lib/util';
 import { iconEl } from './icons';
 import { applyEditorPrefs } from './editor';
+import { applyTerminalPrefs } from './terminal';
 import logoUrl from '../assets/barang-logo.png';
 
 export interface SettingsHooks {
@@ -76,6 +77,27 @@ export function openSettings(hooks: SettingsHooks) {
   // --- Sessions ---
   section('Sessions');
   const confirmBox = checkRow('Ask before deleting a session');
+
+  // --- Terminal ---
+  section('Terminal');
+  const shellRow = el('div', { class: 'settings-row' });
+  shellRow.append(el('span', { class: 'settings-row-label' }, 'Shell'));
+  const shellInput = el('input', { class: 'settings-text', placeholder: 'Auto (PowerShell / $SHELL)', title: 'Shell executable path — empty for auto' }) as HTMLInputElement;
+  shellRow.append(shellInput);
+  body.append(shellRow);
+  const termFontRow = el('div', { class: 'settings-row' });
+  termFontRow.append(el('span', { class: 'settings-row-label' }, 'Font size'));
+  const termFontSel = el('select', { class: 'settings-inline-sel', title: 'Terminal font size' }) as HTMLSelectElement;
+  for (const n of [11, 12, 13, 14, 15, 16]) termFontSel.append(el('option', { value: String(n) }, `${n}px`) as HTMLOptionElement);
+  termFontRow.append(termFontSel);
+  body.append(termFontRow);
+  const termScrollRow = el('div', { class: 'settings-row' });
+  termScrollRow.append(el('span', { class: 'settings-row-label' }, 'Scrollback'));
+  const termScrollSel = el('select', { class: 'settings-inline-sel', title: 'Terminal scrollback lines' }) as HTMLSelectElement;
+  for (const n of [1000, 5000, 10000]) termScrollSel.append(el('option', { value: String(n) }, `${n} lines`) as HTMLOptionElement);
+  termScrollRow.append(termScrollSel);
+  body.append(termScrollRow);
+  const termBlinkBox = checkRow('Cursor blink');
 
   // --- Startup ---
   section('Startup');
@@ -170,6 +192,10 @@ export function openSettings(hooks: SettingsHooks) {
     wrapBox.checked = st0.wordWrap;
     confirmBox.checked = st0.confirmDelete;
     fontSel.value = String(st0.fontSize);
+    shellInput.value = st0.termShell;
+    termFontSel.value = String(st0.termFont);
+    termScrollSel.value = String(st0.termScrollback);
+    termBlinkBox.checked = st0.termBlink;
     paintModels();
     paintAgents();
   };
@@ -212,6 +238,22 @@ export function openSettings(hooks: SettingsHooks) {
     applyEditorPrefs();
   };
   confirmBox.onchange = () => commit((s) => { s.confirmDelete = confirmBox.checked; });
+  shellInput.onchange = () => {
+    commit((s) => { s.termShell = shellInput.value.trim().slice(0, 500); });
+    hooks.toast(shellInput.value.trim() ? 'Shell saved — applies to new terminals.' : 'Shell reset to auto.', 'info');
+  };
+  termFontSel.onchange = () => {
+    commit((s) => { s.termFont = parseInt(termFontSel.value, 10) || 12; });
+    applyTerminalPrefs();
+  };
+  termScrollSel.onchange = () => {
+    commit((s) => { s.termScrollback = parseInt(termScrollSel.value, 10) || 1000; });
+    applyTerminalPrefs();
+  };
+  termBlinkBox.onchange = () => {
+    commit((s) => { s.termBlink = termBlinkBox.checked; });
+    applyTerminalPrefs();
+  };
   restoreBox.onchange = () => {
     void barang()
       .app.setRestore(restoreBox.checked)

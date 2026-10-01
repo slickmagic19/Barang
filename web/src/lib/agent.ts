@@ -117,6 +117,10 @@ export interface BarangSettings {
   fontSize: number; // editor font size, default 13
   minimap: boolean; // editor minimap, default false
   wordWrap: boolean; // editor word wrap, default true
+  termShell: string; // terminal shell path, '' = auto (PowerShell/$SHELL)
+  termFont: number; // terminal font size, default 12 (VSCode)
+  termScrollback: number; // terminal scrollback lines, default 1000
+  termBlink: boolean; // terminal cursor blink, default true
 }
 
 const SETTINGS_KEY = 'barang:settings-v1';
@@ -131,6 +135,10 @@ const SETTING_DEFAULTS: BarangSettings = {
   fontSize: 13,
   minimap: false,
   wordWrap: true,
+  termShell: '',
+  termFont: 12,
+  termScrollback: 1000,
+  termBlink: true,
 };
 
 export function readSettings(): BarangSettings {
@@ -147,6 +155,10 @@ export function readSettings(): BarangSettings {
       fontSize: Number.isFinite(p.fontSize) ? Math.max(11, Math.min(20, p.fontSize)) : SETTING_DEFAULTS.fontSize,
       minimap: p.minimap === true,
       wordWrap: p.wordWrap !== false,
+      termShell: typeof p.termShell === 'string' ? p.termShell.slice(0, 500) : '',
+      termFont: Number.isFinite(p.termFont) ? Math.max(10, Math.min(24, p.termFont)) : SETTING_DEFAULTS.termFont,
+      termScrollback: [1000, 5000, 10000].includes(p.termScrollback) ? p.termScrollback : SETTING_DEFAULTS.termScrollback,
+      termBlink: p.termBlink !== false,
       model: p.model?.providerID && p.model?.modelID ? { providerID: p.model.providerID, modelID: p.model.modelID } : null,
       agent: typeof p.agent === 'string' ? p.agent : null,
     };

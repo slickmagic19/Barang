@@ -57,6 +57,30 @@ const barang = {
       return () => ipcRenderer.removeListener('opencode:conn', h);
     },
   },
+  term: {
+    list: () => invoke('term:list'),
+    defaultShell: () => invoke('term:default-shell'),
+    create: (opts = {}) => invoke('term:create', opts),
+    write: (id, data) => invoke('term:write', { id, data }),
+    resize: (id, cols, rows) => invoke('term:resize', { id, cols, rows }),
+    kill: (id) => invoke('term:kill', { id }),
+    /** PTY output listener. cb({ id, data }). Returns unsubscribe. */
+    onData: (cb) => {
+      const h = (_ev, payload) => cb(payload);
+      ipcRenderer.on('term:data', h);
+      return () => ipcRenderer.removeListener('term:data', h);
+    },
+    /** PTY exit listener. cb({ id, code, signal }). Returns unsubscribe. */
+    onExit: (cb) => {
+      const h = (_ev, payload) => cb(payload);
+      ipcRenderer.on('term:exit', h);
+      return () => ipcRenderer.removeListener('term:exit', h);
+    },
+  },
+  clip: {
+    read: () => invoke('app:clip-read'),
+    write: (text) => invoke('app:clip-write', { text }),
+  },
   app: {
     state: () => ipcRenderer.invoke('app:state'),
     openFolder: () => invoke('app:open-folder'),
@@ -65,6 +89,7 @@ const barang = {
     checkUpdates: () => invoke('app:check-updates'),
     pickFiles: () => invoke('app:pick-files'),
     saveDialog: (defaultPath) => invoke('app:save-dialog', { defaultPath }),
+    openExternal: (url) => invoke('app:open-external', { url }),
     /** Menu + root-change events. cb(kind, payload). */
     onMenu: (cb) => {
       const handlers = {

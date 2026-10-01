@@ -474,6 +474,75 @@ kbd {
 .status-item .ok { color: var(--green); } .status-item .bad { color: var(--red); }
 .status-item .warn { color: var(--yellow); } .status-item .run { color: var(--yellow); }
 .status-item.is-warn { color: var(--yellow); font-weight: 650; }
+/* Terminal toggle (button reset + open state). */
+button.status-item { background: none; border: none; font: inherit; color: inherit; cursor: pointer; padding: 0; }
+button.status-item:hover { color: var(--text); }
+.status-term.is-open { color: var(--text); }
+.status-term.is-open .ic { color: var(--accent-strong); }
+
+/* integrated terminal panel (VSCode bottom panel) */
+#term-panel {
+  flex: 0 0 auto; height: 240px; display: flex; flex-direction: column;
+  background: #0a0a0c; border-top: 1px solid var(--border);
+  position: relative; min-height: 0;
+}
+#term-panel.hidden { display: none; }
+#term-panel.maximized { height: 70vh !important; }
+.term-grip {
+  position: absolute; top: -3px; left: 0; right: 0; height: 7px; cursor: ns-resize; z-index: 5;
+}
+.term-grip:hover { background: #ffffff10; }
+.term-head {
+  display: flex; align-items: center; gap: 8px; padding: 3px 8px;
+  border-bottom: 1px solid #ffffff10; flex: 0 0 auto; user-select: none;
+}
+.term-tabs { display: flex; align-items: center; gap: 2px; overflow-x: auto; flex: 1 1 auto; min-width: 0; }
+.term-tab {
+  display: inline-flex; align-items: center; gap: 7px; background: none; border: none;
+  color: var(--text-dim); font-size: 11.5px; padding: 5px 6px 5px 9px; border-radius: 6px;
+  cursor: pointer; white-space: nowrap; border-bottom: 2px solid transparent;
+}
+.term-tab:hover { color: var(--text); background: #ffffff08; }
+.term-tab.active { color: var(--text); background: #ffffff0a; border-bottom-color: var(--accent); }
+.term-tab.is-dead .term-tab-name { text-decoration: line-through; opacity: .65; }
+.term-tab .term-exit {
+  font-size: 10px; color: var(--red); border: 1px solid var(--red);
+  border-radius: 5px; padding: 0 4px; line-height: 1.5;
+}
+.term-tab-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 5px; opacity: 0; color: var(--text-dim);
+}
+.term-tab:hover .term-tab-x, .term-tab.active .term-tab-x { opacity: .85; }
+.term-tab-x:hover { background: #ffffff1a; color: var(--text); }
+.term-tab.is-bell { animation: termbell 1.2s ease-out; }
+@keyframes termbell {
+  0%, 100% { background: transparent; }
+  25% { background: #e5e51026; }
+}
+/* find widget */
+.term-find {
+  display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 7px; padding: 2px 4px;
+}
+.term-find.hidden { display: none; }
+.term-find-input {
+  background: transparent; border: none; outline: none; color: var(--text);
+  font-size: 12px; width: 130px; padding: 3px 6px;
+}
+.term-find-count { font-size: 11px; color: var(--text-faint); min-width: 22px; text-align: right; }
+.term-actions { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.term-body { display: flex; flex: 1 1 auto; min-height: 0; position: relative; }
+.term-col { flex: 1 1 0; min-width: 0; display: flex; }
+.term-col.hidden { display: none; }
+.term-col[data-col="1"] { border-left: 1px solid #ffffff14; }
+.term-mount { flex: 1 1 auto; min-width: 0; padding: 6px 0 6px 10px; }
+.term-mount .xterm { height: 100%; }
+.term-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  gap: 10px; color: var(--text-faint); font-size: 12.5px;
+}
+.term-empty.hidden { display: none; }
 
 /* toasts */
 #toasts { position: fixed; right: 16px; bottom: 42px; display: flex; flex-direction: column; gap: 8px; z-index: 60; max-width: 430px; }
@@ -557,6 +626,13 @@ kbd {
   background-repeat: no-repeat; background-position: right 8px center; background-size: 13px;
 }
 .settings-inline-sel:hover { border-color: var(--border-strong); }
+.settings-text {
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font-size: 12px; padding: 5px 10px; outline: none;
+  width: 190px;
+}
+.settings-text:hover { border-color: var(--border-strong); }
+.settings-text:focus { border-color: var(--accent); }
 
 /* about */
 .about-box {

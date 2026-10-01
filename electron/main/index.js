@@ -1,13 +1,14 @@
 // Barang desktop entry: single window, native menu, IPC backend.
 // Backend = direct function calls (fs + owned opencode server). No HTTP ports,
 // no auth in the UI: model credentials stay inside the user's opencode CLI.
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as files from './files.js';
 import { ensureServer, restartServer, stopServer, ocCall, opencodeState, attachPumpHandlers } from './opencodeClient.js';
+import * as term from './terminal.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // electron/main
 const APP_DIR = path.resolve(here, '..', '..');
@@ -241,6 +242,41 @@ function registerIpc() {
   ipcMain.handle('fs:find', ok(needRoot((p) => files.find(root, p))));
   ipcMain.handle('fs:search', ok(needRoot((p) => files.search(root, p))));
 
+  // --- integrated terminal (node-pty; spawn cwd = project or scratch) ---
+  const termCwd = async () => {
+    const cwd = root || path.join(app.getPath('userData'), 'scratch');
+    try {
+      await fs.mkdir(cwd, { recursive: true });
+    } catch {
+      /* spawn reports real errors */
+    }
+    return cwd;
+  };
+  const termHooks = {
+    onData: (id, data) => broadcast('term:data', { id, data }),
+    onExit: (id, code, signal) => broadcast('term:exit', { id, code, signal }),
+  };
+  ipcMain.handle('term:create', ok(async (p = {}) => term.create(
+    { shell: p.shell || undefined, cwd: await termCwd(), cols: p.cols || 80, rows: p.rows || 24 },
+    termHooks,
+  )));
+  ipcMain.handle('term:write', ok((p = {}) => term.write(p.id, p.data ?? '')));
+  ipcMain.handle('term:resize', ok((p = {}) => term.resize(p.id, p.cols, p.rows)));
+  ipcMain.handle('term:kill', ok((p = {}) => term.kill(p.id)));
+  ipcMain.handle('term:list', ok(() => term.list()));
+  ipcMain.handle('term:default-shell', ok(() => ({ shell: term.defaultShell(), label: term.shellLabel(term.defaultShell()) })));
+  // Deterministic clipboard for the terminal (renderer clipboard API is
+  // focus-gated; main-process electron.clipboard always works).
+  ipcMain.handle('app:clip-read', ok(() => ({ text: clipboard.readText() })));
+  ipcMain.handle('app:clip-write', ok((p = {}) => { clipboard.writeText(String(p.text ?? '')); return { ok: true }; }));
+  // Terminal link clicks: http(s) only, opened in the OS browser.
+  ipcMain.handle('app:open-external', ok((p = {}) => {
+    const url = String(p.url ?? '');
+    if (!/^https?:\/\//i.test(url)) throw new Error('Only http(s) links can be opened');
+    void shell.openExternal(url);
+    return { ok: true };
+  }));
+
   ipcMain.handle('oc:call', async (_ev, p = {}) => {
     try {
       const res = await ocCall(p.path, { method: p.method || 'GET', body: p.body });
@@ -359,6 +395,25 @@ async function runMainSmoke() {
     if (!s.id) throw new Error('no session id');
     await ocCall(`/session/${s.id}`, { method: 'DELETE' });
     return s.id;
+  });
+  await check('term-echo', async () => {
+    // Real PTY roundtrip: spawn the default shell, echo a marker, kill.
+    const cwd = root || path.join(app.getPath('userData'), 'scratch');
+    let out = '';
+    let exited = null;
+    const t = term.create({ cwd, cols: 80, rows: 24 }, {
+      onData: (_id, data) => { out += data; },
+      onExit: (_id, code) => { exited = code; },
+    });
+    if (!t.id) throw new Error('no terminal id');
+    term.write(t.id, 'echo barang-pty-ping-8675309\r');
+    const deadline = Date.now() + 15000;
+    while (!out.includes('barang-pty-ping-8675309') && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    term.kill(t.id);
+    if (!out.includes('barang-pty-ping-8675309')) throw new Error(`no echo in PTY output (${out.length} chars)`);
+    return `echo ok, shell=${term.shellLabel(t.shell)}`;
   });
   let failed = 0;
   for (const r of results) {
@@ -899,6 +954,45 @@ async function runUiSmoke() {
   } catch (e) {
     console.log('[smoke-ui] trusted-input error: ' + (e.message || e));
   }
+  // Integrated terminal: statusbar toggle opens the panel, a real shell
+  // spawns, echo roundtrips PTY -> xterm buffer, tab-x kills it.
+  let termProbe = 'skip';
+  try {
+    termProbe = await w.webContents.executeJavaScript(`(async () => {
+      const btn = document.querySelector('.status-term');
+      if (!btn) return 'skip-no-status-btn';
+      btn.click();
+      await new Promise((r) => setTimeout(r, 600));
+      const panel = document.getElementById('term-panel');
+      if (!panel || panel.classList.contains('hidden')) return 'panel-did-not-open';
+      let tab = document.querySelector('.term-tab');
+      if (!tab) {
+        const nb = document.querySelector('.term-action-new');
+        if (!nb) return 'no-auto-tab-no-new-btn';
+        nb.click();
+        await new Promise((r) => setTimeout(r, 2500));
+        tab = document.querySelector('.term-tab');
+      }
+      if (!tab) return 'no-tab-after-new';
+      const id = tab.getAttribute('data-term-id');
+      if (!id) return 'tab-without-id';
+      await window.barang.term.write(id, 'echo barang-ui-term-4321\\r');
+      let buf = '', tries = 0;
+      while (!buf.includes('barang-ui-term-4321') && tries++ < 40) {
+        await new Promise((r) => setTimeout(r, 250));
+        try { buf = window.__barangTermBuffer(id) || ''; } catch { buf = ''; }
+      }
+      const echoed = buf.includes('barang-ui-term-4321');
+      tab.querySelector('.term-tab-x')?.click();
+      await new Promise((r) => setTimeout(r, 800));
+      const gone = !document.querySelector('.term-tab[data-term-id="' + id + '"]');
+      btn.click();
+      await new Promise((r) => setTimeout(r, 400));
+      return echoed && gone ? 'ok' : ('echoed=' + echoed + ' gone=' + gone);
+    })()`);
+  } catch (e) { termProbe = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] terminal: ' + termProbe);
+  pass = pass && termProbe === 'ok';
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise
@@ -958,6 +1052,7 @@ if (!gotLock && !SMOKE && !SMOKE_UI) {
     if (process.platform !== 'darwin') app.quit();
   });
   app.on('before-quit', () => {
+    term.killAll(); // shells die with the window (VSCode behavior)
     stopServer(); // tree-kill the owned `opencode serve`
   });
 }

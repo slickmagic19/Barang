@@ -184,13 +184,17 @@ function ensureStartMenuShortcut() {
     const dir = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
     fs.mkdir(dir, { recursive: true }).then(() => {
       try {
-        shell.writeShortcutLink(path.join(dir, 'Barang.lnk'), 'update', {
+        // 'update' fails on a missing file, 'create' fails on an existing
+        // one — pick by existence so path changes self-heal.
+        const link = path.join(dir, 'Barang.lnk');
+        shell.writeShortcutLink(link, existsSync(link) ? 'update' : 'create', {
           target: process.execPath,
           description: 'Barang — lightweight code editor with opencode agents',
           appUserModelId: 'ai.barang.editor',
         });
-      } catch {
-        /* locked Start Menu — toasts keep the raw ID, non-fatal */
+        bootLog('shortcut-ok', link);
+      } catch (e) {
+        bootLog('shortcut-failed', e?.message || String(e));
       }
     }).catch(() => {
       /* noop */

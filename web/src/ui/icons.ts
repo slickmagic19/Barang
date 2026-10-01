@@ -50,20 +50,3 @@ export function iconEl(name: IconName, size = 15): HTMLElement {
   s.innerHTML = ICONS[name].replace('<svg', `<svg width="${size}" height="${size}"`);
   return s;
 }
-
-/** File-type accent class for tinting the generic file icon. */
-export function fileTone(name: string): string {
-  const ext = name.split('.').pop()?.toLowerCase() ?? '';
-  if (['ts', 'tsx', 'mts', 'cts'].includes(ext)) return 'ft-ts';
-  if (['js', 'jsx', 'mjs', 'cjs'].includes(ext)) return 'ft-js';
-  if (['json', 'jsonc'].includes(ext)) return 'ft-json';
-  if (['html', 'htm', 'xml', 'vue', 'svelte'].includes(ext)) return 'ft-html';
-  if (['css', 'scss', 'less'].includes(ext)) return 'ft-css';
-  if (['md', 'mdx', 'txt'].includes(ext)) return 'ft-md';
-  if (['py'].includes(ext)) return 'ft-py';
-  if (['rs'].includes(ext)) return 'ft-rs';
-  if (['go'].includes(ext)) return 'ft-go';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico'].includes(ext)) return 'ft-img';
-  if (['yml', 'yaml', 'toml', 'ini'].includes(ext)) return 'ft-conf';
-  return 'ft-plain';
-}

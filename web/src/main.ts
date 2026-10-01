@@ -6,6 +6,7 @@ import { barang } from './lib/transport';
 import { connectEvents, agentStore, createSession, loadMeta, loadSessions } from './lib/agent';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
+import { fileIconEl } from './ui/fileIcons';
 import { openSettings } from './ui/settings';
 import logoUrl from './assets/barang-logo.png';
 
@@ -363,6 +364,7 @@ async function boot() {
         'data-path': t.path,
       }) as HTMLButtonElement;
       if (isDiff) b.append(el('span', { class: 'diff-badge' }, 'changes'));
+      b.append(fileIconEl(isDiff ? (t.file ?? '') : name, 14));
       b.append(el('span', { class: 'tab-name' }, name));
       if (t.dirty) b.append(el('span', { class: 'dirty-dot', title: 'Unsaved changes' }));
       b.onclick = () => {

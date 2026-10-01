@@ -47,10 +47,10 @@ button { font-family: inherit; }
 /* icons */
 .ic { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; vertical-align: -2px; }
 .ic svg { display: block; }
-/* Monochrome file icons (opencode dark): folders bright, files muted. */
+/* Monochrome chrome (opencode dark): folders bright. File-type icons carry
+   their own brand fills; only unknown types fall back to a muted outline. */
 .ft-folder { color: #c9c9cf; }
-.ft-ts, .ft-js, .ft-json, .ft-html, .ft-css, .ft-md,
-.ft-py, .ft-rs, .ft-go, .ft-img, .ft-conf, .ft-plain { color: #7e7e87; }
+.fi-plain { color: #7e7e87; }
 
 /* top bar */
 .topbar {

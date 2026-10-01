@@ -2,7 +2,8 @@
 // Prefix inside palette: "> " commands, "# " text search, otherwise file search.
 import { fsApi } from '../lib/api';
 import { el, debounce } from '../lib/util';
-import { iconEl, fileTone, type IconName } from './icons';
+import { iconEl, type IconName } from './icons';
+import { fileIconEl } from './fileIcons';
 import { revealInEditor } from './editor';
 
 export interface PaletteHooks {
@@ -44,15 +45,14 @@ export function initPalette(hooks: PaletteHooks) {
   document.body.append(overlay);
 
   let mode: 'files' | 'commands' | 'search' = 'files';
-  let items: Array<{ label: string; sub?: string; icon?: IconName; tone?: string; run(): void }> = [];
+  let items: Array<{ label: string; sub?: string; icon?: IconName; glyph?: HTMLElement; run(): void }> = [];
   let idx = 0;
 
   const paint = () => {
     results.innerHTML = '';
     items.slice(0, 30).forEach((it, i) => {
       const b = el('button', { class: `palette-item${i === idx ? ' active' : ''}` });
-      const glyph = iconEl(it.icon ?? 'file', 14);
-      if (it.tone) glyph.classList.add(it.tone);
+      const glyph = it.glyph ?? iconEl(it.icon ?? 'file', 14);
       b.append(glyph, el('span', { class: 'palette-label' }, it.label));
       if (it.sub) b.append(el('span', { class: 'palette-sub' }, it.sub));
       b.onclick = () => {
@@ -73,7 +73,7 @@ export function initPalette(hooks: PaletteHooks) {
   const searchFiles = debounce(async (q: string) => {
     try {
       const r = await fsApi.find(q || '', 30);
-      items = r.results.map((f) => ({ label: f.path, icon: 'file' as IconName, tone: fileTone(f.path), run: () => revealInEditor(f.path) }));
+      items = r.results.map((f) => ({ label: f.path, glyph: fileIconEl(f.path.split('/').pop() ?? f.path, 14), run: () => revealInEditor(f.path) }));
     } catch {
       items = [{ label: 'Search failed', run: () => {} }];
     }
@@ -92,7 +92,7 @@ export function initPalette(hooks: PaletteHooks) {
       items = r.results.map((m) => ({
         label: `${m.path}:${m.line}`,
         sub: m.text,
-        icon: 'search' as IconName,
+        glyph: fileIconEl(m.path.split('/').pop() ?? m.path, 14),
         run: () => revealInEditor(m.path, m.line),
       }));
       if (!items.length) items = [{ label: `No matches (${r.engine})`, run: () => {} }];

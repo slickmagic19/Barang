@@ -2,7 +2,8 @@
 // VSCode-style right-click menus: new/rename/delete/copy path per entry.
 import { fsApi, type FsEntry } from '../lib/api';
 import { el, copyText } from '../lib/util';
-import { iconEl, fileTone } from './icons';
+import { iconEl } from './icons';
+import { fileIconEl } from './fileIcons';
 import { showContextMenu } from './menu';
 import { confirmDialog } from './dialog';
 
@@ -92,8 +93,7 @@ function rowIcon(e: FsEntry): HTMLElement {
     const open = expanded.has(e.path);
     return iconEl(open ? 'folderOpen' : 'folder', 15);
   }
-  const s = iconEl('file', 15);
-  s.classList.add(fileTone(e.name));
+  const s = fileIconEl(e.name, 15);
   return s;
 }
 

@@ -461,11 +461,12 @@ async function boot() {
   };
 
   // Sidebar views: Explorer | Source Control (VSCode activity switch).
+  // Sidebar views as tabs: Explorer | Source Control (with change-count badge).
   const viewBar = el('div', { class: 'side-viewbar' });
-  const btnViewExplorer = el('button', { class: 'icon-btn side-view-btn active', title: 'Explorer' }) as HTMLButtonElement;
-  btnViewExplorer.append(iconEl('file', 15));
-  const btnViewScm = el('button', { class: 'icon-btn side-view-btn', title: 'Source control (Ctrl+Shift+G)' }) as HTMLButtonElement;
-  btnViewScm.append(iconEl('branch', 15));
+  const btnViewExplorer = el('button', { class: 'side-view-btn active', title: 'Explorer' }) as HTMLButtonElement;
+  btnViewExplorer.append(el('span', { class: 'side-view-label' }, 'Explorer'));
+  const btnViewScm = el('button', { class: 'side-view-btn', title: 'Source control (Ctrl+Shift+G)' }) as HTMLButtonElement;
+  btnViewScm.append(el('span', { class: 'side-view-label' }, 'Source Control'));
   const scmBadge = el('span', { class: 'scm-badge hidden' });
   btnViewScm.append(scmBadge);
   viewBar.append(btnViewExplorer, btnViewScm);

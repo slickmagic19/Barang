@@ -110,12 +110,12 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
   btnRefresh.append(iconEl('refresh', 14));
   btnRefresh.onclick = () => void refresh();
   const btnMore = el('button', { class: 'icon-btn', title: 'Views and More Actions…' }) as HTMLButtonElement;
-  btnMore.append(iconEl('dot', 14));
+  btnMore.append(iconEl('meatball', 16));
   titleRow.append(titleActs);
   titleActs.append(btnRefresh, btnMore);
 
   const repoRow = el('div', { class: 'scm-repo' });
-  const branchBtn = el('button', { class: 'scm-branch', title: 'Branch — click to switch' }) as HTMLButtonElement;
+  const branchBtn = el('button', { class: 'scm-branch', title: 'Select branch (click to switch)' }) as HTMLButtonElement;
   const repoActs = el('div', { class: 'scm-sync' });
   const mkBtn = (icon: 'sync' | 'refresh' | 'download' | 'upload' | 'plus', title: string, run: () => void, cls = '') => {
     const b = el('button', { class: `icon-btn ${cls}`.trim(), title }) as HTMLButtonElement;
@@ -124,12 +124,13 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
     repoActs.append(b);
     return b;
   };
+  const btnNewBranch = mkBtn('plus', 'Create New Branch…', () => void newBranchFlow());
   const btnSync = mkBtn('sync', 'Sync changes (fetch, pull, push)', () => void netOp('sync', 'Synced.'));
   const btnFetch = mkBtn('refresh', 'Fetch', () => void netOp('fetch', 'Fetched.'));
   const btnPull = mkBtn('download', 'Pull', () => void netOp('pull', 'Pulled.'));
   const btnPush = mkBtn('upload', 'Push', () => void netOp('push', 'Pushed.'));
   const btnPublish = mkBtn('upload', 'Publish branch (push + set upstream)', () => void netOp('push', 'Published.'), 'scm-publish hidden');
-  void btnSync; void btnFetch; void btnPull; void btnPush;
+  void btnNewBranch; void btnSync; void btnFetch; void btnPull; void btnPush;
   repoRow.append(branchBtn, repoActs);
 
   const commitBox = el('div', { class: 'scm-commit' });
@@ -574,6 +575,12 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
   }
 
   // --- menus ------------------------------------------------------------------
+  async function newBranchFlow(): Promise<void> {
+    if (!info?.isRepo || busy) return;
+    const name = await promptDialog({ title: 'New branch', placeholder: 'feature/name', confirmLabel: 'Create' });
+    if (name) void mutate('create-branch', { name }, `Created ${name}.`);
+  }
+
   branchBtn.onclick = async (e) => {
     if (!info?.isRepo || busy) return;
     let all: string[] = [];
@@ -596,10 +603,7 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
       })),
       { sep: true },
       {
-        label: 'New Branch…', icon: 'plus' as const, run: () => void (async () => {
-          const name = await promptDialog({ title: 'New branch', placeholder: 'feature/name', confirmLabel: 'Create' });
-          if (name) void mutate('create-branch', { name }, `Created ${name}.`);
-        })(),
+        label: 'New Branch…', icon: 'plus' as const, run: () => void newBranchFlow(),
       },
     ]);
   };

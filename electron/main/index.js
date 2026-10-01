@@ -170,6 +170,34 @@ function createWindow() {
   win.on('focus', () => {
     clearAttention();
   });
+  ensureStartMenuShortcut();
+}
+
+// Windows toast attribution: the OS names toasts after the Start Menu
+// shortcut carrying our AppUserModelID. Without one, toasts show the raw
+// ID ("ai.barang.editor"). Portable builds have no installer, so we keep
+// our own shortcut fresh (path updates when the portable moves). Dev runs
+// (electron.exe) are skipped — never link the Start Menu to Electron.
+function ensureStartMenuShortcut() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  try {
+    const dir = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+    fs.mkdir(dir, { recursive: true }).then(() => {
+      try {
+        shell.writeShortcutLink(path.join(dir, 'Barang.lnk'), 'update', {
+          target: process.execPath,
+          description: 'Barang — lightweight code editor with opencode agents',
+          appUserModelId: 'ai.barang.editor',
+        });
+      } catch {
+        /* locked Start Menu — toasts keep the raw ID, non-fatal */
+      }
+    }).catch(() => {
+      /* noop */
+    });
+  } catch {
+    /* noop */
+  }
 }
 
 // No native application menu by design: the topbar (Open / Palette / Agent /

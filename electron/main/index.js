@@ -182,15 +182,35 @@ function ensureStartMenuShortcut() {
   if (process.platform !== 'win32' || !app.isPackaged) return;
   try {
     const dir = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
-    fs.mkdir(dir, { recursive: true }).then(() => {
+    fs.mkdir(dir, { recursive: true }).then(async () => {
       try {
-        // 'update' fails on a missing file, 'create' fails on an existing
-        // one — pick by existence so path changes self-heal.
+        // Stable icon: the shortcut must NOT point into the portable's
+        // TEMP extraction dir (it changes every version). Vault our icon
+        // into userData once and link that instead.
+        let iconPath = process.execPath;
+        try {
+          const shipped = path.join(process.resourcesPath, 'icon.ico');
+          const vault = path.join(app.getPath('userData'), 'barang-icon.ico');
+          const need = !(await fs.stat(vault).catch(() => null));
+          if (need) await fs.copyFile(shipped, vault);
+          iconPath = vault;
+        } catch {
+          /* fall back to the exe's embedded icon */
+        }
+        // writeShortcutLink 'update' silently ignores some fields (icon) —
+        // recreate from scratch so target/icon/AUMID always self-heal.
         const link = path.join(dir, 'Barang.lnk');
-        shell.writeShortcutLink(link, existsSync(link) ? 'update' : 'create', {
+        try {
+          await fs.unlink(link);
+        } catch {
+          /* first run */
+        }
+        shell.writeShortcutLink(link, 'create', {
           target: process.execPath,
           description: 'Barang — lightweight code editor with opencode agents',
           appUserModelId: 'ai.barang.editor',
+          icon: iconPath,
+          iconIndex: 0, // required: without it the icon field is ignored
         });
         bootLog('shortcut-ok', link);
       } catch (e) {

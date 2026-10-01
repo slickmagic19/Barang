@@ -37,6 +37,10 @@
       {
         "from": "vendor/",
         "to": "vendor"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
       }
     ],
     "win": {

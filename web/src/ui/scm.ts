@@ -124,13 +124,12 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
     repoActs.append(b);
     return b;
   };
-  const btnNewBranch = mkBtn('plus', 'Create New Branch…', () => void newBranchFlow());
   const btnSync = mkBtn('sync', 'Sync changes (fetch, pull, push)', () => void netOp('sync', 'Synced.'));
   const btnFetch = mkBtn('refresh', 'Fetch', () => void netOp('fetch', 'Fetched.'));
   const btnPull = mkBtn('download', 'Pull', () => void netOp('pull', 'Pulled.'));
   const btnPush = mkBtn('upload', 'Push', () => void netOp('push', 'Pushed.'));
   const btnPublish = mkBtn('upload', 'Publish branch (push + set upstream)', () => void netOp('push', 'Published.'), 'scm-publish hidden');
-  void btnNewBranch; void btnSync; void btnFetch; void btnPull; void btnPush;
+  void btnSync; void btnFetch; void btnPull; void btnPush;
   repoRow.append(branchBtn, repoActs);
 
   const commitBox = el('div', { class: 'scm-commit' });
@@ -581,7 +580,9 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
     if (name) void mutate('create-branch', { name }, `Created ${name}.`);
   }
 
-  branchBtn.onclick = async (e) => {
+  /** Branch picker menu (select / create) at viewport coords — shared by the
+   *  repo row button and the statusbar branch (VSCode opens it from both). */
+  async function openBranchMenu(x: number, y: number): Promise<void> {
     if (!info?.isRepo || busy) return;
     let all: string[] = [];
     try {
@@ -591,8 +592,7 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
       hooks.toast(`Branches failed: ${(err as Error).message}`, 'error');
       return;
     }
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    showContextMenu(r.left, r.bottom + 6, [
+    showContextMenu(x, y, [
       ...all.slice(0, 20).map((n) => ({
         label: n,
         icon: (n === info.branch ? 'check' : 'branch') as 'check' | 'branch',
@@ -606,6 +606,11 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
         label: 'New Branch…', icon: 'plus' as const, run: () => void newBranchFlow(),
       },
     ]);
+  }
+
+  branchBtn.onclick = (e) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    void openBranchMenu(r.left, r.bottom + 6);
   };
 
   btnMore.onclick = (e) => {
@@ -757,6 +762,7 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
     focusCommit: () => {
       msgInput.focus();
     },
+    openBranchMenu,
     hasRepo: () => !!info?.isRepo,
   };
 }

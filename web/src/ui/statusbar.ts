@@ -17,7 +17,7 @@ function dot(cls: string): HTMLElement {
   return s;
 }
 
-export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void; onOpenScm?: () => void } = {}) {
+export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void; onOpenScm?: (x: number, y: number) => void } = {}) {
   const left = el('div', { class: 'status-left' });
   const right = el('div', { class: 'status-right' });
   bar.append(left, right);
@@ -25,10 +25,10 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   const rootEl = el('span', { class: 'status-item', title: info.root || 'No folder open' });
   const rootName = el('span', {}, info.root.split(/[\\/]/).pop() || 'No folder open');
   rootEl.append(iconEl('folder', 13), rootName);
-  const gitEl = el('button', { class: 'status-item status-git hidden', title: 'Source control' }) as HTMLButtonElement;
+  const gitEl = el('button', { class: 'status-item status-git hidden', title: 'Select branch' }) as HTMLButtonElement;
   const gitLabel = el('span', {}, '');
   gitEl.append(iconEl('branch', 12), gitLabel);
-  gitEl.onclick = () => hooks.onOpenScm?.();
+  gitEl.onclick = (e) => hooks.onOpenScm?.(e.clientX, e.clientY);
   const ocEl = el('span', { class: 'status-item' });
   const termEl = el('button', { class: 'status-item status-term', title: 'Toggle terminal (Ctrl+`)' }) as HTMLButtonElement;
   const termLabel = el('span', {}, 'Terminal');
@@ -57,7 +57,7 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
       if (git.ahead > 0) bits.push(`↑${git.ahead}`);
       if (git.behind > 0) bits.push(`↓${git.behind}`);
       gitLabel.textContent = bits.join(' ');
-      gitEl.title = `Git: ${git.branch}${git.tracking ? ` → ${git.tracking}` : ''} — open source control`;
+      gitEl.title = `Git: ${git.branch}${git.tracking ? ` → ${git.tracking}` : ''} — select branch`;
     }
     ocEl.innerHTML = '';
     if (info.opencodeOk) {

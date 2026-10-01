@@ -352,7 +352,11 @@ async function boot() {
 
   const status = initStatusbar(statusbar, { root, opencodeVersion, opencodeOk }, {
     onToggleTerminal: () => termApi.toggle(),
-    onOpenScm: () => setSideView('scm'),
+    // VSCode parity: the statusbar branch opens the branch picker directly.
+    onOpenScm: (x, y) => {
+      setSideView('scm');
+      void scmApi.openBranchMenu(x, y);
+    },
   });
 
   // Integrated terminal (bottom panel). Statusbar toggle lives next to agent-idle.

@@ -1126,6 +1126,9 @@ async function runUiSmoke() {
       const commit = !!document.querySelector('.scm-commit-btn');
       const badgeEl = document.querySelector('.side-view-btn .scm-badge');
       const badge = badgeEl && !badgeEl.classList.contains('hidden') ? 'ok' : 'missing';
+      // The statusbar branch must pop the branch picker (select + create).
+      const ctxText = document.querySelector('.ctx-menu')?.textContent ?? '';
+      const menu = ctxText.includes('New Branch') && ctxText.includes(branch) ? 'ok' : 'missing:' + ctxText.slice(0, 60);
       const secCount = (title) => {
         const sec = [...document.querySelectorAll('.scm-sec')].find((s) => (s.querySelector('.scm-sec-title')?.textContent || '') === title);
         return parseInt(sec?.querySelector('.scm-count')?.textContent ?? 'x', 10);
@@ -1175,12 +1178,15 @@ async function runUiSmoke() {
       }
       try { await window.barang.git('unstage', { paths: ['scm-probe-tmp/probe.txt'] }); } catch {}
       try { await window.barang.fs.remove('scm-probe-tmp'); } catch {}
+      // Dismiss the branch picker opened by the statusbar click, if any.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 300));
       document.querySelector('.side-view-btn')?.click();
-      return 'branch=' + branch + ' rows=' + rows + ' commit=' + commit + ' diff=' + diff + ' stage=' + stage + ' unstage=' + unstage + ' badge=' + badge;
+      return 'branch=' + branch + ' rows=' + rows + ' commit=' + commit + ' diff=' + diff + ' stage=' + stage + ' unstage=' + unstage + ' badge=' + badge + ' menu=' + menu;
     })()`);
   } catch (e) { scmProbe = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] scm: ' + scmProbe);
-  pass = pass && /^branch=\S+ rows=\d+ commit=true diff=ok stage=ok unstage=ok badge=ok$/.test(scmProbe);
+  pass = pass && /^branch=\S+ rows=\d+ commit=true diff=ok stage=ok unstage=ok badge=ok menu=ok$/.test(scmProbe);
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

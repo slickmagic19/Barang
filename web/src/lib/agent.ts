@@ -121,6 +121,18 @@ export interface BarangSettings {
   termFont: number; // terminal font size, default 12 (VSCode)
   termScrollback: number; // terminal scrollback lines, default 1000
   termBlink: boolean; // terminal cursor blink, default true
+  notifEnabled: boolean; // master switch, default true
+  notifNative: boolean; // Windows toast when unfocused, default true
+  notifSound: boolean; // play a sound, default true
+  notifSoundName: string; // builtin id or 'custom', default 'chime'
+  notifCustomName: string; // picked file display name
+  notifCustomPath: string; // picked file file:// URL
+  notifVolume: number; // 0-100, default 80
+  notifOnDone: boolean; // notify when a run finishes, default true
+  notifOnApproval: boolean; // notify on pending approvals, default true
+  notifOnError: boolean; // notify on run errors, default true
+  notifTaskbar: boolean; // taskbar badge + flash, default true
+  notifToastFocused: boolean; // in-app toast when focused, default true
 }
 
 const SETTINGS_KEY = 'barang:settings-v1';
@@ -139,6 +151,18 @@ const SETTING_DEFAULTS: BarangSettings = {
   termFont: 12,
   termScrollback: 1000,
   termBlink: true,
+  notifEnabled: true,
+  notifNative: true,
+  notifSound: true,
+  notifSoundName: 'chime',
+  notifCustomName: '',
+  notifCustomPath: '',
+  notifVolume: 80,
+  notifOnDone: true,
+  notifOnApproval: true,
+  notifOnError: true,
+  notifTaskbar: true,
+  notifToastFocused: true,
 };
 
 export function readSettings(): BarangSettings {
@@ -159,6 +183,18 @@ export function readSettings(): BarangSettings {
       termFont: Number.isFinite(p.termFont) ? Math.max(10, Math.min(24, p.termFont)) : SETTING_DEFAULTS.termFont,
       termScrollback: [1000, 5000, 10000].includes(p.termScrollback) ? p.termScrollback : SETTING_DEFAULTS.termScrollback,
       termBlink: p.termBlink !== false,
+      notifEnabled: p.notifEnabled !== false,
+      notifNative: p.notifNative !== false,
+      notifSound: p.notifSound !== false,
+      notifSoundName: typeof p.notifSoundName === 'string' && p.notifSoundName ? p.notifSoundName.slice(0, 120) : 'chime',
+      notifCustomName: typeof p.notifCustomName === 'string' ? p.notifCustomName.slice(0, 120) : '',
+      notifCustomPath: typeof p.notifCustomPath === 'string' ? p.notifCustomPath.slice(0, 2000) : '',
+      notifVolume: Number.isFinite(p.notifVolume) ? Math.max(0, Math.min(100, p.notifVolume)) : SETTING_DEFAULTS.notifVolume,
+      notifOnDone: p.notifOnDone !== false,
+      notifOnApproval: p.notifOnApproval !== false,
+      notifOnError: p.notifOnError !== false,
+      notifTaskbar: p.notifTaskbar !== false,
+      notifToastFocused: p.notifToastFocused !== false,
       model: p.model?.providerID && p.model?.modelID ? { providerID: p.model.providerID, modelID: p.model.modelID } : null,
       agent: typeof p.agent === 'string' ? p.agent : null,
     };

@@ -16,6 +16,7 @@ const ART = {
   win: '<rect x="5.7" y="7.5" width="2" height="2" fill="#fff"/><rect x="8.3" y="7.5" width="2" height="2" fill="#fff"/><rect x="5.7" y="10" width="2" height="2" fill="#fff"/><rect x="8.3" y="10" width="2" height="2" fill="#fff"/>',
   lines: '<path d="M5.5 8.2h5M5.5 9.9h5M5.5 11.6h3.4" stroke="#fff" stroke-width="1.1"/>',
   diamond: '<rect x="6.3" y="8.1" width="3.4" height="3.4" transform="rotate(45 8 9.8)" fill="#fff"/>',
+  note: '<ellipse cx="6.4" cy="11" rx="1.5" ry="1.1" fill="#fff" transform="rotate(-20 6.4 11)"/><path d="M7.7 10.7V6.2l2.6-.8v4.2" fill="none" stroke="#fff" stroke-width="1.1"/>',
   dot: '<circle cx="8" cy="9.8" r="1.7" fill="#fff"/>',
   check: '<path d="M5.7 9.9l1.6 1.6 3.1-3.6" fill="none" stroke="#fff" stroke-width="1.4"/>',
 };
@@ -111,7 +112,7 @@ const EXTS: Record<string, Spec> = {
   sketch: { c: '#8a5f9e', a: 'img' }, fig: { c: '#8a5f9e', a: 'img' },
   mp4: { c: '#6a63d6', a: 'play' }, mov: { c: '#6a63d6', a: 'play' }, webm: { c: '#6a63d6', a: 'play' },
   mkv: { c: '#6a63d6', a: 'play' }, avi: { c: '#6a63d6', a: 'play' },
-  mp3: { c: '#8f6fc0', t: '♪' }, wav: { c: '#8f6fc0', t: '♪' }, ogg: { c: '#8f6fc0', t: '♪' }, flac: { c: '#8f6fc0', t: '♪' }, m4a: { c: '#8f6fc0', t: '♪' },
+  mp3: { c: '#8f6fc0', a: 'note' }, wav: { c: '#8f6fc0', a: 'note' }, ogg: { c: '#8f6fc0', a: 'note' }, flac: { c: '#8f6fc0', a: 'note' }, m4a: { c: '#8f6fc0', a: 'note' },
   woff: { c: '#7a7a7a', t: 'A' }, woff2: { c: '#7a7a7a', t: 'A' }, ttf: { c: '#7a7a7a', t: 'A' }, otf: { c: '#7a7a7a', t: 'A' }, eot: { c: '#7a7a7a', t: 'A' },
   pdf: { c: '#d93b3b', a: 'lines' },
   zip: { c: '#b39a45', a: 'box' }, tar: { c: '#b39a45', a: 'box' }, gz: { c: '#b39a45', a: 'box' },

@@ -1,7 +1,7 @@
 // Barang desktop entry: single window, native menu, IPC backend.
 // Backend = direct function calls (fs + owned opencode server). No HTTP ports,
 // no auth in the UI: model credentials stay inside the user's opencode CLI.
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from 'electron';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
@@ -31,12 +31,36 @@ function bootLog(stage, extra = '') {
   }
 }
 bootLog('module-loaded');
+// Windows toast attribution (both dev and packaged): without an AUMID the
+// OS files our toasts under a generic host instead of Barang.
+try {
+  app.setAppUserModelId('ai.barang.editor');
+} catch {
+  /* very old Electron — ignore */
+}
 
 let win = null;
 let root = process.env.BARANG_ROOT || ''; // '' = no project (welcome state)
 let recents = []; // most-recent-first project roots (max 8)
 let restoreProject = false; // Settings > Startup: reopen last project
 let statePath = '';
+
+// Notification attention state (module scope: window focus clears it no
+// matter which handler raised it).
+let notifCount = 0;
+function clearAttention() {
+  notifCount = 0;
+  try {
+    app.setBadgeCount(0);
+  } catch {
+    /* noop */
+  }
+  try {
+    if (win) win.flashFrame(false);
+  } catch {
+    /* noop */
+  }
+}
 
 function userStatePath() {
   return path.join(app.getPath('userData'), 'barang.json');
@@ -140,6 +164,11 @@ function createWindow() {
   });
   win.on('closed', () => {
     win = null;
+  });
+  // Regaining focus acknowledges every pending notification: taskbar badge
+  // and flashing stop immediately (VSCode behavior).
+  win.on('focus', () => {
+    clearAttention();
   });
 }
 
@@ -270,6 +299,74 @@ function registerIpc() {
   // focus-gated; main-process electron.clipboard always works).
   ipcMain.handle('app:clip-read', ok(() => ({ text: clipboard.readText() })));
   ipcMain.handle('app:clip-write', ok((p = {}) => { clipboard.writeText(String(p.text ?? '')); return { ok: true }; }));
+  // --- notifications (Windows toast + taskbar badge/flash) ---------------
+  // Renderer decides WHEN (agent edges + settings + focus); main owns the
+  // OS surface. Badge count clears the moment the window regains focus.
+  const noteLogo = path.join(DIST_DIR, 'barang-logo.png');
+  ipcMain.handle('app:notify', ok((p = {}) => {
+    const title = String(p.title || 'Barang').slice(0, 120);
+    const body = String(p.body || '').slice(0, 300);
+    const badge = p.badge !== false; // Settings > Notifications > taskbar badge
+    try {
+      const n = new Notification({
+        title, body, silent: true,
+        icon: existsSync(noteLogo) ? noteLogo : undefined,
+      });
+      n.on('click', () => {
+        try {
+          if (!win) return;
+          if (win.isMinimized()) win.restore();
+          win.show();
+          win.focus();
+        } catch {
+          /* noop */
+        }
+      });
+      n.show();
+    } catch {
+      /* headless/service session: no shell to toast — badge still applies */
+    }
+    if (badge) {
+      notifCount++;
+      try {
+        app.setBadgeCount(notifCount);
+      } catch {
+        /* noop */
+      }
+      try {
+        if (win && !win.isFocused()) win.flashFrame(true);
+      } catch {
+        /* noop */
+      }
+    }
+    return { ok: true, count: notifCount };
+  }));
+  ipcMain.handle('app:clear-attention', ok(() => {
+    clearAttention();
+    return { ok: true };
+  }));
+  // Custom notification sound: user picks an audio file, we vault a copy in
+  // userData (survives moves/renames of the original) and hand back a
+  // file:// URL the sandboxed renderer can play directly.
+  ipcMain.handle('app:pick-sound', ok(async () => {
+    if (!win) throw new Error('Window not ready');
+    const picked = await dialog.showOpenDialog(win, {
+      title: 'Choose notification sound',
+      properties: ['openFile'],
+      filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'] }],
+    });
+    if (picked.canceled || !picked.filePaths[0]) throw new Error('cancelled');
+    const src = picked.filePaths[0];
+    const st = await fs.stat(src);
+    if (st.size > 15 * 1024 * 1024) throw new Error('Sound file is too large (max 15MB)');
+    const safe = path.basename(src).replace(/[^a-z0-9._-]+/gi, '_').slice(0, 80) || 'custom-sound';
+    const dir = path.join(app.getPath('userData'), 'sounds');
+    await fs.mkdir(dir, { recursive: true });
+    const dest = path.join(dir, `${Date.now()}-${safe}`);
+    await fs.copyFile(src, dest);
+    const fileUrl = 'file:///' + dest.replace(/\\/g, '/').split('/').map((s) => encodeURIComponent(s)).join('/');
+    return { ok: true, id: path.basename(dest), name: path.basename(src), fileUrl };
+  }));
   // Terminal link clicks: http(s) only, opened in the OS browser.
   ipcMain.handle('app:open-external', ok((p = {}) => {
     const url = String(p.url ?? '');
@@ -1187,6 +1284,63 @@ async function runUiSmoke() {
   } catch (e) { scmProbe = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] scm: ' + scmProbe);
   pass = pass && /^branch=\S+ rows=\d+ commit=true diff=ok stage=ok unstage=ok badge=ok menu=ok$/.test(scmProbe);
+  // Notifications: bundled sounds decode, edge logic decides, IPC delivers.
+  let notifSounds = 'skip';
+  try {
+    notifSounds = await w.webContents.executeJavaScript(`(async () => {
+      const files = ['sounds/chime.wav','sounds/ding.wav','sounds/pop.wav','sounds/alert.wav','sounds/success.wav'];
+      const out = [];
+      for (const f of files) {
+        try {
+          const ok = await new Promise((res) => {
+            const a = new Audio(f);
+            const to = setTimeout(() => res('timeout'), 8000);
+            a.addEventListener('loadedmetadata', () => { clearTimeout(to); res(a.duration > 0 ? 'ok' : 'zero'); });
+            a.addEventListener('error', () => { clearTimeout(to); res('error'); });
+          });
+          out.push(f.split('/')[1] + '=' + ok);
+        } catch (e) { out.push(f + '=throw'); }
+      }
+      return out.join(',');
+    })()`);
+  } catch (e) { notifSounds = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] notif-sounds: ' + notifSounds);
+  pass = pass && /^([^,]+wav=ok,){4}[^,]+wav=ok$/.test(notifSounds);
+  let notifDecide = 'skip';
+  try {
+    notifDecide = await w.webContents.executeJavaScript(`(() => {
+      const d = window.__barangNotifDecide;
+      if (typeof d !== 'function') return 'no-hook';
+      const idle = { root: 'r', busy: false, error: null, perms: 0, activeId: 's' };
+      const cases = [
+        [{ ...idle, busy: true }, { ...idle }, 'done'],
+        [{ ...idle }, { ...idle }, null],
+        [{ ...idle, busy: true }, { ...idle, error: 'boom' }, 'error'],
+        [{ ...idle }, { ...idle, perms: 2 }, 'approval'],
+        [{ ...idle, busy: true, perms: 1 }, { ...idle, perms: 1 }, 'approval'],
+        [{ ...idle, root: 'a', busy: true }, { ...idle, root: 'b' }, null],
+        [{ ...idle, error: 'boom' }, { ...idle, error: 'boom' }, null],
+        [{ ...idle, busy: true, activeId: 's1' }, { ...idle, activeId: 's2' }, null],
+      ];
+      const bad = [];
+      cases.forEach(([a, b, want], i) => {
+        const got = d(a, b);
+        if (got !== want) bad.push(i + ':' + got + '!==' + want);
+      });
+      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-8';
+    })()`);
+  } catch (e) { notifDecide = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] notif-decide: ' + notifDecide);
+  pass = pass && notifDecide === 'ok-8';
+  let notifIpc = 'skip';
+  try {
+    notifIpc = await w.webContents.executeJavaScript(`(async () => {
+      const r = await window.barang.app.notify({ title: 'Barang smoke', body: 'notify path check', kind: 'done', badge: false });
+      return r && r.ok ? 'ok' : 'bad:' + JSON.stringify(r);
+    })()`);
+  } catch (e) { notifIpc = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] notif-ipc: ' + notifIpc);
+  pass = pass && notifIpc === 'ok';
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

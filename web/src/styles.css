@@ -755,6 +755,9 @@ button.status-item:hover { color: var(--text); }
 }
 .settings-text:hover { border-color: var(--border-strong); }
 .settings-text:focus { border-color: var(--accent); }
+.settings-vol-wrap { display: inline-flex; align-items: center; gap: 8px; }
+.settings-vol-label { font-size: 12px; color: var(--text-dim); min-width: 36px; text-align: right; }
+.settings-range { accent-color: var(--accent-strong); width: 130px; cursor: pointer; }
 
 /* about */
 .about-box {

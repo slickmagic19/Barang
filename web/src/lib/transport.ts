@@ -55,6 +55,9 @@ export interface BarangBridge {
     pickFiles(): Promise<{ files: Array<{ path: string; name: string; size: number }> }>;
     saveDialog(defaultPath?: string): Promise<{ path: string }>;
     openExternal(url: string): Promise<{ ok: boolean }>;
+    notify(n: { title: string; body?: string; kind?: string; badge?: boolean }): Promise<{ ok: boolean; count: number }>;
+    clearAttention(): Promise<{ ok: boolean }>;
+    pickSound(): Promise<{ ok: boolean; id: string; name: string; fileUrl: string }>;
     onMenu(cb: (kind: 'toggle-agent' | 'palette' | 'new-session' | 'root-changed' | 'opencode:ready' | 'opencode:error', payload?: unknown) => void): () => void;
   };
 }

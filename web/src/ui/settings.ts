@@ -12,6 +12,7 @@ import { el } from '../lib/util';
 import { iconEl } from './icons';
 import { applyEditorPrefs } from './editor';
 import { applyTerminalPrefs } from './terminal';
+import { BUILTIN_SOUNDS, resolveSoundUrl, playNotificationSound } from '../lib/notify';
 import logoUrl from '../assets/barang-logo.png';
 
 export interface SettingsHooks {
@@ -77,6 +78,43 @@ export function openSettings(hooks: SettingsHooks) {
   // --- Sessions ---
   section('Sessions');
   const confirmBox = checkRow('Ask before deleting a session');
+
+  // --- Notifications (Windows toast + taskbar badge + sound) ---
+  section('Notifications');
+  const notifEnabledBox = checkRow('Enable notifications');
+  const notifDoneBox = checkRow('When a run finishes');
+  const notifApprovalBox = checkRow('When approval is needed');
+  const notifErrorBox = checkRow('When a run errors');
+  const notifNativeBox = checkRow('Windows toast when Barang is in the background');
+  const notifTaskbarBox = checkRow('Taskbar badge + flashing when in the background');
+  const notifToastBox = checkRow('In-app toast when Barang is focused');
+  const notifSoundBox = checkRow('Play a sound');
+  const soundRow = el('div', { class: 'settings-row' });
+  soundRow.append(el('span', { class: 'settings-row-label' }, 'Sound'));
+  const soundSel = el('select', { class: 'settings-inline-sel', title: 'Notification sound' }) as HTMLSelectElement;
+  for (const s of BUILTIN_SOUNDS) soundSel.append(el('option', { value: s.id }, s.label) as HTMLOptionElement);
+  soundSel.append(el('option', { value: 'custom' }, 'Custom… (pick a file)') as HTMLOptionElement);
+  soundRow.append(soundSel);
+  body.append(soundRow);
+  const customRow = el('div', { class: 'settings-row' });
+  const customName = el('span', { class: 'settings-row-label' }, 'No custom sound');
+  const btnBrowseSound = el('button', { class: 'btn btn-sm' }, 'Browse…') as HTMLButtonElement;
+  customRow.append(customName, btnBrowseSound);
+  body.append(customRow);
+  const volRow = el('div', { class: 'settings-row' });
+  volRow.append(el('span', { class: 'settings-row-label' }, 'Volume'));
+  const volWrap = el('span', { class: 'settings-vol-wrap' });
+  const volInput = el('input', { class: 'settings-range', type: 'range', min: '0', max: '100', step: '1', title: 'Notification volume' }) as HTMLInputElement;
+  const volLabel = el('span', { class: 'settings-vol-label' }, '80%');
+  volWrap.append(volInput, volLabel);
+  volRow.append(volWrap);
+  body.append(volRow);
+  const testRow = el('div', { class: 'settings-row' });
+  testRow.append(el('span', { class: 'settings-row-label' }, 'Preview'));
+  const btnTestSound = el('button', { class: 'btn btn-sm' }, 'Play sound') as HTMLButtonElement;
+  testRow.append(btnTestSound);
+  body.append(testRow);
+  body.append(el('p', { class: 'settings-note' }, 'Sounds are original synth tones shipped with Barang. Custom files (MP3, WAV, OGG) are copied into Barang storage.'));
 
   // --- Terminal ---
   section('Terminal');
@@ -192,6 +230,18 @@ export function openSettings(hooks: SettingsHooks) {
     wrapBox.checked = st0.wordWrap;
     confirmBox.checked = st0.confirmDelete;
     fontSel.value = String(st0.fontSize);
+    notifEnabledBox.checked = st0.notifEnabled;
+    notifDoneBox.checked = st0.notifOnDone;
+    notifApprovalBox.checked = st0.notifOnApproval;
+    notifErrorBox.checked = st0.notifOnError;
+    notifNativeBox.checked = st0.notifNative;
+    notifTaskbarBox.checked = st0.notifTaskbar;
+    notifToastBox.checked = st0.notifToastFocused;
+    notifSoundBox.checked = st0.notifSound;
+    soundSel.value = st0.notifSoundName === 'custom' || BUILTIN_SOUNDS.some((s) => s.id === st0.notifSoundName) ? st0.notifSoundName : 'chime';
+    customName.textContent = st0.notifCustomName || 'No custom sound';
+    volInput.value = String(st0.notifVolume);
+    volLabel.textContent = `${st0.notifVolume}%`;
     shellInput.value = st0.termShell;
     termFontSel.value = String(st0.termFont);
     termScrollSel.value = String(st0.termScrollback);
@@ -238,6 +288,47 @@ export function openSettings(hooks: SettingsHooks) {
     applyEditorPrefs();
   };
   confirmBox.onchange = () => commit((s) => { s.confirmDelete = confirmBox.checked; });
+  notifEnabledBox.onchange = () => commit((s) => { s.notifEnabled = notifEnabledBox.checked; });
+  notifDoneBox.onchange = () => commit((s) => { s.notifOnDone = notifDoneBox.checked; });
+  notifApprovalBox.onchange = () => commit((s) => { s.notifOnApproval = notifApprovalBox.checked; });
+  notifErrorBox.onchange = () => commit((s) => { s.notifOnError = notifErrorBox.checked; });
+  notifNativeBox.onchange = () => commit((s) => { s.notifNative = notifNativeBox.checked; });
+  notifTaskbarBox.onchange = () => commit((s) => { s.notifTaskbar = notifTaskbarBox.checked; });
+  notifToastBox.onchange = () => commit((s) => { s.notifToastFocused = notifToastBox.checked; });
+  notifSoundBox.onchange = () => commit((s) => { s.notifSound = notifSoundBox.checked; });
+  soundSel.onchange = () => {
+    commit((s) => { s.notifSoundName = soundSel.value; });
+    if (soundSel.value === 'custom' && !readSettings().notifCustomPath) void browseSound();
+  };
+  volInput.onchange = () => {
+    commit((s) => { s.notifVolume = parseInt(volInput.value, 10) || 0; });
+  };
+  btnTestSound.onclick = () => {
+    const s = readSettings();
+    const url = resolveSoundUrl(s.notifSoundName, s.notifCustomPath);
+    if (!url) {
+      hooks.toast('Pick a custom sound first.', 'info');
+      return;
+    }
+    void playNotificationSound(url, s.notifVolume / 100).then((ok) => {
+      if (!ok) hooks.toast('Could not play that sound (format or autoplay blocked — click anywhere and retry).', 'error');
+    });
+  };
+  async function browseSound() {
+    try {
+      const r = await barang().app.pickSound();
+      commit((s) => {
+        s.notifSoundName = 'custom';
+        s.notifCustomName = r.name;
+        s.notifCustomPath = r.fileUrl;
+      });
+      paint();
+      hooks.toast(`Custom sound: ${r.name}`, 'info');
+    } catch (e) {
+      if (!/cancelled/i.test((e as Error).message)) hooks.toast(`Sound picker failed: ${(e as Error).message}`, 'error');
+    }
+  }
+  btnBrowseSound.onclick = () => void browseSound();
   shellInput.onchange = () => {
     commit((s) => { s.termShell = shellInput.value.trim().slice(0, 500); });
     hooks.toast(shellInput.value.trim() ? 'Shell saved — applies to new terminals.' : 'Shell reset to auto.', 'info');

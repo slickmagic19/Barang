@@ -92,6 +92,11 @@ const barang = {
     pickFiles: () => invoke('app:pick-files'),
     saveDialog: (defaultPath) => invoke('app:save-dialog', { defaultPath }),
     openExternal: (url) => invoke('app:open-external', { url }),
+    /** Windows toast + taskbar badge. Resolves { ok, count } (never throws). */
+    notify: (n) => invoke('app:notify', n),
+    clearAttention: () => invoke('app:clear-attention'),
+    /** Custom notification sound picker (vaulted to userData). */
+    pickSound: () => invoke('app:pick-sound'),
     /** Menu + root-change events. cb(kind, payload). */
     onMenu: (cb) => {
       const handlers = {

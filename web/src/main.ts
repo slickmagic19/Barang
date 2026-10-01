@@ -3,7 +3,8 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, loadMeta, loadSessions } from './lib/agent';
+import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings } from './lib/agent';
+import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
 import { fileIconEl } from './ui/fileIcons';
@@ -545,6 +546,36 @@ async function boot() {
 
   initChat(agentPanel, { toast });
   connectEvents();
+  // Agent notifications: Windows toast + taskbar badge + sound when a run
+  // finishes, needs approval, or errors. Renderer decides, main toasts.
+  armAudioUnlock();
+  watchAgentNotifications((kind: NotifyKind) => {
+    const s = readSettings();
+    if (!s.notifEnabled) return;
+    if (kind === 'done' && !s.notifOnDone) return;
+    if (kind === 'approval' && !s.notifOnApproval) return;
+    if (kind === 'error' && !s.notifOnError) return;
+    const title = agentStore.get().error && kind === 'error'
+      ? 'Barang — agent error'
+      : kind === 'approval' ? 'Barang — approval needed' : 'Barang — agent finished';
+    const body = kind === 'error'
+      ? (agentStore.get().error ?? 'The run failed.').slice(0, 200)
+      : kind === 'approval'
+        ? `${agentStore.get().permissions.length} change(s) waiting for your review.`
+        : (activeSessionTitle() ?? 'Your task is complete.');
+    if (s.notifSound) {
+      const url = resolveSoundUrl(kind === 'error' ? 'alert' : s.notifSoundName, s.notifCustomPath);
+      void playNotificationSound(url, s.notifVolume / 100);
+    }
+    const focused = document.hasFocus();
+    if (!focused && s.notifNative) {
+      void barang().app.notify({ title, body, kind, badge: s.notifTaskbar }).catch(() => undefined);
+    } else if (focused && s.notifToastFocused) {
+      toast(`${title.replace('Barang — ', '')}: ${body}`, kind === 'error' ? 'error' : 'info');
+    }
+  });
+  // Smoke/introspection hook (read-only decision fn, like __barangTermBuffer).
+  (window as unknown as { __barangNotifDecide: typeof decideAgentNotification }).__barangNotifDecide = decideAgentNotification;
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
 

@@ -464,8 +464,10 @@ async function boot() {
   const viewBar = el('div', { class: 'side-viewbar' });
   const btnViewExplorer = el('button', { class: 'icon-btn side-view-btn active', title: 'Explorer' }) as HTMLButtonElement;
   btnViewExplorer.append(iconEl('file', 15));
-  const btnViewScm = el('button', { class: 'icon-btn side-view-btn', title: 'Source control' }) as HTMLButtonElement;
+  const btnViewScm = el('button', { class: 'icon-btn side-view-btn', title: 'Source control (Ctrl+Shift+G)' }) as HTMLButtonElement;
   btnViewScm.append(iconEl('branch', 15));
+  const scmBadge = el('span', { class: 'scm-badge hidden' });
+  btnViewScm.append(scmBadge);
   viewBar.append(btnViewExplorer, btnViewScm);
   const explorerHost = el('div', { class: 'side-view', id: 'view-explorer' });
   const scmHost = el('div', { class: 'side-view hidden', id: 'view-scm' });
@@ -494,12 +496,18 @@ async function boot() {
   let explorer = initExplorer(explorerHost, explorerHooks, root);
   const scmApi: ScmApi = initScm(scmHost, {
     toast,
+    onOpenFile: (p, opts) => void openFile(p, opts),
     revealInExplorer: (p) => void revealInTree(p),
     refreshExplorer: () => {
       refreshExplorer();
       explorer.repaint();
     },
-    onRepo: (info) => status.setGit(info),
+    onRepo: (info) => {
+      status.setGit(info);
+      const n = info?.total ?? 0;
+      scmBadge.textContent = n > 99 ? '99+' : String(n);
+      scmBadge.classList.toggle('hidden', n === 0);
+    },
   });
   try {
     if (localStorage.getItem('barang:side-view') === 'scm') setSideView('scm');
@@ -639,6 +647,11 @@ async function boot() {
     } else if (mod && e.key.toLowerCase() === 'o' && !termFocus) {
       e.preventDefault();
       openFolderFlow();
+    } else if (mod && e.key.toLowerCase() === 'g' && e.shiftKey) {
+      // VSCode SCM focus: reveal the Source Control view + commit box.
+      e.preventDefault();
+      setSideView('scm');
+      scmApi.focusCommit();
     } else if (mod && e.code === 'Backquote') {
       // VSCode terminal chords: Ctrl+` toggle panel, Ctrl+Shift+` new terminal.
       e.preventDefault();

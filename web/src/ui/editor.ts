@@ -14,6 +14,7 @@ export interface Tab {
   dirty: boolean;
   mtime?: number;
   diff?: { before: string; after: string }; // present on session-diff review tabs
+  diffKind?: 'git' | 'session'; // diff provenance (git tabs get range-staging)
 }
 
 interface EditorState {
@@ -185,7 +186,36 @@ function ensureDiffEditor() {
     renderLineHighlight: 'all',
     smoothScrolling: true,
   });
+  // VSCode "Stage Selected Ranges": right-click in a git file diff stages
+  // the selected modified-side lines. Session diffs are not stageable.
+  diffEditor.getModifiedEditor().addAction({
+    id: 'barang.git.stageRanges',
+    label: 'Git: Stage Selected Ranges',
+    contextMenuGroupId: 'modification',
+    contextMenuOrder: 1.5,
+    run: (ed) => {
+      const s = editorStore.get();
+      const tab = s.tabs.find((t) => t.path === s.active);
+      if (!tab?.diff || tab.diffKind !== 'git' || !tab.file) {
+        hooks?.toast('Stage Selected Ranges needs a git file diff with a selection.', 'info');
+        return;
+      }
+      const sel = ed.getSelection();
+      if (!sel || sel.isEmpty()) {
+        hooks?.toast('Select changed lines in the right (modified) pane first.', 'info');
+        return;
+      }
+      stageRangesHandler?.({ file: tab.file, start: sel.startLineNumber, end: sel.endLineNumber });
+    },
+  });
   return diffEditor;
+}
+
+let stageRangesHandler: ((sel: { file: string; start: number; end: number }) => void) | null = null;
+
+/** SCM registers the backend for the diff-editor range-staging action. */
+export function registerStageRangesAction(handler: (sel: { file: string; start: number; end: number }) => void) {
+  stageRangesHandler = handler;
 }
 
 /**
@@ -193,7 +223,7 @@ function ensureDiffEditor() {
  * Reuses the tab + models when already open, refreshing contents.
  * Loads Monaco on demand: a diff can be the very first thing opened.
  */
-export async function openDiffTab(file: string, before: string, after: string) {
+export async function openDiffTab(file: string, before: string, after: string, kind: 'git' | 'session' = 'session') {
   if (!monaco) {
     try {
       monaco = await monacoLoader.load();
@@ -206,9 +236,10 @@ export async function openDiffTab(file: string, before: string, after: string) {
   const path = `diff:${file}`;
   const tab = editorStore.get().tabs.find((t) => t.path === path);
   if (!tab) {
-    editorStore.set((s) => ({ tabs: [...s.tabs, { path, file, dirty: false, diff: { before, after } }], active: path }));
+    editorStore.set((s) => ({ tabs: [...s.tabs, { path, file, dirty: false, diff: { before, after }, diffKind: kind }], active: path }));
   } else {
     tab.diff = { before, after };
+    tab.diffKind = kind;
     editorStore.set({ active: path });
   }
   diffModels.get(path)?.original.dispose();

@@ -278,28 +278,36 @@ function registerIpc() {
     return { ok: true };
   }));
   // --- source control (single channel; op dispatch, project-root cwd) ---
-  const gitOps = {
-    info: (a) => scm.info(gitCwd()),
-    diff: (a) => scm.fileDiff(gitCwd(), String(a.path || '')),
-    stage: (a) => scm.stage(gitCwd(), [].concat(a.paths ?? [])),
-    unstage: (a) => scm.unstage(gitCwd(), [].concat(a.paths ?? [])),
-    discard: (a) => scm.discard(gitCwd(), [].concat(a.paths ?? [])),
-    commit: (a) => scm.commit(gitCwd(), a.message, a.amend === true),
-    branches: (a) => scm.branches(gitCwd()),
-    checkout: (a) => scm.checkout(gitCwd(), String(a.name || '')),
-    'create-branch': (a) => scm.createBranch(gitCwd(), String(a.name || '')),
-    fetch: (a) => scm.fetchAll(gitCwd()),
-    pull: (a) => scm.pull(gitCwd()),
-    push: (a) => scm.push(gitCwd()),
-    sync: (a) => scm.sync(gitCwd()),
-    'stash-list': (a) => scm.stashList(gitCwd()),
-    'stash-push': (a) => scm.stashPush(gitCwd(), a.message),
-    'stash-pop': (a) => scm.stashPop(gitCwd()),
-    'stash-drop': (a) => scm.stashDrop(gitCwd()),
-    log: (a) => scm.log(gitCwd(), a.n),
-    init: (a) => scm.init(gitCwd()),
-  };
+  // `cwd` override exists for the throwaway E2E repo only — the UI never
+  // passes it (same trust level as the fs bridge either way).
   const gitCwd = () => root || path.join(app.getPath('userData'), 'scratch');
+  const cw = (a) => (a && typeof a.cwd === 'string' && a.cwd ? a.cwd : gitCwd());
+  const gitOps = {
+    info: (a) => scm.info(cw(a)),
+    diff: (a) => scm.fileDiff(cw(a), String(a.path || '')),
+    stage: (a) => scm.stage(cw(a), [].concat(a.paths ?? [])),
+    unstage: (a) => scm.unstage(cw(a), [].concat(a.paths ?? [])),
+    discard: (a) => scm.discard(cw(a), [].concat(a.paths ?? [])),
+    commit: (a) => scm.commit(cw(a), a.message, a.amend === true, a.signoff === true),
+    'commit-all': (a) => scm.commitAll(cw(a), a.message, a.signoff === true),
+    'undo-commit': (a) => scm.undoCommit(cw(a)),
+    'resolve-conflict': (a) => scm.resolveConflict(cw(a), String(a.path || ''), String(a.side || '')),
+    'stage-ranges': (a) => scm.stageRanges(cw(a), String(a.path || ''), a.ranges ?? []),
+    branches: (a) => scm.branches(cw(a)),
+    checkout: (a) => scm.checkout(cw(a), String(a.name || '')),
+    'create-branch': (a) => scm.createBranch(cw(a), String(a.name || '')),
+    fetch: (a) => scm.fetchAll(cw(a)),
+    pull: (a) => scm.pull(cw(a)),
+    push: (a) => scm.push(cw(a)),
+    sync: (a) => scm.sync(cw(a)),
+    'stash-list': (a) => scm.stashList(cw(a)),
+    'stash-push': (a) => scm.stashPush(cw(a), a.message),
+    'stash-pop': (a) => scm.stashPop(cw(a)),
+    'stash-drop': (a) => scm.stashDrop(cw(a)),
+    log: (a) => scm.log(cw(a), a.n),
+    init: (a) => scm.init(cw(a)),
+    config: (a) => scm.setConfig(cw(a), String(a.key || ''), String(a.value || '')),
+  };
   ipcMain.handle('git:run', ok(async (p = {}) => {
     const fn = gitOps[p.op];
     if (!fn) throw new Error(`Unknown git op: ${p.op}`);
@@ -460,6 +468,63 @@ async function runMainSmoke() {
     }
     if (!i.branch) throw new Error('no branch resolved');
     return `${i.branch} +${(i.staged ?? []).length} ~${(i.changes ?? []).length}`;
+  });
+  await check('git-cycle', async () => {
+    // Full lifecycle in a THROWAWAY repo under temp (never user code):
+    // init/config/commit/stage/unstage/branches/stash/commit-all/
+    // stage-ranges/discard/conflict-resolve/undo-commit.
+    const dir = path.join(app.getPath('temp'), `barang-git-cycle-${process.pid}`);
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.mkdir(dir, { recursive: true });
+    const W = (n, c) => fs.writeFile(path.join(dir, n), c, 'utf8');
+    const R = (n) => fs.readFile(path.join(dir, n), 'utf8');
+    const step = async (name, fn, want) => {
+      const r = await fn();
+      if (!want(r)) throw new Error(`step ${name} failed: ${JSON.stringify(r).slice(0, 160)}`);
+    };
+    const has = (list, p) => (list ?? []).some((f) => (f.path ?? f) === p);
+    try {
+      await scm.init(dir);
+      await scm.setConfig(dir, 'user.name', 'barang-test');
+      await scm.setConfig(dir, 'user.email', 'barang-test@example.com');
+      await step('init', () => scm.info(dir), (r) => r.isRepo === true && !!r.branch);
+      const main = (await scm.info(dir)).branch;
+      await W('a.txt', 'one\ntwo\n');
+      await step('stage', () => scm.stage(dir, ['a.txt']).then(() => scm.info(dir)), (r) => has(r.staged, 'a.txt'));
+      await step('commit', () => scm.commit(dir, 'first').then(() => scm.log(dir, 5)), (r) => r.all.length === 1);
+      await W('a.txt', 'one\nTWO\n');
+      await W('b.txt', 'new\n');
+      await step('status2', () => scm.info(dir), (r) => (r.changes ?? []).length === 2);
+      await step('unstage', () => scm.stage(dir, ['a.txt']).then(() => scm.unstage(dir, ['a.txt'])).then(() => scm.info(dir)),
+        (r) => (r.staged ?? []).length === 0 && has(r.changes, 'a.txt'));
+      await step('branch', () => scm.createBranch(dir, 'feat').then(() => scm.branches(dir)),
+        (r) => r.current === 'feat' && r.all.includes('feat'));
+      await step('checkout', () => scm.checkout(dir, main).then(() => scm.branches(dir)), (r) => r.current === main);
+      await step('stash', () => scm.stashPush(dir, 'wip').then(() => scm.stashList(dir)), (r) => r.all.length === 1);
+      await step('stash-pop', () => scm.stashPop(dir).then(() => scm.info(dir)), (r) => has(r.changes, 'a.txt'));
+      await step('commit-all', () => scm.commitAll(dir, 'second').then(() => scm.log(dir, 5)), (r) => r.all.length === 2);
+      await step('commit-all-untracked-stays', () => scm.info(dir), (r) => has(r.changes, 'b.txt'));
+      await W('a.txt', 'ONE\nTWO\nTHREE\n');
+      await step('stage-ranges', () => scm.stageRanges(dir, 'a.txt', [{ start: 3, end: 3 }]).then(() => scm.info(dir)),
+        (r) => has(r.staged, 'a.txt') && has(r.changes, 'a.txt'));
+      await scm.unstage(dir, ['a.txt']);
+      await step('discard', () => scm.discard(dir, ['a.txt']).then(() => scm.info(dir)), (r) => !has(r.changes, 'a.txt'));
+      const markers = 'top\n<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> branch\nbottom\n';
+      await W('c.txt', markers);
+      await step('resolve-ours', () => scm.resolveConflict(dir, 'c.txt', 'ours').then(() => R('c.txt')),
+        (t) => t.includes('A') && !t.includes('B') && !t.includes('<<<<<<<'));
+      await W('c.txt', markers);
+      await step('resolve-both', () => scm.resolveConflict(dir, 'c.txt', 'both').then(() => R('c.txt')),
+        (t) => t.includes('A') && t.includes('B'));
+      await step('undo-commit', () => scm.undoCommit(dir).then(() => scm.log(dir, 5)), (r) => r.all.length === 1);
+      return '14 steps ok';
+    } finally {
+      try {
+        await fs.rm(dir, { recursive: true, force: true });
+      } catch {
+        /* noop */
+      }
+    }
   });
   let failed = 0;
   for (const r of results) {
@@ -1040,13 +1105,18 @@ async function runUiSmoke() {
   console.log('[smoke-ui] terminal: ' + termProbe);
   pass = pass && termProbe === 'ok';
   // Source control: seed a real worktree change, open SCM from the
-  // statusbar, open its diff tab, then clean up.
+  // statusbar, diff it, stage/unstage it through the row actions, badge on.
+  // NOTE: the probe dir must NOT match .gitignore (`.barang-smoke*` is
+  // ignored) or git status will never show it.
   let scmProbe = 'skip';
   try {
     scmProbe = await w.webContents.executeJavaScript(`(async () => {
       const btn = document.querySelector('.status-git');
       if (!btn || btn.classList.contains('hidden')) return 'skip-no-git-btn';
-      await window.barang.fs.write('.barang-smoke-scm/probe.txt', 'v1');
+      // Self-heal: a previous interrupted run may have left a staged ghost.
+      try { await window.barang.git('unstage', { paths: ['scm-probe-tmp/probe.txt'] }); } catch {}
+      try { await window.barang.fs.remove('scm-probe-tmp'); } catch {}
+      await window.barang.fs.write('scm-probe-tmp/probe.txt', 'v1');
       btn.click();
       await new Promise((r) => setTimeout(r, 3000));
       const scm = document.getElementById('view-scm');
@@ -1054,8 +1124,18 @@ async function runUiSmoke() {
       const branch = document.querySelector('.scm-branch span:not(.ic)')?.textContent?.trim() ?? '';
       const rows = document.querySelectorAll('.scm-row').length;
       const commit = !!document.querySelector('.scm-commit-btn');
+      const badgeEl = document.querySelector('.side-view-btn .scm-badge');
+      const badge = badgeEl && !badgeEl.classList.contains('hidden') ? 'ok' : 'missing';
+      const secCount = (title) => {
+        const sec = [...document.querySelectorAll('.scm-sec')].find((s) => (s.querySelector('.scm-sec-title')?.textContent || '') === title);
+        return parseInt(sec?.querySelector('.scm-count')?.textContent ?? 'x', 10);
+      };
+      const findRow = (secTitle) => {
+        const sec = [...document.querySelectorAll('.scm-sec')].find((s) => (s.querySelector('.scm-sec-title')?.textContent || '') === secTitle);
+        return [...(sec?.querySelectorAll('.scm-row') ?? [])].find((r) => (r.title || '').includes('scm-probe-tmp/probe.txt'));
+      };
       let diff = 'no-rows';
-      const row = [...document.querySelectorAll('.scm-sec .scm-row')].find((r) => r.querySelector('.git-badge'));
+      const row = findRow('Changes');
       if (row) {
         row.click();
         await new Promise((r) => setTimeout(r, 2500));
@@ -1064,13 +1144,43 @@ async function runUiSmoke() {
         tab?.querySelector('.tab-x')?.click();
         await new Promise((r) => setTimeout(r, 600));
       }
-      try { await window.barang.fs.remove('.barang-smoke-scm'); } catch {}
+      // Stage/unstage through the real row actions; assert BACKEND state
+      // (git info is truth — DOM counts can lag paints under refresh races).
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const stagedHas = async () => {
+        try {
+          const st = await window.barang.git('info');
+          return (st.staged || []).some((f) => f.path === 'scm-probe-tmp/probe.txt');
+        } catch { return 'err'; }
+      };
+      let stage = 'skip', unstage = 'skip';
+      for (let i = 0; i < 6 && stage !== 'ok'; i++) {
+        const r = findRow('Changes');
+        const b = r ? r.querySelectorAll('.scm-row-act')[1] : null;
+        if (!b) break;
+        b.click();
+        await sleep(1500);
+        if (await stagedHas() === true) stage = 'ok';
+      }
+      if (stage === 'ok') {
+        for (let i = 0; i < 6 && unstage !== 'ok'; i++) {
+          const r = findRow('Staged Changes');
+          const b = r ? r.querySelectorAll('.scm-row-act')[1] : null;
+          if (!b) break;
+          b.click();
+          await sleep(1500);
+          if (await stagedHas() === false) unstage = 'ok';
+        }
+        if (unstage === 'skip') unstage = 'no-change';
+      }
+      try { await window.barang.git('unstage', { paths: ['scm-probe-tmp/probe.txt'] }); } catch {}
+      try { await window.barang.fs.remove('scm-probe-tmp'); } catch {}
       document.querySelector('.side-view-btn')?.click();
-      return 'branch=' + branch + ' rows=' + rows + ' commit=' + commit + ' diff=' + diff;
+      return 'branch=' + branch + ' rows=' + rows + ' commit=' + commit + ' diff=' + diff + ' stage=' + stage + ' unstage=' + unstage + ' badge=' + badge;
     })()`);
   } catch (e) { scmProbe = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] scm: ' + scmProbe);
-  pass = pass && /^branch=\S+ rows=\d+ commit=true diff=ok$/.test(scmProbe);
+  pass = pass && /^branch=\S+ rows=\d+ commit=true diff=ok stage=ok unstage=ok badge=ok$/.test(scmProbe);
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

@@ -87,7 +87,7 @@ export async function info(cwd) {
       staged,
       changes,
       conflicted: s.conflicted || [],
-      files: (s.files ?? []).map((f) => ({ path: f.path, index: f.index, work: f.working_dir })),
+      files: (s.files ?? []).map((f) => ({ path: f.path, index: f.index, work: f.working_dir, from: f.from ?? null })),
     };
   } catch (e) {
     err(e);
@@ -162,18 +162,180 @@ export async function discard(cwd, paths) {
   }
 }
 
-export async function commit(cwd, message, amend = false) {
+export async function commit(cwd, message, amend = false, signoff = false) {
   const msg = String(message || '').trim();
   if (!msg && !amend) throw new Error('Commit message is empty');
   try {
     const args = ['commit'];
     if (amend) args.push('--amend');
+    if (signoff) args.push('--signoff');
     if (msg) args.push('-m', msg);
     else args.push('--allow-empty-message', '-m', '');
     const r = await git(cwd).raw(args);
     return { ok: true, summary: String(r).split('\n')[0].slice(0, 120) };
   } catch (e) {
     err(e);
+  }
+}
+
+/** VSCode "Commit All": stage tracked modifications/deletions (git commit -a
+ *  semantics — untracked files stay) and commit. */
+export async function commitAll(cwd, message, signoff = false) {
+  const msg = String(message || '').trim();
+  if (!msg) throw new Error('Commit message is empty');
+  try {
+    const g = git(cwd);
+    await g.add(['-u']);
+    const args = ['commit'];
+    if (signoff) args.push('--signoff');
+    args.push('-m', msg);
+    const r = await g.raw(args);
+    return { ok: true, summary: String(r).split('\n')[0].slice(0, 120) };
+  } catch (e) {
+    err(e);
+  }
+}
+
+/** VSCode "Undo Last Commit": keep worktree + index, drop the commit. */
+export async function undoCommit(cwd) {
+  try {
+    await git(cwd).reset(['--soft', 'HEAD~1']);
+    return { ok: true };
+  } catch (e) {
+    err(e);
+  }
+}
+
+/** Resolve a conflicted file by side (whole-file granularity, like taking
+ *  one side everywhere). ours = HEAD, theirs = incoming, both = concat. */
+export async function resolveConflict(cwd, relPath, side) {
+  if (!['ours', 'theirs', 'both'].includes(side)) throw new Error(`Bad side: ${side}`);
+  const abs = path.join(cwd, relPath);
+  let text;
+  try {
+    text = await fs.readFile(abs, 'utf8');
+  } catch {
+    throw new Error(`Cannot read ${relPath}`);
+  }
+  if (!/^<{7} /m.test(text)) throw new Error(`${relPath} has no conflict markers`);
+  const out = [];
+  let ours = [];
+  let theirs = [];
+  let state = 'normal'; // normal | ours | theirs
+  for (const line of text.split('\n')) {
+    if (line.startsWith('<<<<<<< ')) {
+      if (state !== 'normal') throw new Error(`Nested conflict markers in ${relPath}`);
+      state = 'ours';
+      ours = [];
+      theirs = [];
+    } else if (line === '=======' && state === 'ours') {
+      state = 'theirs';
+    } else if (line.startsWith('>>>>>>> ') && state === 'theirs') {
+      if (side === 'ours' || side === 'both') out.push(...ours);
+      if (side === 'theirs' || side === 'both') out.push(...theirs);
+      state = 'normal';
+    } else if (state === 'ours') {
+      ours.push(line);
+    } else if (state === 'theirs') {
+      theirs.push(line);
+    } else {
+      out.push(line);
+    }
+  }
+  if (state !== 'normal') throw new Error(`Unterminated conflict block in ${relPath}`);
+  await fs.writeFile(abs, out.join('\n'), 'utf8');
+  // Resolved files stage immediately (VSCode marks them resolved).
+  await git(cwd).add([relPath]);
+  return { ok: true };
+}
+
+/** Stage modified-side line ranges (VSCode "Stage Selected Ranges").
+ *  Whole intersecting hunks are staged (U0 diff, headers recomputed). Pure
+ *  deletions (no modified-side lines) need whole-file staging instead. */
+export async function stageRanges(cwd, relPath, ranges) {
+  const sel = (ranges ?? [])
+    .map((r) => ({ start: Math.max(1, r.start | 0), end: Math.max(1, r.end | 0) }))
+    .filter((r) => r.end >= r.start);
+  if (!sel.length) throw new Error('No lines selected');
+  const g = git(cwd);
+  let diff;
+  try {
+    diff = await g.diff(['-U0', '--', relPath]);
+  } catch (e) {
+    err(e);
+  }
+  if (!diff || !diff.trim()) throw new Error('No unstaged changes in this file');
+  const inSel = (n) => sel.some((r) => n >= r.start && n <= r.end);
+  const hunks = [];
+  let cur = null;
+  for (const line of String(diff).split('\n')) {
+    const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (m) {
+      cur = {
+        oldStart: +m[1], oldCount: m[2] === undefined ? 1 : +m[2],
+        newStart: +m[3], newCount: m[4] === undefined ? 1 : +m[4], lines: [],
+      };
+      hunks.push(cur);
+      continue;
+    }
+    if (cur && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) cur.lines.push(line);
+  }
+  const kept = [];
+  for (const h of hunks) {
+    let n = h.newStart;
+    const keepPlus = [];
+    for (const line of h.lines) {
+      if (line.startsWith('+')) {
+        keepPlus.push(inSel(n));
+        n++;
+      } else if (line.startsWith(' ')) {
+        n++;
+      }
+    }
+    if (!keepPlus.some(Boolean)) continue; // untouched hunk
+    // Kept hunk: selected additions + ALL deletions (a del/add pair is one
+    // logical change) + context.
+    let oKept = 0;
+    let nKept = 0;
+    const out = [];
+    let pi = 0;
+    n = h.newStart;
+    for (const line of h.lines) {
+      if (line.startsWith('+')) {
+        if (keepPlus[pi]) {
+          out.push(line);
+          nKept++;
+        }
+        pi++;
+        n++;
+      } else if (line.startsWith('-')) {
+        out.push(line);
+        oKept++;
+      } else {
+        out.push(line);
+        oKept++;
+        nKept++;
+        n++;
+      }
+    }
+    kept.push(`@@ -${h.oldStart},${oKept} +${h.newStart},${nKept} @@`);
+    kept.push(...out);
+  }
+  if (!kept.length) throw new Error('Selection holds no stageable additions (pure deletions need whole-file stage)');
+  const patch = `diff --git a/${relPath} b/${relPath}\n--- a/${relPath}\n+++ b/${relPath}\n${kept.join('\n')}\n`;
+  const tmp = path.join(cwd, `.barang-stage-${Date.now()}.patch`);
+  try {
+    await fs.writeFile(tmp, patch, 'utf8');
+    await g.raw(['apply', '--cached', '--unidiff-zero', tmp]);
+    return { ok: true, hunks: kept.filter((l) => l.startsWith('@@')).length };
+  } catch (e) {
+    err(e);
+  } finally {
+    try {
+      await fs.unlink(tmp);
+    } catch {
+      /* noop */
+    }
   }
 }
 
@@ -307,6 +469,17 @@ export async function log(cwd, n = 15) {
 export async function init(cwd) {
   try {
     await git(cwd).init();
+    return { ok: true };
+  } catch (e) {
+    err(e);
+  }
+}
+
+/** Local identity for throwaway repos (key allowlisted — never global). */
+export async function setConfig(cwd, key, value) {
+  if (!['user.name', 'user.email'].includes(key)) throw new Error(`config key not allowed: ${key}`);
+  try {
+    await git(cwd).addConfig(key, String(value), false, 'local');
     return { ok: true };
   } catch (e) {
     err(e);

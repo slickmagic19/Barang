@@ -177,30 +177,41 @@ button { font-family: inherit; }
 .tree-label.open .tw svg { transform: rotate(90deg); }
 .tree-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
-/* SCM worktree badges (explorer + scm rows share colors) */
+/* SCM worktree badges (explorer + scm rows share layout; exact VSCode Dark+
+   decoration colors are injected by scm.ts so they survive any theme) */
 .git-badge {
   font-size: 10px; font-weight: 700; margin-left: auto; padding-left: 8px;
   flex: 0 0 auto; line-height: 1;
 }
-.git-A { color: var(--green); } .git-M { color: var(--yellow); }
-.git-D { color: var(--red); } .git-R { color: #b07fe8; }
-.git-U, .git-C { color: var(--red); } .git-\? { color: var(--text-faint); }
 
 /* sidebar view switch (Explorer | Source Control) */
 .side-viewbar {
   display: flex; gap: 2px; padding: 8px 8px 2px 10px; flex: 0 0 auto;
 }
-.side-view-btn { opacity: .55; }
+.side-view-btn { opacity: .55; position: relative; }
 .side-view-btn:hover { opacity: 1; }
 .side-view-btn.active { opacity: 1; color: var(--text); background: #ffffff0d; }
+/* Activity badge: uncommitted file count (VSCode blue dot equivalent). */
+.scm-badge {
+  position: absolute; top: 1px; right: 1px; min-width: 15px; height: 15px;
+  border-radius: 8px; background: var(--accent-strong); color: #fff;
+  font-size: 9.5px; font-weight: 700; line-height: 15px; text-align: center; padding: 0 3px;
+}
+.scm-badge.hidden { display: none; }
 .side-view { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .side-view.hidden { display: none; }
 
-/* source control view */
+/* source control view (VSCode layout) */
 .scm { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.scm-head {
+.scm-title {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 8px 0 14px; user-select: none;
+}
+.scm-title-text { font-size: 10.5px; font-weight: 700; letter-spacing: 1.1px; color: var(--text-faint); }
+.scm-title-acts { display: flex; gap: 1px; }
+.scm-repo {
   display: flex; align-items: center; justify-content: space-between; gap: 4px;
-  padding: 10px 8px 6px 12px;
+  padding: 6px 8px 6px 10px;
 }
 .scm-branch {
   display: inline-flex; align-items: center; gap: 6px; background: none; border: none;
@@ -211,6 +222,7 @@ button { font-family: inherit; }
 .scm-branch span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scm-ab { font-size: 11px; color: var(--text-faint); font-weight: 400; }
 .scm-sync { display: flex; gap: 1px; }
+.scm-publish { color: var(--green); }
 .scm-commit { padding: 2px 10px 8px; display: flex; flex-direction: column; gap: 6px; }
 .scm-msg {
   background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
@@ -219,8 +231,13 @@ button { font-family: inherit; }
 }
 .scm-msg:focus { border-color: var(--accent); }
 .scm-commit-row { display: flex; align-items: center; gap: 8px; }
-.scm-amend { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-dim); cursor: pointer; }
-.scm-commit-btn { margin-left: auto; }
+.scm-commit-hint { font-size: 10.5px; color: var(--text-faint); }
+.scm-split { margin-left: auto; display: inline-flex; }
+.scm-commit-btn { border-top-right-radius: 0 !important; border-bottom-right-radius: 0 !important; }
+.scm-commit-chev {
+  border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important;
+  border-left: 1px solid #ffffff2e !important; padding-left: 7px !important; padding-right: 7px !important;
+}
 .scm-groups { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-bottom: 12px; }
 .scm-sec { margin-top: 4px; }
 .scm-sec-head {
@@ -232,7 +249,8 @@ button { font-family: inherit; }
   font-size: 10.5px; color: var(--text-faint); background: #ffffff0d;
   border-radius: 9px; padding: 1px 7px; line-height: 1.5;
 }
-.scm-sec-tools { margin-left: auto; display: flex; gap: 1px; }
+.scm-sec-tools { margin-left: auto; display: flex; gap: 1px; opacity: 0; }
+.scm-sec-head:hover .scm-sec-tools, .scm-sec-head:focus-within .scm-sec-tools { opacity: 1; }
 .scm-row {
   display: flex; align-items: center; gap: 7px; width: 100%; box-sizing: border-box;
   background: none; border: none; color: var(--text-dim); font: inherit; font-size: 12.5px;
@@ -241,12 +259,19 @@ button { font-family: inherit; }
 .scm-row:hover { background: #ffffff08; color: var(--text); }
 .scm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
 .scm-dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: 11px; margin-left: -3px; min-width: 0; flex: 0 1 auto; }
-.scm-row-act { display: none; margin-left: auto; color: var(--text-faint); padding: 2px; border-radius: 5px; }
-.scm-row:hover .scm-row-act { display: inline-flex; }
+.scm-row-acts { display: none; margin-left: auto; align-items: center; gap: 1px; flex: 0 0 auto; }
+.scm-row:hover .scm-row-acts { display: inline-flex; }
+.scm-row-act {
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-faint); padding: 3px; border-radius: 5px;
+}
 .scm-row-act:hover { background: #ffffff1a; color: var(--text); }
 .scm-row .git-badge { margin-left: 2px; }
-.scm-row:hover .git-badge { margin-left: 2px; }
-.scm-row:has(.scm-row-act:hover) .git-badge { display: none; }
+.scm-row:hover .git-badge { visibility: hidden; }
+.scm-resolve-label { font-size: 10px; font-weight: 650; padding: 0 3px; white-space: nowrap; }
+.scm-dir-row .tw { color: var(--text-faint); display: inline-flex; width: 14px; }
+.scm-dir-row .tw.open svg { transform: rotate(90deg); }
+.scm-tree-sub .scm-row { padding-left: 28px; }
 .scm-hash { font-family: monospace; font-size: 11px; color: var(--yellow); flex: 0 0 auto; }
 .scm-none { padding: 4px 8px 4px 14px; font-size: 12px; color: var(--text-faint); }
 .scm-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 28px 18px; text-align: center; }

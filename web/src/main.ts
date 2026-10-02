@@ -3,7 +3,7 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession } from './lib/agent';
+import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel } from './lib/agent';
 import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -565,20 +565,34 @@ async function boot() {
   // First-run UX: with a project open and the agent online but zero
   // sessions, boot straight into a fresh session — never strand the user
   // on an empty skeletal panel waiting for them to find the + button.
+  // Silent by design: polls for the server (folder switches restart it),
+  // and the offline banner + error toast own genuine failures — this toast
+  // must only ever fire when a session was actually expected and possible.
   let creatingSession = false;
   async function ensureSession() {
+    if (!root) return;
+    for (let i = 0; i < 6; i++) {
+      try {
+        if ((await appState()).opencode.running) break;
+      } catch {
+        /* backend hiccup — retry below */
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+      if (i === 5) return; // still down: banner + error path own the message
+    }
+    if (creatingSession) return;
     try {
       await loadSessions();
     } catch {
-      return; // offline — the banner + retry path own this case
+      return;
     }
     const s = agentStore.get();
-    if (!shouldAutoCreateSession(root, opencodeOk, s.sessions.length, creatingSession)) return;
+    if (!shouldAutoCreateSession(root, true, s.sessions.length, creatingSession)) return;
     creatingSession = true;
     try {
       await createSession();
-    } catch (e) {
-      toast(`Could not start a session: ${(e as Error).message}`, 'error');
+    } catch {
+      /* silent: banner + error broadcast cover real outages */
     } finally {
       creatingSession = false;
     }
@@ -614,11 +628,12 @@ async function boot() {
   });
   // Smoke/introspection hook (read-only decision fn, like __barangTermBuffer).
   (window as unknown as { __barangNotifDecide: typeof decideAgentNotification }).__barangNotifDecide = decideAgentNotification;
-  // Perf-cap introspection: pure helpers + auto-session decision (unit-probed).
+  // Perf-cap introspection: pure helpers + auto-session/model decisions.
   (window as unknown as { __barangTestUtils: unknown }).__barangTestUtils = {
     sliceWindow,
     truncateText,
     shouldAutoCreateSession,
+    pickDefaultModel,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
@@ -669,6 +684,9 @@ async function boot() {
             status.setOpencode(st.opencode.running, st.opencode.version ?? st.opencode.cli ?? null);
             ocBanner.classList.add('hidden'); // background boot landed — drop the offline banner
             await loadSessions();
+            // Provider-gated defaults (spark/mimo) can only resolve now —
+            // boot-time loadMeta raced the server and saw an empty catalog.
+            await loadMeta().catch(() => {});
             toast('Agent connected.', 'info');
             void ensureSession();
           } catch (e) {

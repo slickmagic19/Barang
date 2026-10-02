@@ -1328,15 +1328,26 @@ async function runUiSmoke() {
         if (await stagedHas() === true) stage = 'ok';
       }
       if (stage === 'ok') {
-        for (let i = 0; i < 6 && unstage !== 'ok'; i++) {
-          const r = findRow('Staged Changes');
-          const b = r ? r.querySelectorAll('.scm-row-act')[1] : null;
-          if (!b) break;
-          b.click();
-          await sleep(1500);
-          if (await stagedHas() === false) unstage = 'ok';
+        // The backend flips before the repaint lands — wait for the staged
+        // row to exist before clicking it (else we click stale DOM).
+        let stRow = null;
+        for (let i = 0; i < 12 && !stRow; i++) {
+          stRow = findRow('Staged Changes');
+          if (!stRow) await sleep(800);
         }
-        if (unstage === 'skip') unstage = 'no-change';
+        if (!stRow) {
+          unstage = 'no-row';
+        } else {
+          for (let i = 0; i < 6 && unstage !== 'ok'; i++) {
+            const r = findRow('Staged Changes');
+            const b = r ? r.querySelectorAll('.scm-row-act')[1] : null;
+            if (!b) break;
+            b.click();
+            await sleep(1500);
+            if (await stagedHas() === false) unstage = 'ok';
+          }
+          if (unstage === 'skip') unstage = 'no-change';
+        }
       }
       try { await window.barang.git('unstage', { paths: ['scm-probe-tmp/probe.txt'] }); } catch {}
       try { await window.barang.fs.remove('scm-probe-tmp'); } catch {}
@@ -1428,6 +1439,24 @@ async function runUiSmoke() {
       if (auto('proj', false, 0, false) !== false) bad.push('auto-offline');
       if (auto('proj', true, 2, false) !== false) bad.push('auto-has');
       if (auto('proj', true, 0, true) !== false) bad.push('auto-busy');
+      const pm = u.pickDefaultModel;
+      const lbl = (m) => (m ? m.providerID + '/' + m.modelID : null);
+      const pool = [
+        { providerID: 'openrouter', modelID: 'poolside/laguna-s-2.1:free' },
+        { providerID: 'openrouter', modelID: 'meta/muse-spark-1.3' },
+        { providerID: 'opencode', modelID: 'mimo-v2.6-flash-free' },
+        { providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-flash' },
+        { providerID: 'opencode', modelID: 'muse-spark-1.3-contributor-free' },
+        { providerID: 'openai', modelID: 'gpt-5' },
+      ];
+      if (lbl(pm(pool)) !== 'opencode/muse-spark-1.3-contributor-free') bad.push('model-spark');
+      if (lbl(pm(pool.filter((m) => !/muse-spark/i.test(m.modelID)))) !== 'opencode/mimo-v2.6-flash-free') bad.push('model-mimo');
+      if (lbl(pm([{ providerID: 'openai', modelID: 'gpt-5' }])) !== null) bad.push('model-auto');
+      if (lbl(pm([{ providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-pro' }])) !== null) bad.push('model-paid-mimo');
+      if (lbl(pm([
+        { providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-flash' },
+        { providerID: 'openrouter', modelID: 'meta/muse-spark-1.3' },
+      ])) !== 'openrouter/meta/muse-spark-1.3') bad.push('model-or-spark');
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       // Self-heal leftovers from an interrupted run (a stale 2000-file dir
       // would blow the cap budget and hide this probe's own files).

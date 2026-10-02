@@ -105,6 +105,7 @@ export function connectEvents() {
 
 export interface BarangSettings {
   model: { providerID: string; modelID: string } | null; // null = auto
+  modelChosen: boolean; // explicit pick (even Auto) — boot defaults never override
   agent: string | null;
   freeOnly: boolean;
   showReasoning: boolean; // default false — reasoning rows hidden
@@ -135,6 +136,7 @@ const SETTINGS_KEY = 'barang:settings-v1';
 
 const SETTING_DEFAULTS: BarangSettings = {
   model: null,
+  modelChosen: false,
   agent: null,
   freeOnly: true,
   showReasoning: false,
@@ -192,6 +194,7 @@ export function readSettings(): BarangSettings {
       notifTaskbar: p.notifTaskbar !== false,
       notifToastFocused: p.notifToastFocused !== false,
       model: p.model?.providerID && p.model?.modelID ? { providerID: p.model.providerID, modelID: p.model.modelID } : null,
+      modelChosen: p.modelChosen === true || !!(p.model?.providerID && p.model?.modelID),
       agent: typeof p.agent === 'string' ? p.agent : null,
     };
   } catch {
@@ -211,10 +214,17 @@ export function isFreeModel(providerID: string, modelID: string): boolean {
   return /free|muse-spark/i.test(`${providerID}/${modelID}`);
 }
 
-/** Default model: Muse Spark when the login offers it, else auto. */
+/** Default model chain: Muse Spark free family first, then MiMo free
+ *  family (opencode provider preferred for both), else auto (null).
+ *  Only free models are ever auto-picked — paid models need an explicit pick.
+ *  Family regexes (not pinned versions) so 1.3 -> 1.4 renames keep working. */
 export function pickDefaultModel(models: Array<{ providerID: string; modelID: string }>): { providerID: string; modelID: string } | null {
-  const spark = models.find((m) => /muse-spark/i.test(`${m.providerID}/${m.modelID}`));
-  return spark ? { providerID: spark.providerID, modelID: spark.modelID } : null;
+  const pool = models.filter((m) => isFreeModel(m.providerID, m.modelID));
+  const inProv = (re: RegExp) =>
+    pool.find((m) => m.providerID === 'opencode' && re.test(m.modelID)) ??
+    pool.find((m) => re.test(`${m.providerID}/${m.modelID}`));
+  const pick = inProv(/muse-spark/i) ?? inProv(/mimo/i);
+  return pick ? { providerID: pick.providerID, modelID: pick.modelID } : null;
 }
 
 export async function loadMeta() {
@@ -245,10 +255,14 @@ export async function loadMeta() {
     ? saved.agent
     : agents.some((a) => a.name === s.agent) ? s.agent : (agents[0]?.name ?? 'build');
   let model = s.model;
-  if (!model && saved.model && providerModels.some((p) => p.providerID === saved.model!.providerID && p.modelID === saved.model!.modelID)) {
+  const savedInList = !!saved.model && providerModels.some((p) => p.providerID === saved.model!.providerID && p.modelID === saved.model!.modelID);
+  if (!model && savedInList) {
     model = saved.model;
   }
-  if (!model) model = pickDefaultModel(providerModels);
+  // Free default chain (spark -> mimo -> auto), but never over an explicit
+  // pick — including an explicit Auto (modelChosen). A vanished pick falls
+  // back to the chain rather than stranding on Auto.
+  if (!model && (!saved.modelChosen || !savedInList)) model = pickDefaultModel(providerModels);
   agentStore.set({ agents, providerModels, agent, model });
 }
 
@@ -502,9 +516,12 @@ export function listSelectableModels(): SelectableModel[] {
   return freeOnly ? providerModels.filter((m) => isFreeModel(m.providerID, m.modelID)) : providerModels;
 }
 
-/** Apply a model dropdown value ('' = auto): persists + updates the store. */
+/** Apply a model dropdown value ('' = auto): persists + updates the store.
+ *  Any explicit pick (including Auto) marks the model chosen, so boot-time
+ *  free defaults never yank it away on reconnect. */
 export function applyModelSelection(value: string) {
   const settings = readSettings();
+  settings.modelChosen = true;
   if (!value) {
     settings.model = null;
     writeSettings(settings);

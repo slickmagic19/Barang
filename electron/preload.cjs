@@ -83,6 +83,11 @@ const barang = {
   },
   /** Source control: single channel, op dispatch (info/diff/stage/…/log/init). */
   git: (op, args = {}) => invoke('git:run', { op, args }),
+  /** Bolt API client: main-process HTTP (no CORS), cancellable. */
+  api: {
+    send: (req) => invoke('api:send', req),
+    cancel: (reqId) => invoke('api:cancel', { reqId }),
+  },
   app: {
     state: () => ipcRenderer.invoke('app:state'),
     openFolder: () => invoke('app:open-folder'),

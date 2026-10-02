@@ -22,6 +22,7 @@ import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initTerminal, type TerminalApi } from './ui/terminal';
 import { initScm, decoration, type ScmApi } from './ui/scm';
+import { initBolt, substituteVars, buildUrl, parseUrlParams, prettyBody, highlightJson, type BoltApi } from './ui/bolt';
 import { initStatusbar } from './ui/statusbar';
 import { showContextMenu } from './ui/menu';
 import { fsApi } from './lib/api';
@@ -222,6 +223,7 @@ async function boot() {
   const center = el('div', { class: 'center' });
   const tabs = el('div', { class: 'tabs' });
   const editorHost = el('div', { class: 'editor-host' });
+  const boltHost = el('div', { class: 'bolt-host hidden', id: 'bolt-host' });
   const welcome = el('div', { class: 'welcome' });
   welcome.innerHTML = `
     <div class="welcome-inner">
@@ -238,11 +240,13 @@ async function boot() {
         <div><kbd>Ctrl+W</kbd><span>close tab</span></div>
         <div><kbd>Ctrl+\`</kbd><span>terminal</span></div>
         <div><kbd>Ctrl+Shift+\`</kbd><span>new terminal</span></div>
+        <div><kbd>Ctrl+Shift+G</kbd><span>source control</span></div>
+        <div><kbd>Ctrl+Shift+E</kbd><span>explorer</span></div>
         <div><kbd>Ctrl+J</kbd><span>agent panel</span></div>
       </div>
     </div>`;
   (welcome.querySelector('.welcome-logo') as HTMLElement).append(logoImg(52));
-  center.append(tabs, editorHost, welcome);
+  center.append(tabs, editorHost, boltHost, welcome);
 
   // Welcome extras: open entry points + recent projects (from app state below
   // once loaded — painted by paintWelcome()).
@@ -379,28 +383,38 @@ async function boot() {
   const termApi: TerminalApi = initTerminal(termPanel, { toast });
   termApi.onChange(({ count, open }) => status.setTerminal(count, open));
 
+  // Bolt API client (declared early: paintTabs routes bolt tabs through it).
+  let boltApi: BoltApi | null = null;
+
   const paintTabs = () => {
     const { tabs: ts, active } = editorStore.get();
     tabs.innerHTML = '';
     // Welcome (shortcuts + recents) is an empty-state screen only: hidden
     // once any tab is open OR a project is loaded.
     welcome.classList.toggle('hidden', ts.length > 0 || root !== '');
-    editorHost.classList.toggle('hidden', ts.length === 0);
+    const activeIsBolt = !!active?.startsWith('bolt:');
+    editorHost.classList.toggle('hidden', ts.length === 0 || activeIsBolt);
+    boltHost.classList.toggle('hidden', !activeIsBolt);
     for (const t of ts) {
+      const isBolt = t.path.startsWith('bolt:');
       const file = t.file ?? t.path;
-      const name = t.title ?? file.split('/').pop() ?? file;
+      const name = isBolt
+        ? (boltApi?.tabName(t.path.slice(5)) ?? 'Request')
+        : (t.title ?? file.split('/').pop() ?? file);
       const isDiff = !!t.diff;
       const b = el('button', {
         class: `tab${t.path === active ? ' active' : ''}${isDiff ? ' is-diff' : ''}`,
-        title: isDiff ? `${file} — session changes (read-only review)` : t.path,
+        title: isBolt ? `Bolt request — ${name}` : isDiff ? `${file} — session changes (read-only review)` : t.path,
         'data-path': t.path,
       }) as HTMLButtonElement;
       if (isDiff) b.append(el('span', { class: 'diff-badge' }, 'changes'));
-      b.append(fileIconEl(isDiff ? (t.file ?? '') : name, 14));
+      if (isBolt) b.append(iconEl('bolt', 14));
+      else b.append(fileIconEl(isDiff ? (t.file ?? '') : name, 14));
       b.append(el('span', { class: 'tab-name' }, name));
       if (t.dirty) b.append(el('span', { class: 'dirty-dot', title: 'Unsaved changes' }));
       b.onclick = () => {
-        if (t.diff) showDiffTab(t.path);
+        if (isBolt) boltApi?.activate(t.path.slice(5));
+        else if (t.diff) showDiffTab(t.path);
         else void openFile(t.path);
       };
       b.onauxclick = (e) => {
@@ -416,12 +430,14 @@ async function boot() {
           { label: 'Close Others', icon: 'x', run: () => void closeOtherTabs(p) },
           { label: 'Close Saved', icon: 'check', run: () => closeSavedTabs() },
           { label: 'Close All', icon: 'x', run: () => void closeAllTabs() },
-          { sep: true },
-          {
-            label: 'Copy Path', icon: 'file',
-            run: () => void copyText(f).then((ok) => toast(ok ? 'Path copied.' : 'Copy failed.', ok ? 'info' : 'error')),
-          },
-          { label: 'Reveal in Explorer', icon: 'folder', run: () => void revealInTree(f) },
+          ...(isBolt ? [] : [
+            { sep: true as const },
+            {
+              label: 'Copy Path', icon: 'file' as const,
+              run: () => void copyText(f).then((ok) => toast(ok ? 'Path copied.' : 'Copy failed.', ok ? 'info' : 'error')),
+            },
+            { label: 'Reveal in Explorer', icon: 'folder' as const, run: () => void revealInTree(f) },
+          ]),
         ]);
       };
       const x = el('span', { class: 'tab-x', title: 'Close' });
@@ -482,22 +498,28 @@ async function boot() {
 
   // Sidebar views: Explorer | Source Control (VSCode activity switch).
   // Sidebar views as tabs: Explorer | Source Control (with change-count badge).
+  // Sidebar views: Explorer | Source Control | Bolt (API client).
   const viewBar = el('div', { class: 'side-viewbar' });
-  const btnViewExplorer = el('button', { class: 'side-view-btn active', title: 'Explorer' }) as HTMLButtonElement;
-  btnViewExplorer.append(el('span', { class: 'side-view-label' }, 'Explorer'));
-  const btnViewScm = el('button', { class: 'side-view-btn', title: 'Source control (Ctrl+Shift+G)' }) as HTMLButtonElement;
-  btnViewScm.append(el('span', { class: 'side-view-label' }, 'Source Control'));
+  const btnViewExplorer = el('button', { class: 'icon-btn side-view-btn active', title: 'Explorer (Ctrl+Shift+E)' }) as HTMLButtonElement;
+  btnViewExplorer.append(iconEl('folder', 15));
+  const btnViewScm = el('button', { class: 'icon-btn side-view-btn', title: 'Source control (Ctrl+Shift+G)' }) as HTMLButtonElement;
+  btnViewScm.append(iconEl('branch', 15));
   const scmBadge = el('span', { class: 'scm-badge hidden' });
   btnViewScm.append(scmBadge);
-  viewBar.append(btnViewExplorer, btnViewScm);
+  const btnViewApi = el('button', { class: 'icon-btn side-view-btn', title: 'Bolt — API client' }) as HTMLButtonElement;
+  btnViewApi.append(iconEl('bolt', 15));
+  viewBar.append(btnViewExplorer, btnViewScm, btnViewApi);
   const explorerHost = el('div', { class: 'side-view', id: 'view-explorer' });
   const scmHost = el('div', { class: 'side-view hidden', id: 'view-scm' });
-  type SideView = 'explorer' | 'scm';
+  const apiHost = el('div', { class: 'side-view hidden', id: 'view-api' });
+  type SideView = 'explorer' | 'scm' | 'api';
   const setSideView = (v: SideView) => {
     explorerHost.classList.toggle('hidden', v !== 'explorer');
     scmHost.classList.toggle('hidden', v !== 'scm');
+    apiHost.classList.toggle('hidden', v !== 'api');
     btnViewExplorer.classList.toggle('active', v === 'explorer');
     btnViewScm.classList.toggle('active', v === 'scm');
+    btnViewApi.classList.toggle('active', v === 'api');
     try {
       localStorage.setItem('barang:side-view', v);
     } catch { /* private mode */ }
@@ -505,12 +527,13 @@ async function boot() {
   };
   btnViewExplorer.onclick = () => setSideView('explorer');
   btnViewScm.onclick = () => setSideView('scm');
+  btnViewApi.onclick = () => setSideView('api');
   const buildSideViews = () => {
     // Hosts persist across switches (view state lives on them) — clear their
     // painted content so re-init never stacks duplicate headers/trees.
     explorerHost.innerHTML = '';
     sidebar.innerHTML = '';
-    sidebar.append(railBtn, viewBar, explorerHost, scmHost);
+    sidebar.append(railBtn, viewBar, explorerHost, scmHost, apiHost);
   };
   buildSideViews();
 
@@ -531,8 +554,14 @@ async function boot() {
     },
   });
   try {
-    if (localStorage.getItem('barang:side-view') === 'scm') setSideView('scm');
+    const v = localStorage.getItem('barang:side-view');
+    if (v === 'scm' || v === 'api') setSideView(v);
   } catch { /* fresh default */ }
+
+  // Bolt API client (sidebar collections + center request tabs). Tab-strip
+  // repaints flow through the editorStore subscription (every bolt mutation
+  // already goes through editorStore.set), so onTabs is a noop.
+  boltApi = initBolt(apiHost, { toast, onTabs: () => undefined });
 
   // Hot project switch: no page reload (Monaco stays warm, no bundle
   // re-parse). Explorer re-inits, tabs reset, sessions reload scoped.
@@ -628,12 +657,17 @@ async function boot() {
   });
   // Smoke/introspection hook (read-only decision fn, like __barangTermBuffer).
   (window as unknown as { __barangNotifDecide: typeof decideAgentNotification }).__barangNotifDecide = decideAgentNotification;
-  // Perf-cap introspection: pure helpers + auto-session/model decisions.
+  // Perf-cap introspection: pure helpers + decisions (unit-probed in smoke).
   (window as unknown as { __barangTestUtils: unknown }).__barangTestUtils = {
     sliceWindow,
     truncateText,
     shouldAutoCreateSession,
     pickDefaultModel,
+    substituteVars,
+    buildUrl,
+    parseUrlParams,
+    prettyBody,
+    highlightJson,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
@@ -656,6 +690,11 @@ async function boot() {
     terminalNew: () => termApi.newTerminal(true),
     terminalClear: () => termApi.clearActive(),
     terminalKill: () => termApi.killActive(),
+    showView: (v) => setSideView(v),
+    boltNew: () => {
+      setSideView('api');
+      boltApi?.newRequest(true);
+    },
     refreshExplorer: () => {
       refreshExplorer();
       explorer.repaint();
@@ -729,9 +768,15 @@ async function boot() {
       if (e.shiftKey) {
         void saveAll();
       } else {
-        void saveActive().then((ok) => {
-          if (ok) toast('Saved', 'info');
-        });
+        const active = editorStore.get().active;
+        if (active?.startsWith('bolt:')) {
+          // Bolt request tabs save into their collection, not to disk.
+          if (boltApi?.saveActiveTab()) toast('Saved', 'info');
+        } else {
+          void saveActive().then((ok) => {
+            if (ok) toast('Saved', 'info');
+          });
+        }
       }
     } else if (mod && e.key.toLowerCase() === 'n' && !e.shiftKey && !termFocus) {
       e.preventDefault();
@@ -746,6 +791,9 @@ async function boot() {
     } else if (mod && e.key.toLowerCase() === 'b' && !termFocus) {
       e.preventDefault();
       toggleSideRail();
+    } else if (mod && e.key.toLowerCase() === 'e' && e.shiftKey) {
+      e.preventDefault();
+      setSideView('explorer');
     } else if (mod && e.key.toLowerCase() === 'o' && !termFocus) {
       e.preventDefault();
       openFolderFlow();

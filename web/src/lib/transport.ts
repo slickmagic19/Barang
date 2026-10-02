@@ -36,6 +36,13 @@ export interface BarangBridge {
     write(text: string): Promise<{ ok: boolean }>;
   };
   git(op: string, args?: Record<string, unknown>): Promise<any>;
+  api: {
+    send(req: { reqId: string; method: string; url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<{
+      ok: boolean; status: number; statusText: string; url: string; ms: number; size: number;
+      truncated: boolean; headers: Record<string, string>; body: string;
+    }>;
+    cancel(reqId: string): Promise<boolean>;
+  };
   events: {
     subscribe(cb: (data: string) => void): () => void;
     onConn(cb: (connected: boolean) => void): () => void;

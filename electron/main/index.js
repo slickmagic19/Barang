@@ -3,6 +3,7 @@
 // no auth in the UI: model credentials stay inside the user's opencode CLI.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from 'electron';
 import path from 'node:path';
+import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,7 @@ import * as files from './files.js';
 import { ensureServer, restartServer, stopServer, ocCall, opencodeState, attachPumpHandlers } from './opencodeClient.js';
 import * as term from './terminal.js';
 import * as scm from './git.js';
+import * as api from './api.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // electron/main
 const APP_DIR = path.resolve(here, '..', '..');
@@ -346,7 +348,9 @@ function registerIpc() {
   ipcMain.handle('term:resize', ok((p = {}) => term.resize(p.id, p.cols, p.rows)));
   ipcMain.handle('term:kill', ok((p = {}) => term.kill(p.id)));
   ipcMain.handle('term:list', ok(() => term.list()));
-  ipcMain.handle('term:default-shell', ok(() => ({ shell: term.defaultShell(), label: term.shellLabel(term.defaultShell()) })));
+  // Bolt (API client): main-process HTTP so CORS never applies.
+  ipcMain.handle('api:send', ok((p = {}) => api.send(p)));
+  ipcMain.handle('api:cancel', ok((p = {}) => api.cancel(p.reqId)));  ipcMain.handle('term:default-shell', ok(() => ({ shell: term.defaultShell(), label: term.shellLabel(term.defaultShell()) })));
   // Deterministic clipboard for the terminal (renderer clipboard API is
   // focus-gated; main-process electron.clipboard always works).
   ipcMain.handle('app:clip-read', ok(() => ({ text: clipboard.readText() })));
@@ -720,6 +724,48 @@ async function runUiSmoke() {
   w.webContents.on('page-title-updated', (e) => e.preventDefault());
   await w.loadFile(path.join(DIST_DIR, 'index.html'));
   await new Promise((r) => setTimeout(r, 8000));
+  // Bolt E2E runs against a LOCAL stub server (no internet needed): echo,
+  // 404, and plain-text endpoints with an artificial delay option.
+  const boltSrv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > 200000) req.destroy();
+    });
+    req.on('end', () => {
+      const u = new URL(req.url || '/', 'http://127.0.0.1');
+      if (u.pathname === '/notfound') {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'nope' }));
+        return;
+      }
+      if (u.pathname === '/text') {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end('plain-response-body');
+        return;
+      }
+      if (u.pathname === '/slow') {
+        setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          try {
+            res.end(JSON.stringify({ slow: true }));
+          } catch {
+            /* client went away (cancel test) */
+          }
+        }, 8000);
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json', 'x-bolt-probe': 'yes' });
+      res.end(JSON.stringify({
+        method: req.method,
+        query: Object.fromEntries(u.searchParams),
+        mirror: req.headers['x-mirror'] ?? null,
+        body,
+      }));
+    });
+  });
+  await new Promise((r) => boltSrv.listen(0, '127.0.0.1', r));
+  const boltPort = boltSrv.address().port;
   const probe = await w.webContents
     .executeJavaScript(
       `(async () => {
@@ -956,13 +1002,19 @@ async function runUiSmoke() {
             if (!item) { renameFile = 'no-item'; }
             else {
               item.click();
-              // Poll (not fixed sleep): the inline prompt needs an fs roundtrip
-              // and can lose a repaint race under load — same as unstage.
+              // Fast poll + immediate focus: the fresh prompt self-dismisses
+              // on blur (~150ms), and headless focus is racy — catching it
+              // early and focusing anchors it (same as a real user click).
               let inp = null;
-              for (let i = 0; i < 8 && !inp; i++) {
-                await new Promise((rr) => setTimeout(rr, 400));
+              for (let i = 0; i < 40 && !inp; i++) {
+                await new Promise((rr) => setTimeout(rr, 100));
                 renamePlaced = renamePlaced || !!q('.tree-sub .tree-prompt');
                 inp = document.querySelector('.tree-prompt-input');
+                if (inp) {
+                  try {
+                    inp.focus();
+                  } catch {}
+                }
               }
               if (!inp) { renameFile = 'no-prompt'; }
               else {
@@ -1563,6 +1615,141 @@ async function runUiSmoke() {
   } catch (e) { settingsUi = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] settings-ui: ' + settingsUi);
   pass = pass && /nav=10 navOk=ok tog=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
+  // Bolt E2E (local stub server above — no internet): pure helpers, then a
+  // real UI flow — new request, POST JSON + header, send, save, project
+  // mirror, history. Hermetic: localStorage + mirror file snapshotted first.
+  let boltE2e = 'skip';
+  try {
+    boltE2e = await w.webContents.executeJavaScript(`(async (port) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const u = window.__barangTestUtils;
+      if (!u || !u.substituteVars) return 'no-bolt-utils';
+      const bad = [];
+      if (u.substituteVars('{{a}}/x/{{ b }}', { a: '1', b: '2' }) !== '1/x/2') bad.push('subst');
+      if (u.substituteVars('{{zzz}}', {}) !== '{{zzz}}') bad.push('subst-unknown');
+      if (u.buildUrl('http://h/p', [{ key: 'a', value: '1', enabled: true }]) !== 'http://h/p?a=1') bad.push('buildUrl');
+      const b2 = u.buildUrl('http://h/p?x=0', [{ key: 'a', value: '1', enabled: true }, { key: 'off', value: '9', enabled: false }]);
+      if (!(b2.includes('x=0') && b2.includes('a=1') && !b2.includes('off'))) bad.push('buildUrl-merge');
+      const pp = u.parseUrlParams('http://h/p?a=1&b=2');
+      if (pp.length !== 2 || pp[0].key !== 'a' || pp[1].value !== '2') bad.push('parse');
+      const pr = u.prettyBody('{"a":1}');
+      if (!pr.isJson || !pr.pretty.includes('\\n')) bad.push('pretty');
+      if (u.prettyBody('plain').isJson) bad.push('pretty-raw');
+      if (!u.highlightJson('{"k":1}').includes('jk')) bad.push('highlight');
+      if (bad.length) return 'unit-FAIL:' + bad.join(';');
+      const lsBolt = localStorage.getItem('barang:bolt-v1');
+      const lsHist = localStorage.getItem('barang:bolt-hist-v1');
+      let mirrorHad = false, mirrorBefore = null;
+      try { const f = await window.barang.fs.read('.barang/bolt/my-collection.json'); mirrorHad = true; mirrorBefore = f.content; } catch (e) {}
+      let e2e = 'not-run';
+      try {
+        const viewBtn = document.querySelector('[title="Bolt — API client"]');
+        if (!viewBtn) e2e = 'no-view-btn';
+        else {
+          viewBtn.click();
+          await sleep(600);
+          if (document.getElementById('view-api')?.classList.contains('hidden')) e2e = 'view-did-not-open';
+          else {
+            const newBtn = document.querySelector('#view-api [title="New request"]');
+            if (!newBtn) e2e = 'no-new-btn';
+            else {
+              newBtn.click();
+              await sleep(1000);
+              const ms = document.querySelector('.bolt-method-sel');
+              if (!ms) e2e = 'no-builder';
+              else {
+                ms.value = 'POST'; ms.dispatchEvent(new Event('change', { bubbles: true }));
+                const url = document.querySelector('.bolt-url');
+                url.value = 'http://127.0.0.1:' + port + '/echo?probe=1';
+                url.dispatchEvent(new Event('change', { bubbles: true }));
+                const bs = document.querySelector('.bolt-body-sel');
+                bs.value = 'json'; bs.dispatchEvent(new Event('change', { bubbles: true }));
+                await sleep(400);
+                const ta = document.querySelector('.bolt-body-text');
+                ta.value = JSON.stringify({ ping: 'bolt-e2e-marker' });
+                ta.dispatchEvent(new Event('input', { bubbles: true }));
+                const hb = [...document.querySelectorAll('.bolt-subtab')].find((b) => b.textContent === 'Headers');
+                if (hb) hb.click();
+                await sleep(300);
+                const adds = [...document.querySelectorAll('.bolt-pane:not(.hidden) .bolt-kv-add')];
+                if (adds[0]) adds[0].click();
+                await sleep(300);
+                const keys = [...document.querySelectorAll('.bolt-pane:not(.hidden) .bolt-kv-key')];
+                const vals = [...document.querySelectorAll('.bolt-pane:not(.hidden) .bolt-kv-val')];
+                const k = keys[keys.length - 1], v = vals[vals.length - 1];
+                if (k && v) {
+                  k.value = 'x-mirror'; k.dispatchEvent(new Event('input', { bubbles: true }));
+                  v.value = 'hdr-marker'; v.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+                const send = document.querySelector('.bolt-send');
+                if (!send) e2e = 'no-send';
+                else {
+                  send.click();
+                  let status = '', tries = 0;
+                  while (tries++ < 40) {
+                    await sleep(250);
+                    status = document.querySelector('.bolt-status')?.textContent ?? '';
+                    const errBox = document.querySelector('.bolt-res-error')?.textContent ?? '';
+                    if (/^200/.test(status)) break;
+                    if (errBox) { status = 'ERRBOX:' + errBox.slice(0, 120); break; }
+                  }
+                  if (!/^200/.test(status)) e2e = 'send-failed:' + status;
+                  else {
+                    const pre = document.querySelector('.bolt-pre')?.textContent ?? '';
+                    const hl = !!document.querySelector('.bolt-pre .jk');
+                    if (!(pre.includes('bolt-e2e-marker') && pre.includes('probe') && pre.includes('hdr-marker') && hl)) e2e = 'echo-mismatch';
+                    else {
+                      document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true }));
+                      await sleep(1200);
+                      const allRows = [...document.querySelectorAll('#view-api .bolt-req-row')];
+                      const row = allRows.find((r) => (r.title || '').includes('/echo'));
+                      const stored = JSON.parse(localStorage.getItem('barang:bolt-v1') || '{}');
+                      const nCols = (stored.collections || []).length;
+                      const nReqs = (stored.collections || []).reduce((a, c) => a + (c.requests || []).length, 0);
+                      if (!row) e2e = 'not-in-sidebar:rows=' + allRows.length + ' cols=' + nCols + ' reqs=' + nReqs;
+                      else {
+                        const stored = JSON.parse(localStorage.getItem('barang:bolt-v1') || '{}');
+                        const persisted = (stored.collections || []).some((c) => (c.requests || []).some((r) => (r.url || '').includes('/echo')));
+                        if (!persisted) e2e = 'not-persisted';
+                        else {
+                          const syncBtn = document.querySelector('.bolt-foot .btn');
+                          if (!syncBtn) e2e = 'no-sync-btn';
+                          else {
+                            syncBtn.click();
+                            await sleep(1500);
+                            let mirrored = 'missing';
+                            try {
+                              const f = await window.barang.fs.read('.barang/bolt/my-collection.json');
+                              mirrored = f.content.includes('bolt-e2e-marker') ? 'ok' : 'no-marker';
+                            } catch (e2) { mirrored = 'read-err'; }
+                            const histOk = document.querySelectorAll('#view-api .bolt-hist-row').length > 0;
+                            e2e = (mirrored === 'ok' && histOk) ? 'ok' : ('mirror=' + mirrored + ' hist=' + histOk);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } finally {
+        try {
+          if (lsBolt === null) localStorage.removeItem('barang:bolt-v1'); else localStorage.setItem('barang:bolt-v1', lsBolt);
+          if (lsHist === null) localStorage.removeItem('barang:bolt-hist-v1'); else localStorage.setItem('barang:bolt-hist-v1', lsHist);
+        } catch (e) {}
+        try {
+          if (!mirrorHad) { await window.barang.fs.remove('.barang/bolt/my-collection.json'); }
+          else if (mirrorBefore !== null) { await window.barang.fs.write('.barang/bolt/my-collection.json', mirrorBefore); }
+        } catch (e) {}
+      }
+      return 'e2e:' + e2e;
+    })(${boltPort})`);
+  } catch (e) { boltE2e = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] bolt: ' + boltE2e);
+  pass = pass && /e2e:ok$/.test(boltE2e) && !/unit-FAIL/.test(boltE2e);
+  try { boltSrv.close(); } catch {}
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

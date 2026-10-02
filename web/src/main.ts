@@ -262,7 +262,7 @@ async function boot() {
     }
     welcomeRecent.classList.remove('hidden');
     welcomeRecent.append(el('p', { class: 'welcome-recent-label' }, 'Recent'));
-    for (const r of recents.slice(0, 5)) {
+    for (const r of recents.slice(0, 3)) {
       const b = el('button', { class: 'recent-row' }) as HTMLButtonElement;
       b.append(iconEl('folder', 14));
       const txt = el('span', { class: 'recent-text' });
@@ -327,12 +327,26 @@ async function boot() {
     toast(`Desktop backend unreachable: ${(e as Error).message}`, 'error');
   }
   if (!opencodeOk) {
+    // The CLI ships inside Barang (vendor/opencode) — this banner means the
+    // bundled server failed to start (slow first boot, AV lock), not that
+    // anything needs installing. It hides itself on opencode:ready.
     ocBanner.append(
       iconEl('alert', 14),
-      el('span', {}, 'opencode CLI not detected — install it: '),
-      el('code', {}, 'npm install -g opencode-ai'),
-      el('span', {}, ', then restart Barang. Editing still works; the agent is offline.'),
+      el('span', {}, 'Agent offline — the bundled opencode failed to start. Editing still works.'),
     );
+    const btnRetryOc = el('button', { class: 'btn btn-sm' }, 'Retry') as HTMLButtonElement;
+    btnRetryOc.onclick = () => {
+      btnRetryOc.toggleAttribute('disabled', true);
+      btnRetryOc.textContent = 'Retrying…';
+      void barang().app.retryOpencode()
+        .catch((e) => {
+          btnRetryOc.toggleAttribute('disabled', false);
+          btnRetryOc.textContent = 'Retry';
+          toast(`Agent still offline: ${(e as Error).message}`, 'error');
+        });
+      // Success path: opencode:ready broadcast hides this banner.
+    };
+    ocBanner.append(btnRetryOc);
     ocBanner.classList.remove('hidden');
   }
 
@@ -653,6 +667,7 @@ async function boot() {
             const st = await appState();
             opencodeOk = st.opencode.running;
             status.setOpencode(st.opencode.running, st.opencode.version ?? st.opencode.cli ?? null);
+            ocBanner.classList.add('hidden'); // background boot landed — drop the offline banner
             await loadSessions();
             toast('Agent connected.', 'info');
             void ensureSession();

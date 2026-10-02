@@ -92,6 +92,7 @@ const barang = {
     pickFiles: () => invoke('app:pick-files'),
     saveDialog: (defaultPath) => invoke('app:save-dialog', { defaultPath }),
     openExternal: (url) => invoke('app:open-external', { url }),
+    retryOpencode: () => invoke('app:retry-opencode'),
     /** Windows toast + taskbar badge. Resolves { ok, count } (never throws). */
     notify: (n) => invoke('app:notify', n),
     clearAttention: () => invoke('app:clear-attention'),

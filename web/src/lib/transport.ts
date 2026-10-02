@@ -55,6 +55,7 @@ export interface BarangBridge {
     pickFiles(): Promise<{ files: Array<{ path: string; name: string; size: number }> }>;
     saveDialog(defaultPath?: string): Promise<{ path: string }>;
     openExternal(url: string): Promise<{ ok: boolean }>;
+    retryOpencode(): Promise<{ root: string }>;
     notify(n: { title: string; body?: string; kind?: string; badge?: boolean }): Promise<{ ok: boolean; count: number }>;
     clearAttention(): Promise<{ ok: boolean }>;
     pickSound(): Promise<{ ok: boolean; id: string; name: string; fileUrl: string }>;

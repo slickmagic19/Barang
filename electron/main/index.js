@@ -351,6 +351,19 @@ function registerIpc() {
   // focus-gated; main-process electron.clipboard always works).
   ipcMain.handle('app:clip-read', ok(() => ({ text: clipboard.readText() })));
   ipcMain.handle('app:clip-write', ok((p = {}) => { clipboard.writeText(String(p.text ?? '')); return { ok: true }; }));
+  // Retry a failed bundled-server boot (slow disks, AV locks). The renderer
+  // banner offers this; success/error flow through the normal broadcasts.
+  ipcMain.handle('app:retry-opencode', ok(async () => {
+    const cwd = root || path.join(app.getPath('userData'), 'scratch');
+    try {
+      await fs.mkdir(cwd, { recursive: true });
+    } catch {
+      /* spawn reports real errors */
+    }
+    await restartServer(cwd, { onLog: (line) => console.log(line.trimEnd()) });
+    broadcast('opencode:ready', { root });
+    return { root };
+  }));
   // --- notifications (Windows toast + taskbar badge/flash) ---------------
   // Renderer decides WHEN (agent edges + settings + focus); main owns the
   // OS surface. Badge count clears the moment the window regains focus.
@@ -1471,6 +1484,16 @@ async function runUiSmoke() {
   } catch (e) { treeCap = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] tree-cap: ' + treeCap);
   pass = pass && treeCap === 'ok';
+  // Offline-banner retry channel: restarts the bundled server, returns root.
+  let retryOc = 'skip';
+  try {
+    retryOc = await w.webContents.executeJavaScript(`(async () => {
+      const r = await window.barang.app.retryOpencode();
+      return r && typeof r.root === 'string' ? 'ok' : 'bad:' + JSON.stringify(r);
+    })()`);
+  } catch (e) { retryOc = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] retry-opencode: ' + retryOc);
+  pass = pass && retryOc === 'ok';
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

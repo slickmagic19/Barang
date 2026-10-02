@@ -956,11 +956,14 @@ async function runUiSmoke() {
             if (!item) { renameFile = 'no-item'; }
             else {
               item.click();
-              await new Promise((rr) => setTimeout(rr, 600));
-              // VSCode parity: the rename prompt must sit in place (inside
-              // the sub-tree), not pinned to the top of the explorer.
-              renamePlaced = !!q('.tree-sub .tree-prompt');
-              const inp = document.querySelector('.tree-prompt-input');
+              // Poll (not fixed sleep): the inline prompt needs an fs roundtrip
+              // and can lose a repaint race under load — same as unstage.
+              let inp = null;
+              for (let i = 0; i < 8 && !inp; i++) {
+                await new Promise((rr) => setTimeout(rr, 400));
+                renamePlaced = renamePlaced || !!q('.tree-sub .tree-prompt');
+                inp = document.querySelector('.tree-prompt-input');
+              }
               if (!inp) { renameFile = 'no-prompt'; }
               else {
                 inp.focus();
@@ -1523,6 +1526,43 @@ async function runUiSmoke() {
   } catch (e) { retryOc = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] retry-opencode: ' + retryOc);
   pass = pass && retryOc === 'ok';
+  // Settings UI: nav rail lists all sections, rows are toggle switches that
+  // flip state, nav click scrolls to the section.
+  let settingsUi = 'skip';
+  try {
+    settingsUi = await w.webContents.executeJavaScript(`(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      document.querySelector('.topbar .settings-btn')?.click();
+      await new Promise((r) => setTimeout(r, 600));
+      const switches = document.querySelectorAll('.settings-overlay .switch-input').length;
+      const navItems = [...document.querySelectorAll('.settings-overlay .settings-nav-item')].map((b) => b.textContent);
+      let navOk = 'no-nav';
+      const notifBtn = [...document.querySelectorAll('.settings-overlay .settings-nav-item')].find((b) => b.textContent === 'Notifications');
+      if (notifBtn) {
+        notifBtn.click();
+        await new Promise((r) => setTimeout(r, 600));
+        const sec = document.querySelector('.settings-overlay #sec-notifications');
+        const body = document.querySelector('.settings-overlay .settings-body');
+        navOk = (sec && body && Math.abs(sec.getBoundingClientRect().top - body.getBoundingClientRect().top) < 120) ? 'ok' : 'no-scroll';
+      }
+      let tog = 'skip';
+      const free = document.querySelector('.settings-overlay .switch-input');
+      if (free) {
+        const before = free.checked;
+        free.click();
+        await new Promise((r) => setTimeout(r, 300));
+        const mid = free.checked;
+        free.click();
+        await new Promise((r) => setTimeout(r, 300));
+        tog = (mid !== before && free.checked === before) ? 'ok' : 'stuck';
+      }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return 'switches=' + switches + ' nav=' + navItems.length + ' navOk=' + navOk + ' tog=' + tog;
+    })()`);
+  } catch (e) { settingsUi = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] settings-ui: ' + settingsUi);
+  pass = pass && /nav=10 navOk=ok tog=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

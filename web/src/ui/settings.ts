@@ -36,11 +36,20 @@ export function openSettings(hooks: SettingsHooks) {
 
   const body = el('div', { class: 'settings-body' });
 
-  const section = (title: string) => body.append(el('p', { class: 'settings-label' }, title));
+  // Section registry (single source of truth for the nav rail). Every
+  // section() call below must use one of these titles.
+  const SECTIONS = ['Model', 'Agent', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
+  const secSlug = (t: string) => 'sec-' + t.toLowerCase();
+  const section = (title: string) => body.append(el('p', { class: 'settings-label', id: secSlug(title) }, title));
+  // Toggle switch row (VSCode-style). The real checkbox stays in the DOM
+  // (keyboard + state code untouched) — only its visuals become a switch.
   const checkRow = (label: string) => {
     const row = el('label', { class: 'settings-check' });
-    const box = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    row.append(box, el('span', {}, label));
+    const text = el('span', { class: 'settings-check-label' }, label);
+    const box = el('input', { type: 'checkbox', class: 'switch-input' }) as HTMLInputElement;
+    const track = el('span', { class: 'switch-track' });
+    track.append(el('span', { class: 'switch-thumb' }));
+    row.append(text, box, track);
     body.append(row);
     return box;
   };
@@ -156,7 +165,40 @@ export function openSettings(hooks: SettingsHooks) {
   resetRow.append(btnResetLayout);
   body.append(resetRow);
 
-  dialog.append(body);
+  // Nav rail (VSCode-style): click scrolls, scroll-spy highlights.
+  const content = el('div', { class: 'settings-content' });
+  const nav = el('nav', { class: 'settings-nav', 'aria-label': 'Settings sections' });
+  const navBtns = new Map<string, HTMLButtonElement>();
+  for (const t of SECTIONS) {
+    const b = el('button', { class: 'settings-nav-item' }, t) as HTMLButtonElement;
+    b.onclick = () => {
+      setActiveNav(t);
+      document.getElementById(secSlug(t))?.scrollIntoView({ block: 'start' });
+    };
+    nav.append(b);
+    navBtns.set(t, b);
+  }
+  const setActiveNav = (t: string) => {
+    for (const [name, b] of navBtns) b.classList.toggle('active', name === t);
+  };
+  let spyQueued = false;
+  body.addEventListener('scroll', () => {
+    if (spyQueued) return;
+    spyQueued = true;
+    requestAnimationFrame(() => {
+      spyQueued = false;
+      const top = body.getBoundingClientRect().top;
+      let cur = SECTIONS[0];
+      for (const t of SECTIONS) {
+        const s = document.getElementById(secSlug(t));
+        if (s && s.getBoundingClientRect().top - top <= 28) cur = t;
+      }
+      setActiveNav(cur);
+    });
+  });
+  setActiveNav(SECTIONS[0]);
+  content.append(nav, body);
+  dialog.append(content);
   overlay.append(dialog);
   document.body.append(overlay);
 

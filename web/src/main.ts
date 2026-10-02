@@ -3,7 +3,8 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings } from './lib/agent';
+import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession } from './lib/agent';
+import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
@@ -542,10 +543,33 @@ async function boot() {
       paintWelcome(appRecents);
     } catch { /* recents stay as-is */ }
     await loadSessions().catch((e) => toast(`Sessions: ${(e as Error).message}`, 'error'));
+    void ensureSession();
   }
 
   initChat(agentPanel, { toast });
   connectEvents();
+  // First-run UX: with a project open and the agent online but zero
+  // sessions, boot straight into a fresh session — never strand the user
+  // on an empty skeletal panel waiting for them to find the + button.
+  let creatingSession = false;
+  async function ensureSession() {
+    try {
+      await loadSessions();
+    } catch {
+      return; // offline — the banner + retry path own this case
+    }
+    const s = agentStore.get();
+    if (!shouldAutoCreateSession(root, opencodeOk, s.sessions.length, creatingSession)) return;
+    creatingSession = true;
+    try {
+      await createSession();
+    } catch (e) {
+      toast(`Could not start a session: ${(e as Error).message}`, 'error');
+    } finally {
+      creatingSession = false;
+    }
+  }
+  void ensureSession();
   // Agent notifications: Windows toast + taskbar badge + sound when a run
   // finishes, needs approval, or errors. Renderer decides, main toasts.
   armAudioUnlock();
@@ -576,6 +600,12 @@ async function boot() {
   });
   // Smoke/introspection hook (read-only decision fn, like __barangTermBuffer).
   (window as unknown as { __barangNotifDecide: typeof decideAgentNotification }).__barangNotifDecide = decideAgentNotification;
+  // Perf-cap introspection: pure helpers + auto-session decision (unit-probed).
+  (window as unknown as { __barangTestUtils: unknown }).__barangTestUtils = {
+    sliceWindow,
+    truncateText,
+    shouldAutoCreateSession,
+  };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
 
@@ -621,15 +651,18 @@ async function boot() {
         void (async () => {
           try {
             const st = await appState();
+            opencodeOk = st.opencode.running;
             status.setOpencode(st.opencode.running, st.opencode.version ?? st.opencode.cli ?? null);
             await loadSessions();
             toast('Agent connected.', 'info');
+            void ensureSession();
           } catch (e) {
             toast(`Agent state: ${(e as Error).message}`, 'error');
           }
         })();
       } else if (kind === 'opencode:error') {
         const msg = (payload as { error?: string } | undefined)?.error || 'Agent failed to start';
+        opencodeOk = false;
         status.setOpencode(false, null);
         toast(`Agent offline: ${msg}`, 'error');
       }

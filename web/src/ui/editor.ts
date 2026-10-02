@@ -41,6 +41,23 @@ export interface EditorHooks {
 }
 let hooks: EditorHooks | null = null;
 
+function nameOf(path: string): string {
+  return path.split('/').pop() || path;
+}
+
+/** True when any line exceeds ~200KB (minified bundles): tokenizing those
+ *  freezes highlight. Early-exit scan, no full split. */
+function hasMonsterLine(content: string): boolean {
+  let prev = 0;
+  for (let i = 0; i < content.length; i++) {
+    if (content.charCodeAt(i) === 10) {
+      if (i - prev > 200000) return true;
+      prev = i + 1;
+    }
+  }
+  return content.length - prev > 200000;
+}
+
 function langOf(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? '';
   const map: Record<string, string> = {
@@ -137,7 +154,15 @@ export async function openFile(path: string, opts?: { focus?: boolean }) {
         return;
       }
       tab.mtime = file.mtime;
-      model = monaco.editor.createModel(file.content ?? '', langOf(path), monaco.Uri.parse(`inmemory://barang/${path}`));
+      // Minified/bundled single-line monsters freeze syntax highlighting:
+      // open them as plain text (still fully editable) with a one-time note.
+      const content = file.content ?? '';
+      let lang = langOf(path);
+      if (lang !== 'plaintext' && hasMonsterLine(content)) {
+        lang = 'plaintext';
+        hooks?.toast(`${nameOf(path)} has very long lines — syntax highlighting off for speed.`, 'info');
+      }
+      model = monaco.editor.createModel(content, lang, monaco.Uri.parse(`inmemory://barang/${path}`));
       model.onDidChangeContent(() => {});
       models.set(path, model);
     } catch (e) {

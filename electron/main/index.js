@@ -1393,6 +1393,84 @@ async function runUiSmoke() {
   } catch (e) { notifIpc = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] notif-ipc: ' + notifIpc);
   pass = pass && notifIpc === 'ok';
+  // Perf caps: pure helpers + SCM 600-file render cap + auto-session decision.
+  let perfCaps = 'skip';
+  try {
+    perfCaps = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u) return 'no-utils-hook';
+      const bad = [];
+      const arr = Array.from({ length: 500 }, (_, i) => i);
+      const w1 = u.sliceWindow(arr, 150);
+      if (w1.visible.length !== 150 || w1.hidden !== 350 || w1.visible[0] !== 350) bad.push('sliceWindow');
+      const w2 = u.sliceWindow([1, 2], 150);
+      if (w2.visible.length !== 2 || w2.hidden !== 0) bad.push('sliceWindow-small');
+      const t1 = u.truncateText('abcdefghij', 4);
+      if (t1.text !== 'abcd' || t1.truncated !== true) bad.push('truncateText');
+      const t2 = u.truncateText('abc', 4);
+      if (t2.text !== 'abc' || t2.truncated !== false) bad.push('truncateText-short');
+      const auto = u.shouldAutoCreateSession;
+      if (auto('proj', true, 0, false) !== true) bad.push('auto-yes');
+      if (auto('', true, 0, false) !== false) bad.push('auto-noroot');
+      if (auto('proj', false, 0, false) !== false) bad.push('auto-offline');
+      if (auto('proj', true, 2, false) !== false) bad.push('auto-has');
+      if (auto('proj', true, 0, true) !== false) bad.push('auto-busy');
+      if (bad.length) return 'unit-FAIL:' + bad.join(';');
+      // Self-heal leftovers from an interrupted run (a stale 2000-file dir
+      // would blow the cap budget and hide this probe's own files).
+      try { await window.barang.fs.remove('perf-cap-scm'); } catch {}
+      try { await window.barang.fs.remove('perf-cap-tree'); } catch {}
+      for (let i = 0; i < 600; i++) {
+        await window.barang.fs.write('perf-cap-scm/f' + i + '.txt', 'x' + i);
+      }
+      document.querySelector('.status-git')?.click();
+      await new Promise((r) => setTimeout(r, 4000));
+      const chSec = [...document.querySelectorAll('.scm-sec')].find((s) => (s.querySelector('.scm-sec-title')?.textContent || '') === 'Changes');
+      const count = parseInt(chSec?.querySelector('.scm-count')?.textContent ?? 'x', 10);
+      const rows = chSec ? chSec.querySelectorAll('.scm-row').length : -1;
+      const more = [...(chSec?.querySelectorAll('.scm-none') ?? [])].some((d) => (d.textContent || '').includes('more'));
+      try { await window.barang.fs.remove('perf-cap-scm'); } catch {}
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      document.querySelector('.side-view-btn')?.click();
+      if (!(count >= 600)) return 'scm-count:' + count;
+      if (!(rows > 0 && rows <= 210)) return 'scm-rows:' + rows;
+      if (!more) return 'scm-no-more-row';
+      return 'ok';
+    })()`);
+  } catch (e) { perfCaps = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] perf-caps: ' + perfCaps);
+  pass = pass && perfCaps === 'ok';
+  // Explorer cap: 2100 files in one dir render <=2000 rows + more-row.
+  let treeCap = 'skip';
+  try {
+    treeCap = await w.webContents.executeJavaScript(`(async () => {
+      try { await window.barang.fs.remove('perf-cap-tree'); } catch {}
+      try { await window.barang.fs.remove('perf-cap-scm'); } catch {}
+      for (let i = 0; i < 2100; i++) {
+        await window.barang.fs.write('perf-cap-tree/g' + i + '.txt', 'y');
+      }
+      document.querySelector('.side-header [title="Refresh"]')?.click();
+      await new Promise((r) => setTimeout(r, 2500));
+      const lbl = [...document.querySelectorAll('.tree-label')].find((b) => (b.title || '') === 'perf-cap-tree');
+      if (!lbl) return 'no-dir-row';
+      lbl.click();
+      await new Promise((r) => setTimeout(r, 4000));
+      const live = document.querySelector('#view-explorer');
+      const lbl2 = [...live.querySelectorAll('.tree-label')].find((b) => (b.title || '') === 'perf-cap-tree');
+      const sub = lbl2?.closest('.tree-row')?.nextElementSibling;
+      const isSub = sub && sub.classList.contains('tree-sub');
+      const rows = isSub ? sub.querySelectorAll('.tree-row').length : -1;
+      const more = isSub ? !!sub.querySelector('.tree-more') : false;
+      lbl2?.click();
+      try { await window.barang.fs.remove('perf-cap-tree'); } catch {}
+      if (!isSub) return 'not-expanded';
+      if (!(rows > 0 && rows <= 2000)) return 'tree-rows:' + rows;
+      if (!more) return 'tree-no-more-row';
+      return 'ok';
+    })()`);
+  } catch (e) { treeCap = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] tree-cap: ' + treeCap);
+  pass = pass && treeCap === 'ok';
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise
@@ -1424,29 +1502,45 @@ if (!gotLock && !SMOKE && !SMOKE_UI) {
     await loadState();
     bootLog('state-loaded', `root=${root}`);
     registerIpc();
-    try {
-      await bootOpencode();
-      bootLog('opencode-ready', JSON.stringify(opencodeState()));
-    } catch (e) {
-      // opencode missing: the desktop still boots for editing; the renderer
-      // shows the install banner from app:state (running:false).
-      bootLog('opencode-failed', e.message);
-      console.error('[barang] ' + e.message);
-    }
-    if (SMOKE) {
-      bootLog('smoke-start');
-      await runMainSmoke();
-      return;
-    }
-    if (SMOKE_UI) {
+    if (SMOKE || SMOKE_UI) {
+      // Smoke harnesses need the server up first (probes assert against it).
+      try {
+        await bootOpencode();
+        bootLog('opencode-ready', JSON.stringify(opencodeState()));
+      } catch (e) {
+        bootLog('opencode-failed', e.message);
+        console.error('[barang] ' + e.message);
+      }
+      if (SMOKE) {
+        bootLog('smoke-start');
+        await runMainSmoke();
+        return;
+      }
       await runUiSmoke();
       return;
     }
     applyNoMenu();
     createWindow();
+    bootLog('window-open');
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+    // Fresh-PC lag lived here: the window used to wait for extraction +
+    // AV scan + cold Bun start (up to a minute of blank screen). Now the
+    // window opens first and the server follows; the UI already handles
+    // offline (banner) and flips online on opencode:ready.
+    void bootOpencode().then(
+      () => {
+        bootLog('opencode-ready', JSON.stringify(opencodeState()));
+        broadcast('opencode:ready', { root });
+      },
+      (e) => {
+        const msg = e?.message || String(e);
+        bootLog('opencode-failed', msg);
+        console.error('[barang] ' + msg);
+        broadcast('opencode:error', { error: msg });
+      },
+    );
   });
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();

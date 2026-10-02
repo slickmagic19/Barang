@@ -1,6 +1,5 @@
 // Tiny typed pub/sub store. No framework, no deps — keeps the shell <10KB.
 export type Listener = () => void;
-
 export function createStore<T extends object>(initial: T) {
   let state = initial;
   const listeners = new Set<Listener>();
@@ -266,4 +265,18 @@ function applyForward(before: string[], hunks: PatchHunk[]): string[] | null {
   }
   for (let i = at; i < before.length; i++) out.push(before[i]);
   return out;
+}
+
+/** Last-N windowing for ever-growing lists (chat history): returns the
+ *  visible slice plus how many older items are hidden. Pure (smoke-tested). */
+export function sliceWindow<T>(list: readonly T[], shown: number): { visible: T[]; hidden: number } {
+  const n = Math.max(0, shown | 0);
+  if (list.length <= n) return { visible: [...list], hidden: 0 };
+  return { visible: list.slice(list.length - n), hidden: list.length - n };
+}
+
+/** Hard cap for rendered text (chat bubbles): pure (smoke-tested). */
+export function truncateText(s: string, max: number): { text: string; truncated: boolean } {
+  if (s.length <= max) return { text: s, truncated: false };
+  return { text: s.slice(0, max), truncated: true };
 }

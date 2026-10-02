@@ -397,6 +397,17 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
     return row;
   }
 
+  /** Cap rendered file rows (repos with thousands of changes must not build
+   *  thousands of DOM rows + icons per refresh — counts stay exact). */
+  const SCM_CAP = 200;
+  function cappedList(list: FileEntry[], group: 'staged' | 'changes'): HTMLElement[] {
+    if (list.length <= SCM_CAP) return fileList(list, group);
+    return [
+      ...fileList(list.slice(0, SCM_CAP), group),
+      el('div', { class: 'scm-none' }, `…and ${list.length - SCM_CAP} more (sort, filter, or stage in batches)`),
+    ];
+  }
+
   function groupBlock(title: string, count: number, tools: HTMLElement[], body: HTMLElement[]): HTMLElement {
     const sec = el('div', { class: 'scm-sec' });
     const h = el('div', { class: 'scm-sec-head' });
@@ -518,7 +529,7 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
     groups.append(groupBlock(
       'Staged Changes', staged.length,
       staged.length ? [toolBtn('minus', 'Unstage All Changes', () => void mutate('unstage', { paths: staged.map((f) => f.path) }, 'Unstaged all.'))] : [],
-      staged.length ? fileList(staged, 'staged') : [el('div', { class: 'scm-none' }, 'Nothing staged.')],
+      staged.length ? cappedList(staged, 'staged') : [el('div', { class: 'scm-none' }, 'Nothing staged.')],
     ));
     const trackedChanges = changes.filter((f) => (f.work || '') !== '?' && (f.work || '') !== 'U');
     groups.append(groupBlock(
@@ -527,7 +538,7 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
         toolBtn('plus', 'Stage All Changes', () => void mutate('stage', { paths: changes.map((f) => f.path) }, 'Staged all.')),
         ...(trackedChanges.length ? [toolBtn('discard', 'Discard All Changes', () => void discardFiles(trackedChanges.map((f) => f.path)))] : []),
       ] : [],
-      changes.length ? fileList(changes, 'changes') : [el('div', { class: 'scm-none' }, 'Working tree clean.')],
+      changes.length ? cappedList(changes, 'changes') : [el('div', { class: 'scm-none' }, 'Working tree clean.')],
     ));
     if (showStash && stash.length) {
       groups.append(groupBlock(

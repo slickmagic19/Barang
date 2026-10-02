@@ -315,7 +315,11 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
     return true;
   }
   if (my !== paintSeq) return false; // superseded mid-fetch — never touch the DOM
-  for (const e of kids) {
+  // Cap rendered rows per directory (huge folders must not build tens of
+  // thousands of DOM rows + icons — counts stay exact via the more-row).
+  const TREE_CAP = 2000;
+  const shown = kids.slice(0, TREE_CAP);
+  for (const e of shown) {
     const row = el('div', { class: 'tree-row' });
     const isDir = e.type === 'dir';
     const open = isDir && expanded.has(e.path);
@@ -376,6 +380,9 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
         hooks.onOpenFile(e.path, { focus: true });
       };
     }
+  }
+  if (kids.length > shown.length) {
+    host.append(el('div', { class: 'tree-more' }, `…${kids.length - shown.length} more (use Ctrl+P to jump)`));
   }
   return true;
 }

@@ -10,7 +10,7 @@ import {
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
 import { barang } from '../lib/transport';
-import { el, md, timeAgo, debounce, roundTripChange } from '../lib/util';
+import { el, md, timeAgo, debounce, roundTripChange, sliceWindow, truncateText } from '../lib/util';
 import { iconEl } from './icons';
 import { confirmDialog } from './dialog';
 import { revealInEditor, openDiffTab } from './editor';
@@ -115,8 +115,13 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
   const lower = type.toLowerCase();
 
   if (typeof part.text === 'string' && (lower === 'text' || lower === '')) {
+    // Long agent outputs are capped: full markdown parse + DOM for MBs of
+    // text on every repaint is what freezes the UI on big runs. The full
+    // text renders lazily on expand (once).
+    const MAX_TEXT = 30000;
+    const { text, truncated } = truncateText(part.text, MAX_TEXT);
     const div = el('div', { class: 'msg-md' });
-    div.innerHTML = md(part.text);
+    div.innerHTML = md(text);
     // @path chips inside messages jump to files
     div.querySelectorAll('.md-mention').forEach((n) => {
       const m = (n.textContent || '').slice(1);
@@ -127,6 +132,21 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
       }
     });
     host.append(div);
+    if (truncated) {
+      const det = el('details', { class: 'tool-row msg-more' }) as HTMLDetailsElement;
+      const sum = el('summary', {}, `Show full message (${(part.text.length / 1024).toFixed(0)} KB)`);
+      det.append(sum);
+      let rendered = false;
+      det.ontoggle = () => {
+        if (det.open && !rendered) {
+          rendered = true;
+          const full = el('div', { class: 'msg-md' });
+          full.innerHTML = md(part.text as string);
+          det.append(full);
+        }
+      };
+      host.append(det);
+    }
     return;
   }
 
@@ -281,11 +301,28 @@ let prevBusy = false;
 // Sessions the user collapsed in Changes (new sessions default open).
 const changesCollapsed = new Set<string>();
 
+const CHAT_WINDOW = 150; // rendered messages (older hidden behind a button)
+const CHANGES_CAP = 200; // rendered change rows (counts stay exact)
+let chatShown = CHAT_WINDOW;
+let lastChatSession: string | null | undefined = undefined;
+let chatKeepScroll = false; // "show more" preserves position instead of jumping
+let requestChatPaint: (() => void) | null = null;
+let dcSig = '';
+let dcOut: ChangeEntry[] = [];
+
 function renderMessages(list: HTMLElement, hooks: ChatHooks) {
   const { messages, activeId, busy, status } = agentStore.get();
   const showReasoning = readSettings().showReasoning;
   const showActivity = readSettings().showActivity;
+  // Scroll anchor: capture BEFORE clearing (innerHTML resets scrollTop).
+  const prevTop = list.scrollTop;
+  const prevHeight = list.scrollHeight;
+  const atBottom = prevHeight - prevTop - list.clientHeight < 48;
   list.innerHTML = '';
+  if (activeId !== lastChatSession) {
+    lastChatSession = activeId;
+    chatShown = CHAT_WINDOW; // fresh session starts at the tail
+  }
   if (!messages.length && (busy || status === 'connecting')) {
     // Loading skeleton (connecting / first response streaming in).
     for (let i = 0; i < 2; i++) {
@@ -303,7 +340,19 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     );
     list.append(empty);
   }
-  for (const m of messages) {
+  // Window the history: giant sessions render only the tail (older messages
+  // behind a button). Full rebuilds each stream frame stay O(window).
+  const { visible, hidden } = sliceWindow(messages, chatShown);
+  if (hidden > 0) {
+    const more = el('button', { class: 'msg-more-btn' }, `Show ${Math.min(hidden, CHAT_WINDOW)} earlier messages (${hidden} hidden)`) as HTMLButtonElement;
+    more.onclick = () => {
+      chatShown += CHAT_WINDOW;
+      chatKeepScroll = true;
+      requestChatPaint?.();
+    };
+    list.append(more);
+  }
+  for (const m of visible) {
     const role = String(m.info?.role ?? 'assistant').toLowerCase();
     const parts = (m.parts ?? []).filter(
       (p) => (showReasoning || !isReasoningPart(p as { type?: unknown })) &&
@@ -333,7 +382,14 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     }
     list.append(wrap);
   }
-  list.scrollTop = list.scrollHeight;
+  if (chatKeepScroll) {
+    // "Show more" prepends above: hold the reading position steady.
+    list.scrollTop = list.scrollHeight - prevHeight + prevTop;
+    chatKeepScroll = false;
+  } else if (atBottom || visible.length <= CHAT_WINDOW) {
+    list.scrollTop = list.scrollHeight;
+  }
+  // else: user scrolled up mid-stream — leave them there (no more yanking).
 }
 
 export function initChat(panel: HTMLElement, hooks: ChatHooks) {
@@ -595,8 +651,18 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   function paintChanges() {
     const s = agentStore.get();
     // Changed files, derived from the session's edit/write tool calls —
-    // always consistent with the loaded messages.
-    const changes = deriveSessionChanges(s.messages, s.root);
+    // always consistent with the loaded messages. Memoized: derivation only
+    // re-runs when the message list actually changes, not on every paint.
+    const lastId = s.messages.length ? String(s.messages[s.messages.length - 1]?.info?.id ?? s.messages.length) : '';
+    const sig = `${s.root}|${s.messages.length}|${lastId}`;
+    let changes: ChangeEntry[];
+    if (sig === dcSig) {
+      changes = dcOut;
+    } else {
+      changes = deriveSessionChanges(s.messages, s.root);
+      dcSig = sig;
+      dcOut = changes;
+    }
     changesSec.classList.toggle('hidden', changes.length === 0);
     const collapsed = changesCollapsed.has(s.activeId ?? '');
     changesSec.classList.toggle('collapsed', collapsed);
@@ -607,7 +673,10 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     }
     changesCount.textContent = String(changes.length);
     changesList.innerHTML = '';
-    for (const d of changes) {
+    // Cap rendered rows (thousands of changed files must not build
+    // thousands of DOM rows + icons every paint — counts stay exact).
+    const shown = changes.slice(0, CHANGES_CAP);
+    for (const d of shown) {
       const st = diffStatus(d);
       const row = el('button', { class: `change-row ${st.cls}`, title: `${st.label} — click to review` }) as HTMLButtonElement;
       const stat = el('span', { class: 'change-stat' });
@@ -627,6 +696,9 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       );
       row.onclick = () => void openChangeReview(d, hooks);
       changesList.append(row);
+    }
+    if (changes.length > shown.length) {
+      changesList.append(el('div', { class: 'scm-none' }, `…and ${changes.length - shown.length} more (open a diff from search, or commit in batches)`));
     }
     // run finished with new changes → toast once
     if (prevBusy && !s.busy) {
@@ -680,6 +752,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     btnSend.toggleAttribute('disabled', s.busy);
   };
   const paintDebounced = debounce(paint, 120);
+  requestChatPaint = paint;
   agentStore.subscribe(paintDebounced);
   paint();
 

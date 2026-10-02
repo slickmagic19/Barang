@@ -85,13 +85,9 @@ export function connectEvents() {
   // Upstream /event frames forwarded by the desktop main process.
   barang().events.onConn((c) => agentStore.set({ connected: c }));
   barang().events.subscribe((data: string) => {
-    let parsed: unknown = null;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      parsed = data;
-    }
-    const blob = JSON.stringify(parsed ?? '').toLowerCase();
+    // Hot path (every streamed frame): match on the raw string. Parsing +
+    // re-stringifying multi-MB frames here used to stall the UI.
+    const blob = data.toLowerCase();
     if (blob.includes('permission')) {
       void refreshActive().catch(() => {});
       scheduleSessions();
@@ -274,6 +270,13 @@ export async function loadSessions() {
   agentStore.set({ sessions, activeId });
   if (activeId && activeId !== s.activeId) await refreshActive();
   else if (activeId) await refreshStatus(activeId);
+}
+
+/** First-run UX decision (pure, smoke-tested): with a project open and the
+ *  agent online but zero sessions, boot straight into a fresh session
+ *  instead of stranding the user on an empty skeletal panel. */
+export function shouldAutoCreateSession(root: string, opencodeOk: boolean, sessionCount: number, creating: boolean): boolean {
+  return root !== '' && opencodeOk && sessionCount === 0 && !creating;
 }
 
 export async function createSession(title?: string): Promise<string> {

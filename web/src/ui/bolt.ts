@@ -44,6 +44,36 @@ export function uid(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+/** Usual header names (name dropdown) + usual values per header. */
+export const COMMON_HEADER_NAMES = [
+  'Accept', 'Accept-Language', 'Authorization', 'Cache-Control', 'Connection',
+  'Content-Type', 'Cookie', 'Host', 'If-Modified-Since', 'If-None-Match',
+  'Origin', 'Referer', 'User-Agent', 'X-Api-Key', 'X-Requested-With',
+];
+
+const HEADER_VALUE_SUGGESTIONS: Record<string, string[]> = {
+  'accept': ['application/json', 'text/plain', 'text/html', 'application/xml', '*/*'],
+  'content-type': ['application/json', 'application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain', 'text/html'],
+  'authorization': ['Bearer ', 'Basic '],
+  'cache-control': ['no-cache', 'no-store', 'max-age=0'],
+  'accept-language': ['en-US', 'en-US,en;q=0.9', 'en-GB'],
+  'connection': ['keep-alive', 'close'],
+  'user-agent': ['Barang/1.0', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'],
+};
+
+/** Usual values for a header name (case-insensitive). [] = free text. Pure. */
+export function headerValueSuggestions(name: string): string[] {
+  return HEADER_VALUE_SUGGESTIONS[name.trim().toLowerCase()] ?? [];
+}
+
+/** One-click common headers (skips names already present). */
+const COMMON_HEADER_PRESETS: Array<[string, string]> = [
+  ['Accept', 'application/json'],
+  ['Cache-Control', 'no-cache'],
+  ['User-Agent', 'Barang/1.0'],
+  ['Authorization', 'Bearer '],
+];
+
 function kv(): BoltKV {
   return { id: uid(), key: '', value: '', enabled: true };
 }
@@ -809,7 +839,12 @@ function boltOpenScratch(seed: Partial<BoltRequest>) {
 let boltApiRef: BoltApi | null = null;
 
 // --- builder (center tab) ------------------------------------------------------
-function kvTable(list: BoltKV[], onMutate: () => void, valuePlaceholder = 'value'): HTMLElement {
+function kvTable(
+  list: BoltKV[],
+  onMutate: () => void,
+  valuePlaceholder = 'value',
+  opts: { nameListId?: string; suggestValues?: (name: string) => string[] } = {},
+): HTMLElement {
   const box = el('div', { class: 'bolt-kv-box' });
   const render = () => {
     box.innerHTML = '';
@@ -831,6 +866,29 @@ function kvTable(list: BoltKV[], onMutate: () => void, valuePlaceholder = 'value
         item.value = val.value;
         onMutate();
       };
+      if (opts.nameListId) k.setAttribute('list', opts.nameListId);
+      let extra: HTMLElement | null = null;
+      if (opts.suggestValues) {
+        // Per-row value suggestions following the header name.
+        const dl = document.createElement('datalist');
+        dl.id = `bolt-values-${uid()}`;
+        const fill = () => {
+          dl.innerHTML = '';
+          for (const s of (opts.suggestValues as (n: string) => string[])(k.value)) {
+            const o = document.createElement('option') as HTMLOptionElement;
+            o.value = s;
+            dl.append(o);
+          }
+        };
+        const prev = k.oninput;
+        k.oninput = () => {
+          (prev as unknown as () => void)?.();
+          fill();
+        };
+        val.setAttribute('list', dl.id);
+        fill();
+        extra = dl;
+      }
       const del = el('button', { class: 'icon-btn', title: 'Delete row' }) as HTMLButtonElement;
       del.append(iconEl('x', 12));
       del.onclick = () => {
@@ -840,6 +898,7 @@ function kvTable(list: BoltKV[], onMutate: () => void, valuePlaceholder = 'value
         render();
       };
       row.append(on, k, val, del);
+      if (extra) row.append(extra);
       box.append(row);
     }
     const add = el('button', { class: 'bolt-kv-add' }, '+ Add row') as HTMLButtonElement;
@@ -971,7 +1030,42 @@ function renderBuilder(id: string) {
     panes[key] = pane;
     paneBox.append(pane);
   }
-  panes.headers.append(kvTable(d.headers, touchDirtyAndBadges));
+  panes.headers.append(renderHeadersPane());
+  function renderHeadersPane(): HTMLElement {
+    const wrap = el('div', {});
+    const dl = document.createElement('datalist');
+    dl.id = `bolt-hdr-names-${uid()}`;
+    for (const n of COMMON_HEADER_NAMES) {
+      const o = document.createElement('option') as HTMLOptionElement;
+      o.value = n;
+      dl.append(o);
+    }
+    wrap.append(dl);
+    const addCommon = el('button', { class: 'bolt-kv-add', title: 'Add a usual header' }, '+ Common') as HTMLButtonElement;
+    addCommon.onclick = (e) => {
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      showContextMenu(r.left, r.bottom + 6, COMMON_HEADER_PRESETS.map(([n, v]) => ({
+        label: `${n}: ${v}`,
+        icon: 'plus' as const,
+        run: () => {
+          if (d.headers.some((h) => h.key.toLowerCase() === n.toLowerCase())) {
+            hooksRef.toast(`Already have ${n}.`, 'info');
+            return;
+          }
+          d.headers.push({ id: uid(), key: n, value: v, enabled: true });
+          touchDirtyAndBadges();
+          refreshHeadersPane();
+        },
+      })));
+    };
+    wrap.append(addCommon);
+    wrap.append(kvTable(d.headers, touchDirtyAndBadges, 'value', { nameListId: dl.id, suggestValues: headerValueSuggestions }));
+    return wrap;
+  }
+  function refreshHeadersPane() {
+    panes.headers.innerHTML = '';
+    panes.headers.append(renderHeadersPane());
+  }
   // Auth pane.
   {
     const typeSel = el('select', { class: 'bolt-auth-sel', title: 'Auth type' }) as HTMLSelectElement;

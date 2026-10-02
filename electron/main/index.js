@@ -1621,6 +1621,7 @@ async function runUiSmoke() {
   let boltE2e = 'skip';
   try {
     boltE2e = await w.webContents.executeJavaScript(`(async (port) => {
+    try {
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const u = window.__barangTestUtils;
       if (!u || !u.substituteVars) return 'no-bolt-utils';
@@ -1636,6 +1637,10 @@ async function runUiSmoke() {
       if (!pr.isJson || !pr.pretty.includes('\\n')) bad.push('pretty');
       if (u.prettyBody('plain').isJson) bad.push('pretty-raw');
       if (!u.highlightJson('{"k":1}').includes('jk')) bad.push('highlight');
+      if (!u.headerValueSuggestions('Accept').includes('application/json')) bad.push('hdr-accept');
+      if (!u.headerValueSuggestions('CONTENT-TYPE').includes('application/json')) bad.push('hdr-case');
+      if (u.headerValueSuggestions('X-Custom-Thing').length !== 0) bad.push('hdr-unknown');
+      if (!(Array.isArray(u.COMMON_HEADER_NAMES) && u.COMMON_HEADER_NAMES.length >= 10 && u.COMMON_HEADER_NAMES.includes('Authorization'))) bad.push('hdr-names');
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       const lsBolt = localStorage.getItem('barang:bolt-v1');
       const lsHist = localStorage.getItem('barang:bolt-hist-v1');
@@ -1671,8 +1676,17 @@ async function runUiSmoke() {
                 const hb = [...document.querySelectorAll('.bolt-subtab')].find((b) => b.textContent === 'Headers');
                 if (hb) hb.click();
                 await sleep(300);
+                const subDbg = 'subtabs=[' + [...document.querySelectorAll('.bolt-subtab')].map((b) => b.textContent + (b.classList.contains('active') ? '*' : '')).join('|') + ']';
+                const paneDbg = 'panes=[' + [...document.querySelectorAll('.bolt-pane')].map((p) => (p.classList.contains('hidden') ? 'H' : 'V')).join(',') + ']';
                 const adds = [...document.querySelectorAll('.bolt-pane:not(.hidden) .bolt-kv-add')];
-                if (adds[0]) adds[0].click();
+                const commonBtn = adds.find((b) => (b.textContent || '').includes('Common'));
+                if (commonBtn) commonBtn.click();
+                await sleep(400);
+                const presetItem = [...document.querySelectorAll('.ctx-menu .ctx-item')].find((b) => (b.textContent || '').includes('Accept'));
+                if (presetItem) presetItem.click();
+                await sleep(400);
+                const rowAdds = [...document.querySelectorAll('.bolt-pane:not(.hidden) .bolt-kv-add')].filter((b) => !(b.textContent || '').includes('Common'));
+                if (rowAdds[0]) rowAdds[0].click();
                 await sleep(300);
                 const keys = [...document.querySelectorAll('.bolt-pane:not(.hidden) .bolt-kv-key')];
                 const vals = [...document.querySelectorAll('.bolt-pane:not(.hidden) .bolt-kv-val')];
@@ -1681,9 +1695,11 @@ async function runUiSmoke() {
                   k.value = 'x-mirror'; k.dispatchEvent(new Event('input', { bubbles: true }));
                   v.value = 'hdr-marker'; v.dispatchEvent(new Event('input', { bubbles: true }));
                 }
-                const send = document.querySelector('.bolt-send');
-                if (!send) e2e = 'no-send';
-                else {
+                const dlOk = document.querySelectorAll('.bolt-req datalist option').length >= 10;
+                if (!dlOk) e2e = 'no-datalists';
+                const send = dlOk ? document.querySelector('.bolt-send') : null;
+                if (!send && dlOk) e2e = 'no-send';
+                if (send) {
                   send.click();
                   let status = '', tries = 0;
                   while (tries++ < 40) {
@@ -1696,8 +1712,11 @@ async function runUiSmoke() {
                   if (!/^200/.test(status)) e2e = 'send-failed:' + status;
                   else {
                     const pre = document.querySelector('.bolt-pre')?.textContent ?? '';
-                    const hl = !!document.querySelector('.bolt-pre .jk');
-                    if (!(pre.includes('bolt-e2e-marker') && pre.includes('probe') && pre.includes('hdr-marker') && hl)) e2e = 'echo-mismatch';
+                    const hasHl = !!document.querySelector('.bolt-pre .jk');
+                    const hasMarker = pre.includes('bolt-e2e-marker');
+                    const hasProbe = pre.includes('probe');
+                    const hasHdr = pre.includes('hdr-marker');
+                    if (!(hasMarker && hasProbe && hasHdr && hasHl)) e2e = 'echo-mismatch:m=' + hasMarker + ' p=' + hasProbe + ' h=' + hasHdr + ' hl=' + hasHl + ' ' + subDbg + ' ' + paneDbg + ' kv=[' + [...document.querySelectorAll('.bolt-pane:not(.hidden) .bolt-kv')].map((r) => (r.querySelector('.bolt-kv-key')?.value || '') + '=' + (r.querySelector('.bolt-kv-val')?.value || '')).join(';') + '] pre=[' + pre.slice(0, 200) + ']';
                     else {
                       document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true }));
                       await sleep(1200);
@@ -1745,6 +1764,9 @@ async function runUiSmoke() {
         } catch (e) {}
       }
       return 'e2e:' + e2e;
+    } catch (e) {
+      return 'INNER-ERR:' + (e.message || e);
+    }
     })(${boltPort})`);
   } catch (e) { boltE2e = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] bolt: ' + boltE2e);

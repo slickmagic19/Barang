@@ -22,7 +22,7 @@ import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initTerminal, type TerminalApi } from './ui/terminal';
 import { initScm, decoration, type ScmApi } from './ui/scm';
-import { initBolt, substituteVars, buildUrl, parseUrlParams, prettyBody, highlightJson, type BoltApi } from './ui/bolt';
+import { initBolt, substituteVars, buildUrl, parseUrlParams, prettyBody, highlightJson, headerValueSuggestions, COMMON_HEADER_NAMES, type BoltApi } from './ui/bolt';
 import { initStatusbar } from './ui/statusbar';
 import { showContextMenu } from './ui/menu';
 import { fsApi } from './lib/api';
@@ -668,6 +668,8 @@ async function boot() {
     parseUrlParams,
     prettyBody,
     highlightJson,
+    headerValueSuggestions,
+    COMMON_HEADER_NAMES,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

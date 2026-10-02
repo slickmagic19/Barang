@@ -24,6 +24,7 @@ const barang = {
     readExternal: (path) => invoke('fs:read-external', { path }),
     find: (query, limit = 50) => invoke('fs:find', { query, limit }),
     search: (q, path = '', limit = 50) => invoke('fs:search', { q, path, limit }),
+    searchReplace: (args) => invoke('fs:search-replace', args),
   },
   /** Raw opencode call. Resolves parsed JSON (or undefined) / throws Error. */
   oc: async (path, { method = 'GET', body } = {}) => {

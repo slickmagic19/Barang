@@ -65,6 +65,7 @@ export function openSettings(hooks: SettingsHooks) {
   section('Agent');
   const agentSel = el('select', { class: 'agent-sel settings-select', title: 'Agent' }) as HTMLSelectElement;
   body.append(agentSel);
+  const usageBox = checkRow('Show session cost meter');
 
   // --- Chat ---
 
@@ -266,6 +267,7 @@ export function openSettings(hooks: SettingsHooks) {
       return; // subscribe re-fires paint with consistent state
     }
     freeBox.checked = st0.freeOnly;
+    usageBox.checked = st0.showUsage;
     reasonBox.checked = st0.showReasoning;
     activityBox.checked = st0.showActivity;
     minimapBox.checked = st0.minimap;
@@ -314,6 +316,10 @@ export function openSettings(hooks: SettingsHooks) {
       settings.agent = agentSel.value;
       setAgent(agentSel.value);
     });
+  };
+  usageBox.onchange = () => {
+    commit((s) => { s.showUsage = usageBox.checked; });
+    agentStore.set({}); // repaint statusbar meter
   };
   reasonBox.onchange = () => commit((s) => { s.showReasoning = reasonBox.checked; });
   activityBox.onchange = () => commit((s) => { s.showActivity = activityBox.checked; });

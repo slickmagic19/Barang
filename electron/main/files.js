@@ -221,6 +221,107 @@ export async function search(root, { q = '', path: relDir = '', limit = 50 } = {
   return nodeSearch(root, q, relDir, n);
 }
 
+const REPLACE_SKIP_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|zip|exe|dll|bin|mp4|mov|woff2?|ttf|otf|wav|mp3|ogg|flac)$/i;
+const REPLACE_MAX_FILE = 1024 * 1024; // 1MB (same as reads)
+const REPLACE_LIST_CAP = 200; // listed files (counts stay exact)
+
+/** Candidate file list: ripgrep --files (respects .gitignore) or the walker. */
+function listReplaceCandidates(root, relDir) {
+  return new Promise((resolve) => {
+    execFile(
+      isWin ? 'rg.exe' : 'rg',
+      relDir ? ['--files', '--hidden', '--glob', '!.git', relDir] : ['--files', '--hidden', '--glob', '!.git'],
+      { cwd: root, shell: isWin, maxBuffer: 32 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err || !stdout) return resolve(null);
+        resolve(
+          String(stdout)
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .map((l) => l.split(path.sep).join('/')),
+        );
+      },
+    );
+  });
+}
+
+/**
+ * Project-wide search-and-replace. dryRun scans only (for the confirm
+ * dialog); apply writes. Literal by default, regex opt-in ($1 groups work
+ * in regex mode, literal otherwise). No undo — the confirm dialog says so.
+ */
+export async function searchReplace(root, { q = '', replacement = '', regex = false, caseSensitive = true, path: relDir = '', dryRun = true } = {}) {
+  const query = String(q ?? '');
+  if (!query) throw new Error('Empty search text');
+  const flags = 'g' + (caseSensitive ? '' : 'i');
+  let re;
+  try {
+    re = regex
+      ? new RegExp(query, flags)
+      : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+  } catch {
+    throw new Error(`Invalid regular expression: ${query}`);
+  }
+  const repl = String(replacement ?? '');
+  // Regex mode honors $1 groups (VSCode parity); literal mode never expands $.
+  const replacer = regex ? repl : () => repl;
+  let candidates = await listReplaceCandidates(root, relDir);
+  if (!candidates) {
+    candidates = [];
+    for await (const rel of walk(root, relDir || '', false, 20000)) candidates.push(rel);
+  }
+  const files = [];
+  const skipped = [];
+  let skippedCount = 0;
+  let totalMatches = 0;
+  let totalFiles = 0;
+  let scannedFiles = 0;
+  for (const rel of candidates) {
+    if (REPLACE_SKIP_EXT.test(rel)) {
+      skippedCount++;
+      if (skipped.length < 50) skipped.push({ path: rel, reason: 'binary type' });
+      continue;
+    }
+    const abs = path.join(root, rel);
+    let stat;
+    try {
+      stat = await fs.stat(abs);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    if (stat.size > REPLACE_MAX_FILE) {
+      skippedCount++;
+      if (skipped.length < 50) skipped.push({ path: rel, reason: 'too large' });
+      continue;
+    }
+    scannedFiles++;
+    let text;
+    try {
+      text = await fs.readFile(abs, 'utf8');
+    } catch {
+      continue;
+    }
+    if (text.includes('\0')) {
+      skippedCount++;
+      if (skipped.length < 50) skipped.push({ path: rel, reason: 'binary' });
+      continue;
+    }
+    re.lastIndex = 0;
+    const matches = (text.match(re) || []).length;
+    if (!matches) continue;
+    totalMatches += matches;
+    totalFiles++;
+    if (!dryRun) {
+      re.lastIndex = 0;
+      await writeFile(root, rel, text.replace(re, replacer));
+    }
+    if (files.length < REPLACE_LIST_CAP) files.push({ path: rel, matches });
+  }
+  return { files, totalMatches, totalFiles, scannedFiles, skipped, skippedCount };
+}
+
 export async function renamePath(root, from, to) {
   if (!from || !to) throw new Error('Need {from, to}');
   const absFrom = resolveIn(root, from);

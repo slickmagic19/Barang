@@ -16,6 +16,14 @@ export interface FsBridge {
     engine: string;
     truncated?: boolean;
   }>;
+  searchReplace(args: { q: string; replacement?: string; regex?: boolean; caseSensitive?: boolean; path?: string; dryRun?: boolean }): Promise<{
+    files: Array<{ path: string; matches: number }>;
+    totalMatches: number;
+    totalFiles: number;
+    scannedFiles: number;
+    skipped: Array<{ path: string; reason: string }>;
+    skippedCount: number;
+  }>;
 }
 
 export interface BarangBridge {

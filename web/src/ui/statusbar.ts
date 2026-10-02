@@ -1,5 +1,5 @@
 // Bottom status bar: project, opencode link state, session state, cursor.
-import { agentStore } from '../lib/agent';
+import { agentStore, readSettings, sessionUsage } from '../lib/agent';
 import { editorStore } from './editor';
 import type { GitRepoInfo } from './scm';
 import { el } from '../lib/util';
@@ -36,10 +36,13 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   termEl.onclick = () => hooks.onToggleTerminal?.();
   const sessEl = el('span', { class: 'status-item' });
   const modelEl = el('span', { class: 'status-item' });
+  const usageEl = el('span', { class: 'status-item status-usage hidden', title: 'Session usage' });
+  const usageLabel = el('span', {}, '');
+  usageEl.append(iconEl('spark', 12), usageLabel);
   const dirtyEl = el('span', { class: 'status-item' });
   const posEl = el('span', { class: 'status-item' }, 'Ln 1, Col 1');
   left.append(rootEl, gitEl, ocEl);
-  right.append(termEl, sessEl, modelEl, dirtyEl, posEl);
+  right.append(termEl, sessEl, modelEl, usageEl, dirtyEl, posEl);
   let termCount = 0;
   let termOpen = false;
   let git: GitRepoInfo | null = null;
@@ -49,6 +52,14 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
     const e = editorStore.get();
     termLabel.textContent = termCount > 0 ? `Terminal (${termCount})` : 'Terminal';
     termEl.classList.toggle('is-open', termOpen);
+    // Session cost meter (server-side totals, exact at any history size).
+    const showUsage = readSettings().showUsage;
+    const use = showUsage ? sessionUsage(a.sessions.find((s) => s.id === a.activeId) ?? null) : null;
+    usageEl.classList.toggle('hidden', !use);
+    if (use) {
+      usageLabel.textContent = use.label;
+      usageEl.title = use.title;
+    }
     // Git branch (VSCode left-side indicator): hidden outside repos.
     gitEl.classList.toggle('hidden', !git);
     if (git) {

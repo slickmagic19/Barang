@@ -19,11 +19,56 @@ export interface ProviderInfo {
   name?: string;
   models?: Record<string, unknown> | ProviderModel[];
 }
+export interface SessionTokens {
+  input?: number;
+  output?: number;
+  reasoning?: number;
+  cache?: { read?: number; write?: number };
+}
+
 export interface SessionInfo {
   id: string;
   title?: string;
   directory?: string; // project root the session belongs to (opencode-owned)
   time?: { created?: number; updated?: number };
+  cost?: number; // dollars, server-reported (0 on free logins)
+  tokens?: SessionTokens; // server-reported totals (exact, no 200-msg cap)
+}
+
+/** Compact token count (999 / 1.5K / 12.0M). Pure. */
+export function fmtTokens(n: number): string {
+  const v = Math.max(0, Math.floor(Number(n) || 0));
+  if (v < 1000) return String(v);
+  if (v < 10000) return `${(v / 1000).toFixed(1)}K`;
+  if (v < 1000000) return `${Math.round(v / 1000)}K`;
+  if (v < 100000000) return `${(v / 1000000).toFixed(1)}M`;
+  return `${Math.round(v / 1000000)}M`;
+}
+
+export interface SessionUsage {
+  tokens: number; // input + output + reasoning (cache shown in tooltip only)
+  cost: number;
+  label: string; // statusbar text: $ when billed, tokens otherwise
+  title: string; // tooltip breakdown
+}
+
+/** Active-session usage for the statusbar meter. Null = nothing to show. Pure. */
+export function sessionUsage(s?: SessionInfo | null): SessionUsage | null {
+  if (!s) return null;
+  const t = s.tokens ?? {};
+  const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const input = num(t.input);
+  const output = num(t.output);
+  const reasoning = num(t.reasoning);
+  const cacheRead = num(t.cache?.read);
+  const cacheWrite = num(t.cache?.write);
+  const cost = num((s as { cost?: unknown }).cost);
+  const tokens = input + output + reasoning;
+  if (!tokens && !cost) return null;
+  const f = (n: number) => n.toLocaleString('en-US');
+  const label = cost > 0 ? `$${cost >= 100 ? Math.round(cost) : cost.toFixed(2)}` : fmtTokens(tokens);
+  const title = `Session usage — in ${f(input)} · out ${f(output)} · reasoning ${f(reasoning)} · cache ${f(cacheRead)}/${f(cacheWrite)} · $${cost.toFixed(4)}`;
+  return { tokens, cost, label, title };
 }
 export interface MsgPart {
   type?: string;
@@ -108,6 +153,7 @@ export interface BarangSettings {
   modelChosen: boolean; // explicit pick (even Auto) — boot defaults never override
   agent: string | null;
   freeOnly: boolean;
+  showUsage: boolean; // statusbar session cost meter, default true
   showReasoning: boolean; // default false — reasoning rows hidden
   showActivity: boolean; // default false — step/tool rows hidden (text answers stay)
   confirmDelete: boolean; // default true — ask before deleting a session
@@ -139,6 +185,7 @@ const SETTING_DEFAULTS: BarangSettings = {
   modelChosen: false,
   agent: null,
   freeOnly: true,
+  showUsage: true,
   showReasoning: false,
   showActivity: false,
   confirmDelete: true,
@@ -171,6 +218,7 @@ export function readSettings(): BarangSettings {
     return {
       ...SETTING_DEFAULTS,
       freeOnly: p.freeOnly !== false,
+      showUsage: p.showUsage !== false,
       showReasoning: p.showReasoning === true,
       showActivity: p.showActivity === true,
       confirmDelete: p.confirmDelete !== false,

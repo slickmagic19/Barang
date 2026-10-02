@@ -1,10 +1,11 @@
 // Command palette: Ctrl+P files · Ctrl+Shift+P commands · Ctrl+Shift+F text search.
-// Prefix inside palette: "> " commands, "# " text search, otherwise file search.
+// Prefix inside palette: "> " commands, "# " text search (+ replace bar), otherwise file search.
 import { fsApi } from '../lib/api';
 import { el, debounce } from '../lib/util';
 import { iconEl, type IconName } from './icons';
 import { fileIconEl } from './fileIcons';
-import { revealInEditor } from './editor';
+import { revealInEditor, editorStore, checkExternalChanges } from './editor';
+import { confirmDialog } from './dialog';
 
 export interface PaletteHooks {
   newSession(): void;
@@ -50,14 +51,100 @@ export function initPalette(hooks: PaletteHooks) {
   const box = el('div', { class: 'palette' });
   const inputWrap = el('div', { class: 'palette-input-wrap' });
   inputWrap.append(iconEl('search', 15));
-  const input = el('input', { class: 'palette-input', placeholder: 'File name, > commands, # search, ~ recent' }) as HTMLInputElement;
+  const input = el('input', { class: 'palette-input', placeholder: 'File name, > commands, # search + replace, ~ recent' }) as HTMLInputElement;
   inputWrap.append(input);
   const results = el('div', { class: 'palette-results' });
+  // Replace bar (text-search mode only): replacement + regex/case toggles.
+  const replaceBar = el('div', { class: 'palette-replace hidden' });
+  const replaceInput = el('input', { class: 'palette-replace-input', placeholder: 'Replace with… ($1 groups in regex mode)' }) as HTMLInputElement;
+  const btnRegex = el('button', { class: 'palette-toggle', title: 'Use regular expression' }, '.*') as HTMLButtonElement;
+  const btnCase = el('button', { class: 'palette-toggle', title: 'Match case' }, 'Aa') as HTMLButtonElement;
+  const btnReplaceAll = el('button', { class: 'btn btn-primary btn-sm' }, 'Replace All') as HTMLButtonElement;
+  replaceBar.append(replaceInput, btnRegex, btnCase, btnReplaceAll);
   const foot = el('div', { class: 'palette-foot' });
   foot.append(el('span', {}, '↑↓ navigate'), el('span', {}, 'Enter open'), el('span', {}, 'Esc close'));
-  box.append(inputWrap, results, foot);
+  box.append(inputWrap, replaceBar, results, foot);
   overlay.append(box);
   document.body.append(overlay);
+
+  // Persisted replace prefs (regex off, case-sensitive on — VSCode defaults).
+  let replaceRegex = false;
+  let replaceCase = true;
+  try {
+    const p = JSON.parse(localStorage.getItem('barang:search-replace-prefs') || '{}');
+    replaceRegex = p.regex === true;
+    replaceCase = p.caseSensitive !== false;
+  } catch {
+    /* fresh defaults */
+  }
+  const paintToggles = () => {
+    btnRegex.classList.toggle('active', replaceRegex);
+    btnCase.classList.toggle('active', replaceCase);
+  };
+  const savePrefs = () => {
+    try {
+      localStorage.setItem('barang:search-replace-prefs', JSON.stringify({ regex: replaceRegex, caseSensitive: replaceCase }));
+    } catch {
+      /* noop */
+    }
+  };
+  paintToggles();
+  btnRegex.onclick = () => {
+    replaceRegex = !replaceRegex;
+    paintToggles();
+    savePrefs();
+  };
+  btnCase.onclick = () => {
+    replaceCase = !replaceCase;
+    paintToggles();
+    savePrefs();
+  };
+  replaceInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void replaceAllFlow();
+    }
+  });
+  btnReplaceAll.onclick = () => void replaceAllFlow();
+
+  async function replaceAllFlow() {
+    const q = input.value.startsWith('#') ? input.value.slice(1).trim() : '';
+    if (!q) {
+      hooks.toast('Type something to find after # first.', 'info');
+      return;
+    }
+    const replacement = replaceInput.value;
+    let dry;
+    try {
+      dry = await fsApi.searchReplace({ q, replacement, regex: replaceRegex, caseSensitive: replaceCase, path: '', dryRun: true });
+    } catch (e) {
+      hooks.toast(`Replace failed: ${(e as Error).message}`, 'error');
+      return;
+    }
+    if (!dry.totalFiles) {
+      hooks.toast('No matches found.', 'info');
+      return;
+    }
+    const dirtyHit = editorStore.get().tabs.filter((t) => t.dirty && dry.files.some((f) => f.path === (t.file ?? t.path))).length;
+    const extra = dry.totalFiles > dry.files.length ? ` (showing first ${dry.files.length})` : '';
+    const skipped = dry.skippedCount ? ` Skipped ${dry.skippedCount} binary/large file(s).` : '';
+    const ok = await confirmDialog({
+      title: 'Replace all?',
+      message: `Replace ${dry.totalMatches} match(es) in ${dry.totalFiles} file(s)${extra} with "${replacement.slice(0, 80)}"?${skipped} This cannot be undone.${dirtyHit ? ` ${dirtyHit} open unsaved tab(s) keep their edits — review them after.` : ''}`,
+      confirmLabel: `Replace ${dry.totalMatches}`,
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const done = await fsApi.searchReplace({ q, replacement, regex: replaceRegex, caseSensitive: replaceCase, path: '', dryRun: false });
+      close();
+      hooks.toast(`Replaced ${done.totalMatches} match(es) in ${done.totalFiles} file(s).`, 'info');
+      hooks.refreshExplorer();
+      await checkExternalChanges().catch(() => {});
+    } catch (e) {
+      hooks.toast(`Replace failed: ${(e as Error).message}`, 'error');
+    }
+  }
 
   let mode: 'files' | 'commands' | 'search' = 'files';
   let items: Array<{ label: string; sub?: string; icon?: IconName; glyph?: HTMLElement; run(): void }> = [];
@@ -151,6 +238,9 @@ export function initPalette(hooks: PaletteHooks) {
       mode = 'files';
       void searchFiles(v.trim());
     }
+    // Replace bar lives only on text search (single source of truth here —
+    // every update() path funnels through this tail).
+    replaceBar.classList.toggle('hidden', !v.startsWith('#'));
     void mode;
   };
 

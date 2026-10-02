@@ -3,7 +3,7 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel } from './lib/agent';
+import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage } from './lib/agent';
 import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -670,6 +670,8 @@ async function boot() {
     highlightJson,
     headerValueSuggestions,
     COMMON_HEADER_NAMES,
+    fmtTokens,
+    sessionUsage,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

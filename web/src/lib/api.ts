@@ -20,6 +20,8 @@ export const fsApi = {
   writeAbsolute: (path: string, content: string) => barang().fs.writeAbsolute(path, content),
   find: (query: string, limit = 50) => barang().fs.find(query, limit),
   search: (q: string, path = '', limit = 50) => barang().fs.search(q, path, limit),
+  searchReplace: (args: { q: string; replacement?: string; regex?: boolean; caseSensitive?: boolean; path?: string; dryRun?: boolean }) =>
+    barang().fs.searchReplace(args),
 };
 
 /** Direct opencode calls through main (auth injected there). Paths like '/session'. */

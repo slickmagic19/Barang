@@ -325,6 +325,7 @@ function registerIpc() {
   ipcMain.handle('fs:read-external', ok((p) => files.readExternal(p.path)));
   ipcMain.handle('fs:find', ok(needRoot((p) => files.find(root, p))));
   ipcMain.handle('fs:search', ok(needRoot((p) => files.search(root, p))));
+  ipcMain.handle('fs:search-replace', ok(needRoot((p) => files.searchReplace(root, p))));
 
   // --- integrated terminal (node-pty; spawn cwd = project or scratch) ---
   const termCwd = async () => {
@@ -1772,6 +1773,75 @@ async function runUiSmoke() {
   console.log('[smoke-ui] bolt: ' + boltE2e);
   pass = pass && /e2e:ok$/.test(boltE2e) && !/unit-FAIL/.test(boltE2e);
   try { boltSrv.close(); } catch {}
+  // Cost meter: pure formatting/aggregation + statusbar presence.
+  let costMeter = 'skip';
+  try {
+    costMeter = await w.webContents.executeJavaScript(`(() => {
+      const u = window.__barangTestUtils;
+      if (!u || !u.fmtTokens || !u.sessionUsage) return 'no-utils';
+      const bad = [];
+      if (u.fmtTokens(999) !== '999') bad.push('f999');
+      if (u.fmtTokens(0) !== '0') bad.push('f0');
+      if (u.fmtTokens(1500) !== '1.5K') bad.push('f1.5K');
+      if (u.fmtTokens(652219) !== '652K') bad.push('f652K');
+      if (u.fmtTokens(12035577) !== '12.0M') bad.push('f12M');
+      if (u.sessionUsage(undefined) !== null) bad.push('u-undef');
+      if (u.sessionUsage(null) !== null) bad.push('u-null');
+      if (u.sessionUsage({ id: 'x' }) !== null) bad.push('u-empty');
+      const t = u.sessionUsage({ id: 'x', tokens: { input: 1000, output: 500, reasoning: 0 }, cost: 0 });
+      if (!t || t.tokens !== 1500 || t.label !== '1.5K') bad.push('u-basic');
+      const c = u.sessionUsage({ id: 'x', tokens: { input: 100, output: 100, cache: { read: 999999 } }, cost: 0 });
+      if (!c || c.tokens !== 200) bad.push('u-cache-excluded');
+      const d = u.sessionUsage({ id: 'x', tokens: { input: 10, output: 5 }, cost: 1.5 });
+      if (!d || d.label !== '$1.50') bad.push('u-cost-label');
+      if (bad.length) return 'unit-FAIL:' + bad.join(';');
+      const meter = document.querySelector('.status-usage');
+      if (!meter) return 'no-meter-el';
+      return 'ok';
+    })()`);
+  } catch (e) { costMeter = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] cost-meter: ' + costMeter);
+  pass = pass && costMeter === 'ok';
+  // Search-replace E2E (hermetic throwaway dir in the project). The marker
+  // is timestamp-unique per run so the harness's own source (which mentions
+  // the queries) can never collide with the scanned content.
+  let replaceE2e = 'skip';
+  try {
+    replaceE2e = await w.webContents.executeJavaScript(`(async () => {
+      const dir = 'replace-probe';
+      const M = 'zzq' + Date.now().toString(36);
+      try { await window.barang.fs.remove(dir); } catch (e) {}
+      await window.barang.fs.write(dir + '/a.txt', M + ' one\\n' + M + ' two\\n');
+      await window.barang.fs.write(dir + '/b.txt', 'nothing here\\n');
+      await window.barang.fs.write(dir + '/c.txt', M + '\\n' + M + '\\n' + M + '\\n');
+      await window.barang.fs.write(dir + '/d.txt', M + '.q ' + M + 'xq\\n');
+      const api = window.barang.fs.searchReplace;
+      const dry = await api({ q: M, replacement: M + 'y', dryRun: true });
+      if (!(dry.totalMatches === 7 && dry.totalFiles === 3)) return 'dry:' + dry.totalMatches + '/' + dry.totalFiles;
+      const lit = await api({ q: M + '.q', replacement: 'X', dryRun: true });
+      if (lit.totalMatches !== 1) return 'literal-escape:' + lit.totalMatches;
+      const rx = await api({ q: M + '+', replacement: 'Q', regex: true, dryRun: true });
+      if (rx.totalMatches !== 7) return 'regex:' + rx.totalMatches;
+      try {
+        await api({ q: '([', replacement: 'x', regex: true, dryRun: true });
+        return 'invalid-no-throw';
+      } catch (e) {
+        if (!/nvalid|egex/i.test(e.message || '')) return 'invalid-msg';
+      }
+      const done = await api({ q: M, replacement: M + 'y', dryRun: false });
+      if (!(done.totalMatches === 7 && done.totalFiles === 3)) return 'apply-counts';
+      const a = await window.barang.fs.read(dir + '/a.txt');
+      const c = await window.barang.fs.read(dir + '/c.txt');
+      const b = await window.barang.fs.read(dir + '/b.txt');
+      if (a.content !== M + 'y one\\n' + M + 'y two\\n') return 'apply-a';
+      if (c.content !== M + 'y\\n' + M + 'y\\n' + M + 'y\\n') return 'apply-c';
+      if (!b.content.includes('nothing')) return 'apply-b-touched';
+      try { await window.barang.fs.remove(dir); } catch (e) {}
+      return 'ok';
+    })()`);
+  } catch (e) { replaceE2e = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] replace-e2e: ' + replaceE2e);
+  pass = pass && replaceE2e === 'ok';
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

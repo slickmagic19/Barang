@@ -96,11 +96,26 @@ export interface RunStatusInfo {
   next?: number;
 }
 
+export interface AgentTodo {
+  id: string;
+  content: string;
+  status: string; // pending | in_progress | completed | cancelled
+  priority: string;
+}
+
+/** Done/total counts for the todo checklist header. Pure. */
+export function todoProgress(todos: AgentTodo[]): { done: number; total: number; label: string } {
+  const total = (todos ?? []).length;
+  const done = (todos ?? []).filter((t) => String(t?.status ?? '').toLowerCase() === 'completed').length;
+  return { done, total, label: total ? `${done} of ${total} todo${total === 1 ? '' : 's'} completed` : 'No todos' };
+}
+
 interface AgentState {
   root: string; // open project folder — sessions are scoped to it
   sessions: SessionInfo[];
   activeId: string | null;
   messages: ChatMessage[];
+  todos: AgentTodo[];
   agents: AgentInfo[];
   providerModels: Array<{ providerID: string; modelID: string; label: string }>;
   model: { providerID: string; modelID: string } | null;
@@ -118,6 +133,7 @@ export const agentStore = createStore<AgentState>({
   sessions: [],
   activeId: null,
   messages: [],
+  todos: [],
   agents: [],
   providerModels: [],
   model: null,
@@ -489,13 +505,13 @@ export function shouldAutoCreateSession(root: string, opencodeOk: boolean, sessi
 export async function createSession(title?: string): Promise<string> {
   const { value: created } = await withSendRetries(() => oc.post<SessionInfo>('/session', title ? { title } : {}));
   await loadSessions();
-  agentStore.set({ activeId: created.id, messages: [], permissions: [], busy: false, error: null });
+  agentStore.set({ activeId: created.id, messages: [], todos: [], permissions: [], busy: false, error: null });
   await refreshActive();
   return created.id;
 }
 
 export async function selectSession(id: string) {
-  agentStore.set({ activeId: id, messages: [], permissions: [], busy: false, error: null });
+  agentStore.set({ activeId: id, messages: [], todos: [], permissions: [], busy: false, error: null });
   await refreshActive();
 }
 
@@ -555,14 +571,16 @@ export async function refreshActive() {
   const s = agentStore.get();
   if (!s.activeId) return;
   const id = s.activeId;
-  const [msgs, _st] = await Promise.all([
+  const [msgs, _st, todos] = await Promise.all([
     oc.get<ChatMessage[] | { value?: ChatMessage[] }>(`/session/${id}/message?limit=200`).catch(() => []),
     refreshStatus(id),
+    oc.get<AgentTodo[]>(`/session/${id}/todo`).catch(() => []),
   ]);
   // Switched projects/sessions mid-flight — discard stale results instead of
   // painting another session's messages into the current view.
   if (agentStore.get().activeId !== id) return;
   const messages = Array.isArray(msgs) ? msgs : [];
+  const todoList = Array.isArray(todos) ? todos : [];
   // Run errors live ON the assistant message (info.error) — rendered inline
   // by the chat list. The latest assistant message decides, so a new run
   // clears a previous failure instead of showing it forever.
@@ -575,7 +593,7 @@ export async function refreshActive() {
   }
   // NOTE: permissions are event-sourced (permission.asked/updated), never
   // message parts — the old part-scanner found nothing and is gone.
-  agentStore.set({ messages, error: runError });
+  agentStore.set({ messages, todos: todoList, error: runError });
   if (messages.length !== s.messages.length) bumpProgress();
 }
 

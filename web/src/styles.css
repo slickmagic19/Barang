@@ -1131,6 +1131,37 @@ button.status-item:hover { color: var(--text); }
 }
 .changes-head .icon-btn { margin-left: auto; width: 24px; height: 24px; }
 .changes-list { display: flex; flex-direction: column; gap: 3px; max-height: 190px; overflow-y: auto; padding-bottom: 6px; }
+/* Agent todo checklist (read-only, server-owned) */
+.todos-sec { border-top: 1px solid var(--border); padding: 10px 12px 4px; display: flex; flex-direction: column; gap: 6px; }
+.todos-sec.hidden { display: none; }
+.todos-toggle {
+  display: flex; align-items: center; gap: 7px; flex: 1;
+  background: none; border: none; padding: 0; cursor: pointer; text-align: left;
+  border-radius: 6px;
+}
+.todos-toggle .tw { color: var(--text-faint); display: inline-flex; }
+.todos-toggle .tw svg { transform: rotate(90deg); transition: transform .13s; }
+.todos-sec.collapsed .todos-toggle .tw svg { transform: none; }
+.todos-title {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 1.1px; text-transform: uppercase;
+  color: var(--text-faint); user-select: none;
+}
+.todos-list { display: flex; flex-direction: column; gap: 5px; max-height: 190px; overflow-y: auto; padding-bottom: 6px; }
+.todo-row { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; line-height: 1.5; }
+.todo-box {
+  flex: none; width: 14px; height: 14px; margin-top: 2px;
+  border: 1px solid var(--border-strong); border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-dim); font-size: 10px; line-height: 1;
+}
+.todo-row.is-completed .todo-box { background: var(--accent-dim); border-color: var(--accent-line); color: var(--accent-strong); }
+.todo-row.is-in_progress .todo-box { border-color: var(--accent-line); }
+.todo-check { width: 4px; height: 8px; border: solid var(--accent-strong); border-width: 0 2px 2px 0; transform: rotate(42deg) translateY(-1px); }
+.todo-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-strong); }
+.todo-text { color: var(--text); word-break: break-word; }
+.todo-row.is-completed .todo-text { color: var(--text-faint); text-decoration: line-through; }
+.todo-row.is-cancelled .todo-text { color: var(--text-faint); text-decoration: line-through; }
+.todo-row.is-pending .todo-text { color: var(--text-dim); }
 .change-row {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
   background: transparent; border: 1px solid transparent; border-radius: 7px;

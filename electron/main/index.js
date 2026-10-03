@@ -1652,6 +1652,28 @@ async function runUiSmoke() {
         if (fu(msgs, 'msg_abc', 'hi') !== true) bad.push('fu-id');
         if (fu(msgs, 'msg_nope', 'hi') !== false) bad.push('fu-miss');
       }
+      // Agent todos: header counts + checklist rendering data.
+      const tp = u.todoProgress;
+      if (typeof tp !== 'function') bad.push('no-todo-fn');
+      else {
+        const p1 = tp([
+          { id: 'a', content: 'one', status: 'completed', priority: 'high' },
+          { id: 'b', content: 'two', status: 'in_progress', priority: 'medium' },
+          { id: 'c', content: 'three', status: 'pending', priority: 'low' },
+        ]);
+        if (p1.done !== 1 || p1.total !== 3 || p1.label !== '1 of 3 todos completed') bad.push('todo-count');
+        const p2 = tp([]);
+        if (p2.done !== 0 || p2.total !== 0 || p2.label !== 'No todos') bad.push('todo-empty');
+        const p3 = tp([{ id: 'a', content: 'one', status: 'completed', priority: 'high' }]);
+        if (p3.label !== '1 of 1 todo completed') bad.push('todo-single');
+        const todosSec = document.querySelector('.todos-sec');
+        if (!todosSec) bad.push('no-todos-sec');
+        else {
+          const title = todosSec.querySelector('.todos-title')?.textContent ?? '';
+          if (!/todo/i.test(title)) bad.push('todos-title');
+          if (!todosSec.classList.contains('hidden') && todosSec.querySelectorAll('.todo-row').length === 0) bad.push('todos-visible-no-rows');
+        }
+      }
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       // Self-heal leftovers from an interrupted run (a stale 2000-file dir
       // would blow the cap budget and hide this probe's own files).

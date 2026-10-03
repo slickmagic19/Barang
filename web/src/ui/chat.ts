@@ -6,7 +6,7 @@ import {
   agentStore, loadSessions, createSession, selectSession, deleteSession,
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
   refreshActive, readSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
-  statusTextFor, messageErrorText,
+  statusTextFor, messageErrorText, todoProgress,
   type ChatMessage, type ChangeEntry,
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
@@ -441,6 +441,22 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   btnAbort.onclick = () => void abortActive();
   busyRow.append(el('span', { class: 'spinner' }), busyTxt, btnAbort);
 
+  // Agent todo checklist (server-owned; read-only — the agent manages it).
+  const todosSec = el('div', { class: 'todos-sec hidden' });
+  const todosToggle = el('button', { class: 'todos-toggle', title: 'Collapse/expand agent todos' }) as HTMLButtonElement;
+  const todosTw = el('span', { class: 'tw' });
+  todosTw.append(iconEl('chevR', 12));
+  const todosTitle = el('span', { class: 'todos-title' }, 'Todos');
+  todosToggle.append(todosTw, todosTitle);
+  const todosList = el('div', { class: 'todos-list' });
+  todosSec.append(todosToggle, todosList);
+  todosToggle.onclick = () => {
+    const id = agentStore.get().activeId ?? '';
+    if (todosCollapsed.has(id)) todosCollapsed.delete(id);
+    else todosCollapsed.add(id);
+    paintTodos();
+  };
+
   const changesSec = el('div', { class: 'changes-sec hidden' });
   const changesHead = el('div', { class: 'changes-head' });
   const changesToggle = el('button', { class: 'changes-toggle', title: 'Collapse/expand changed files' }) as HTMLButtonElement;
@@ -478,7 +494,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   box.append(input, sendRow);
   composer.append(attachBar, box, suggest);
 
-  panel.append(sessSection, perms, list, errBox, busyRow, changesSec, composer);
+  panel.append(sessSection, perms, list, errBox, busyRow, todosSec, changesSec, composer);
 
   // --- image attachments (opencode-style): files become @mentions instead ---
   interface ImgAttach { filename: string; mime: string; dataUrl: string }
@@ -672,6 +688,35 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   };
   sessSel.onchange = () => void selectSession(sessSel.value).catch((e) => hooks.toast(e.message, 'error'));
 
+// Sessions the user collapsed in Todos (new sessions default open).
+const todosCollapsed = new Set<string>();
+
+function paintTodos() {
+  const s = agentStore.get();
+  const todos = s.todos ?? [];
+  todosSec.classList.toggle('hidden', todos.length === 0);
+  if (!todos.length) return;
+  const { label } = todoProgress(todos);
+  todosTitle.textContent = label;
+  const collapsed = todosCollapsed.has(s.activeId ?? '');
+  todosSec.classList.toggle('collapsed', collapsed);
+  todosList.classList.toggle('hidden', collapsed);
+  todosList.innerHTML = '';
+  for (const t of todos) {
+    const st = String(t.status ?? '').toLowerCase();
+    const row = el('div', { class: `todo-row is-${st || 'pending'}` });
+    const box = el('span', { class: 'todo-box' });
+    // Zero-glyph states (chrome must stay emoji/dingbat-free for the dom
+    // probe): completed draws a CSS check, in-progress a dot, the rest an
+    // empty box — text style carries completed vs cancelled.
+    if (st === 'completed') box.append(el('span', { class: 'todo-check' }));
+    else if (st === 'in_progress') box.append(el('span', { class: 'todo-dot' }));
+    row.append(box, el('span', { class: 'todo-text' }, String(t.content ?? '')));
+    if (t.priority && t.priority !== 'medium') row.title = `Priority: ${t.priority}`;
+    todosList.append(row);
+  }
+}
+
   function paintChanges() {
     const s = agentStore.get();
     // Changed files, derived from the session's edit/write tool calls —
@@ -765,6 +810,8 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     }
     // changed files (Cursor-style review list)
     paintChanges();
+    // agent todos (server-owned checklist)
+    paintTodos();
     // messages / busy / error
     renderMessages(list, hooks);
     busyRow.classList.toggle('hidden', !s.busy);

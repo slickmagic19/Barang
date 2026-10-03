@@ -112,6 +112,22 @@ export function initSearchView(host: HTMLElement, hooks: SearchHooks) {
   head.append(headActs);
 
   const form = el('div', { class: 'search-form' });
+  // Replace toggle lives beside the query (VSCode position) — never inside
+  // the collapsible row, or hiding the row strands the toggle with it.
+  const repToggle = el('button', { class: 'icon-btn search-rep-toggle', title: 'Toggle replace' }) as HTMLButtonElement;
+  repToggle.append(iconEl('chevD', 13));
+  const repRow = el('div', { class: 'search-row' });
+  const replaceInput = el('input', { class: 'search-input', placeholder: 'Replace with… ($1 groups in regex mode)', 'aria-label': 'Replace with' }) as HTMLInputElement;
+  repRow.append(replaceInput);
+  const paintRepRow = () => {
+    repRow.classList.toggle('hidden', !replaceOpen);
+    repToggle.classList.toggle('open', replaceOpen);
+  };
+  repToggle.onclick = () => {
+    replaceOpen = !replaceOpen;
+    paintRepRow();
+    savePrefs();
+  };
   const qRow = el('div', { class: 'search-row' });
   const queryInput = el('input', { class: 'search-input', placeholder: 'Search files ({{vars}} not supported here)', 'aria-label': 'Search files' }) as HTMLInputElement;
   const tglCase = el('button', { class: 'palette-toggle', title: 'Match case' }, 'Aa') as HTMLButtonElement;
@@ -142,23 +158,8 @@ export function initSearchView(host: HTMLElement, hooks: SearchHooks) {
   };
   const btnOpts = el('button', { class: 'icon-btn', title: 'Toggle include/exclude scope' }) as HTMLButtonElement;
   btnOpts.append(iconEl('meatball', 15));
-  qRow.append(queryInput, tglCase, tglWord, tglRegex, btnOpts);
+  qRow.append(repToggle, queryInput, tglCase, tglWord, tglRegex, btnOpts);
   paintToggles();
-
-  const repRow = el('div', { class: 'search-row' });
-  const repToggle = el('button', { class: 'icon-btn search-rep-toggle', title: 'Toggle replace' }) as HTMLButtonElement;
-  repToggle.append(iconEl('chevD', 13));
-  const replaceInput = el('input', { class: 'search-input', placeholder: 'Replace with… ($1 groups in regex mode)', 'aria-label': 'Replace with' }) as HTMLInputElement;
-  repRow.append(repToggle, replaceInput);
-  const paintRepRow = () => {
-    repRow.classList.toggle('hidden', !replaceOpen);
-    repToggle.classList.toggle('open', replaceOpen);
-  };
-  repToggle.onclick = () => {
-    replaceOpen = !replaceOpen;
-    paintRepRow();
-    savePrefs();
-  };
   paintRepRow();
 
   const optsBox = el('div', { class: 'search-opts hidden' });

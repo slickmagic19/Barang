@@ -1873,6 +1873,17 @@ async function runUiSmoke() {
       if (AQ('#view-search')?.classList.contains('hidden')) return 'view-did-not-open';
       const inputs = AQA('#view-search .search-input');
       if (inputs.length < 4) return 'inputs:' + inputs.length;
+      // Replace toggle lives beside the query (never stranded): flips both ways.
+      const repTgl = AQ('#view-search .search-rep-toggle');
+      const repRowOf = () => inputs[1].closest('.search-row');
+      if (!repTgl || !repRowOf()) return 'no-rep-toggle';
+      repTgl.click();
+      await sleep(300);
+      const hid1 = repRowOf().classList.contains('hidden');
+      repTgl.click();
+      await sleep(300);
+      const hid2 = repRowOf().classList.contains('hidden');
+      if (hid1 === hid2) return 'toggle-stuck:' + hid1;
       const q = inputs[0];
       q.value = M;
       q.dispatchEvent(new Event('input', { bubbles: true }));

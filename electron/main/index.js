@@ -1730,6 +1730,30 @@ async function runUiSmoke() {
         if (da([], [], []) !== 'no output yet') bad.push('da-empty');
       }
       if (st('stopping', 0) !== 'Agent stopping…') bad.push('status-stopping');
+      // Permission cards: structured kind/target + middle-ellipsis titles.
+      const sm = u.shortenMiddle;
+      if (typeof sm !== 'function') bad.push('no-shorten-fn');
+      else {
+        if (sm('abcdefghij', 4) !== 'abcdefghij') bad.push('shorten-short');
+        const s40 = sm('C:\\Users\\Achi\\Desktop\\LogoMaker\\lokalistik\\renders-v10\\*', 40);
+        if (s40.length !== 40 || !s40.includes('…') || !s40.endsWith('*')) bad.push('shorten-mid');
+        if (sm('', 40) !== '') bad.push('shorten-empty');
+      }
+      const ca = u.classifyAttachFile;
+      if (typeof ca !== 'function') bad.push('no-classify-fn');
+      else {
+        if (ca('shot.png', 100) !== 'image') bad.push('class-image');
+        if (ca('photo.JPG', 100) !== 'image') bad.push('class-image-case');
+        if (ca('notes.txt', 100) !== 'mention') bad.push('class-mention');
+        if (ca('big.png', 9 * 1024 * 1024) !== 'too-large') bad.push('class-large');
+        if (ca('', 100) !== 'skip') bad.push('class-skip');
+      }
+      const pf2 = u.permissionFromEvent;
+      if (typeof pf2 === 'function') {
+        const c = pf2({ id: 'p1', sessionID: 's1', permission: 'external_directory', patterns: ['C:\\proj\\renders-v10\\*'], metadata: {}, always: ['C:\\proj\\renders-v10\\*'] });
+        if (!c || c.kind !== 'external_directory' || c.target !== 'C:\\proj\\renders-v10\\*') bad.push('perm-structured');
+        if (!c || !c.title.startsWith('external_directory:')) bad.push('perm-title');
+      }
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       // Self-heal leftovers from an interrupted run (a stale 2000-file dir
       // would blow the cap budget and hide this probe's own files).

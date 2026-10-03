@@ -6,7 +6,7 @@ import {
   agentStore, loadSessions, createSession, selectSession, deleteSession,
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
   refreshActive, readSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
-  statusTextFor, messageErrorText, todoProgress,
+  statusTextFor, messageErrorText, todoProgress, classifyAttachFile,
   type ChatMessage, type ChangeEntry,
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
@@ -482,11 +482,11 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   const composer = el('div', { class: 'composer' });
   const attachBar = el('div', { class: 'attach-bar hidden' });
   const box = el('div', { class: 'composer-box' });
-  const input = el('textarea', { class: 'composer-input', placeholder: 'Ask, build, refactor… (@ for files, Enter to send)' }) as HTMLTextAreaElement;
+  const input = el('textarea', { class: 'composer-input', placeholder: 'Ask, build, refactor… (@ for files, paste/drop images, Enter to send)' }) as HTMLTextAreaElement;
   input.rows = 2;
   const suggest = el('div', { class: 'suggest hidden' });
   const sendRow = el('div', { class: 'send-row' });
-  const btnAttach = el('button', { class: 'icon-btn attach-btn', title: 'Attach file or image' }) as HTMLButtonElement;
+  const btnAttach = el('button', { class: 'icon-btn attach-btn', title: 'Attach file or image (or paste / drop into the composer)' }) as HTMLButtonElement;
   btnAttach.append(iconEl('clip', 15));
   const modelMini = el('select', { class: 'model-mini', title: 'Model' }) as HTMLSelectElement;
   const btnSend = el('button', { class: 'btn btn-primary btn-icon', title: 'Send (Enter)' }) as HTMLButtonElement;
@@ -497,10 +497,9 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
 
   panel.append(sessSection, perms, quests, list, errBox, busyRow, todosSec, changesSec, composer);
 
-  // --- image attachments (opencode-style): files become @mentions instead ---
+  // --- attachments (opencode-style): images inline, files as @mentions ---
   interface ImgAttach { filename: string; mime: string; dataUrl: string }
   let imgAttaches: ImgAttach[] = [];
-  const MAX_ATTACH = 8 * 1024 * 1024;
 
   const paintAttach = () => {
     attachBar.innerHTML = '';
@@ -541,25 +540,92 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
         if (!/cancelled/i.test((e as Error).message)) hooks.toast((e as Error).message, 'error');
         return;
       }
-      for (const f of picked.files) {
-        if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) {
-          if (f.size > MAX_ATTACH) {
-            hooks.toast(`${f.name} is too large to attach (8 MB max).`, 'error');
-            continue;
-          }
-          try {
-            const r = await fsApi.readExternal(f.path);
-            imgAttaches.push({ filename: r.name, mime: r.mime, dataUrl: `data:${r.mime};base64,${r.base64}` });
-          } catch (e) {
-            hooks.toast(`Cannot attach ${f.name}: ${(e as Error).message}`, 'error');
-          }
-        } else {
-          insertFileMention(f.path);
-        }
-      }
-      paintAttach();
+      await addPickedFiles(picked.files.map((f) => ({ name: f.name, path: f.path, size: f.size, blob: null })));
     })();
   };
+
+  // Paste + drag-drop (opencode-style): images attach inline, other files
+  // become @mentions. One shared router for picker/paste/drop.
+  const blobToDataUrl = (b: Blob) =>
+    new Promise<string>((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result ?? ''));
+      fr.onerror = () => rej(new Error('unreadable'));
+      fr.readAsDataURL(b);
+    });
+
+  interface PickedFile { name: string; path?: string; size: number; blob?: Blob | null }
+
+  const addPickedFiles = async (files: PickedFile[]) => {
+    for (const f of files) {
+      const name = f.name || 'pasted-image.png';
+      const route = classifyAttachFile(name, f.size);
+      if (route === 'skip') continue;
+      if (route === 'too-large') {
+        hooks.toast(`${name} is too large to attach (8 MB max).`, 'error');
+        continue;
+      }
+      if (route === 'image') {
+        try {
+          if (f.path) {
+            const r = await fsApi.readExternal(f.path);
+            imgAttaches.push({ filename: r.name, mime: r.mime, dataUrl: `data:${r.mime};base64,${r.base64}` });
+          } else if (f.blob) {
+            const dataUrl = await blobToDataUrl(f.blob);
+            imgAttaches.push({ filename: name, mime: dataUrl.slice(5, dataUrl.indexOf(';')), dataUrl });
+          } else {
+            hooks.toast(`Cannot attach ${name}: no image data.`, 'error');
+          }
+        } catch (e) {
+          hooks.toast(`Cannot attach ${name}: ${(e as Error).message}`, 'error');
+        }
+      } else if (f.path) {
+        insertFileMention(f.path);
+      } else {
+        hooks.toast(`Cannot attach ${name}: drag the file in or use the attach button.`, 'error');
+      }
+    }
+    paintAttach();
+  };
+
+  const domFiles = (list: FileList | File[] | undefined): PickedFile[] =>
+    [...(list ?? [])].map((f) => ({
+      name: f.name,
+      path: (f as File & { path?: string }).path,
+      size: f.size,
+      blob: f,
+    }));
+
+  input.addEventListener('paste', (e) => {
+    const files = domFiles(e.clipboardData?.files);
+    if (!files.length) return; // plain text — let it through
+    e.preventDefault();
+    void addPickedFiles(files);
+  });
+
+  let dragDepth = 0;
+  const hasFiles = (e: DragEvent) => [...(e.dataTransfer?.types ?? [])].includes('Files');
+  composer.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth++;
+    composer.classList.add('drag-over');
+  });
+  composer.addEventListener('dragover', (e) => {
+    if (composer.classList.contains('drag-over')) e.preventDefault();
+  });
+  composer.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) composer.classList.remove('drag-over');
+  });
+  composer.addEventListener('drop', (e) => {
+    dragDepth = 0;
+    composer.classList.remove('drag-over');
+    const files = domFiles(e.dataTransfer?.files);
+    if (!files.length) return;
+    e.preventDefault();
+    void addPickedFiles(files).finally(() => input.focus());
+  });
 
   const paintModelMini = () => {
     const s = agentStore.get();
@@ -793,10 +859,14 @@ function paintTodos() {
     perms.innerHTML = '';
     for (const p of s.permissions) {
       const card = el('div', { class: 'perm-card' });
-      const title = el('div', { class: 'perm-title' }, p.title);
-      title.prepend(iconEl('shield', 14));
-      card.append(title);
-      if (p.detail) card.append(el('div', { class: 'perm-detail' }, p.detail.slice(0, 300)));
+      const head = el('div', { class: 'perm-head' });
+      head.append(iconEl('shield', 14));
+      head.append(el('span', { class: 'perm-kind' }, p.kind || 'permission'));
+      head.append(el('span', { class: 'perm-sub' }, 'needs approval'));
+      card.append(head);
+      if (p.target) card.append(el('div', { class: 'perm-target' }, p.target));
+      else if (p.title) card.append(el('div', { class: 'perm-target' }, p.title));
+      if (p.detail) card.append(el('div', { class: 'perm-detail' }, p.detail));
       const row = el('div', { class: 'perm-row' });
       const bAllow = el('button', { class: 'btn btn-primary btn-sm' }, 'Allow');
       const bOnce = el('button', { class: 'btn btn-sm' }, 'Allow once');

@@ -87,6 +87,27 @@ export interface PendingPermission {
   permissionID: string;
   title: string;
   detail?: string;
+  kind?: string; // tool family: bash, edit, external_directory…
+  target?: string; // full rule target (path, pattern, command)
+}
+
+/** Middle-ellipsis for long paths (keeps both ends readable). Pure. */
+export function shortenMiddle(text: string, max = 80): string {
+  const t = String(text ?? '');
+  if (t.length <= max || max < 10) return t;
+  const tail = Math.floor((max - 1) / 2);
+  const head = max - 1 - tail;
+  return `${t.slice(0, head)}…${t.slice(t.length - tail)}`;
+}
+
+export type AttachRoute = 'image' | 'mention' | 'too-large' | 'skip';
+
+/** Route a dropped/pasted/picked file: inline images go over as data,
+ *  anything else becomes an @mention (needs a disk path). Pure. */
+export function classifyAttachFile(name: string, size: number, maxBytes = 8 * 1024 * 1024): AttachRoute {
+  if (!name) return 'skip';
+  if (size > maxBytes) return 'too-large';
+  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(name) ? 'image' : 'mention';
 }
 
 export interface PendingQuestion {
@@ -230,7 +251,7 @@ export function permissionFromEvent(props: unknown): PendingPermission | null {
     ?? (typeof meta?.command === 'string' && meta.command ? meta.command : null)
     ?? (typeof meta?.path === 'string' && meta.path ? meta.path : null)
     ?? name;
-  const title = what === name || what.startsWith(`${name}:`) || what.startsWith(`${name} `) ? what : `${name}: ${what}`;
+  const title = what === name || what.startsWith(`${name}:`) || what.startsWith(`${name} `) ? what : `${name}: ${shortenMiddle(what, 90)}`;
   const always = Array.isArray(p.always) ? (p.always as unknown[]).map(String).filter(Boolean) : [];
   return {
     key: `${sessionID}:${id}`,
@@ -238,6 +259,8 @@ export function permissionFromEvent(props: unknown): PendingPermission | null {
     permissionID: id,
     title: title.slice(0, 300),
     detail: always.length ? `“Allow” remembers: ${always.join(', ')}`.slice(0, 300) : undefined,
+    kind: name,
+    target: what,
   };
 }
 

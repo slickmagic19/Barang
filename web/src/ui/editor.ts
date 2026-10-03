@@ -317,18 +317,30 @@ async function probeExists(rel: string): Promise<boolean> {
   }
 }
 
-/** True when the spec resolves the way the project's toolchain would. */
-async function resolvesLikeToolchain(spec: string, fromDir: string): Promise<boolean> {
-  await loadImportMap();
+/** Decide one spec against a map + existence probe (injectable for tests).
+ *  Aliased + relative specs probe the disk (typos stay red); bare packages
+ *  pass when installed. Pure orchestration. */
+export async function specResolves(
+  spec: string,
+  fromDir: string,
+  map: ImportMap,
+  exists: (rel: string) => Promise<boolean>,
+): Promise<boolean> {
   if (!spec) return false;
-  if (spec.startsWith('.') || spec.startsWith('/')) {
-    for (const c of candidateImportPaths(fromDir, spec, importMap)) {
-      if (await probeExists(c)) return true;
+  if (spec.startsWith('.') || spec.startsWith('/') || matchAlias(spec, map.aliases)) {
+    for (const c of candidateImportPaths(fromDir, spec, map)) {
+      if (await exists(c)) return true;
     }
     return false;
   }
   const pkg = packageNameOf(spec);
-  return !!pkg && importMap.deps.has(pkg);
+  return !!pkg && map.deps.has(pkg);
+}
+
+/** True when the spec resolves the way the project's toolchain would. */
+async function resolvesLikeToolchain(spec: string, fromDir: string): Promise<boolean> {
+  await loadImportMap();
+  return specResolves(spec, fromDir, importMap, probeExists);
 }
 
 const markerFilter = {

@@ -18,7 +18,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
   return img;
 }
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry, deleteFocusedEntry } from './ui/explorer';
-import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths } from './ui/editor';
+import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initTerminal, type TerminalApi } from './ui/terminal';
@@ -591,6 +591,9 @@ async function boot() {
   async function switchRoot(newRoot: string) {
     currentRoot = newRoot;
     root = newRoot;
+    // Opening a folder always lands on the Explorer, not whichever view
+    // was active last (search-in-progress, scm, ... stays per session).
+    setSideView('explorer');
     agentStore.set({
       root: newRoot, sessions: [], activeId: null, messages: [],
       permissions: [], busy: false, status: 'connecting', error: null,
@@ -725,6 +728,7 @@ async function boot() {
     matchAlias,
     packageNameOf,
     candidateImportPaths,
+    specResolves,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

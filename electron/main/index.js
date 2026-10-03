@@ -1776,6 +1776,20 @@ async function runUiSmoke() {
           const rel = u.candidateImportPaths('src/pages', '../lib/x', map);
           if (!rel.includes('src/lib/x.ts')) bad.push('cand-rel');
           if (u.candidateImportPaths('src', 'react', map).length !== 0) bad.push('cand-bare');
+          const sr = u.specResolves;
+          if (typeof sr !== 'function') bad.push('no-resolve-fn');
+          else {
+            const files = new Set(['src/components/layout/Footer.tsx', 'src/lib/x.ts', 'src/pages/AboutPage.tsx']);
+            const exists = async (rel) => files.has(rel);
+            const mmap = { baseDir: '', aliases: tp.entries, deps: new Set(['react', 'react-router-dom']) };
+            if (await sr('@/components/layout/Footer', 'src', mmap, exists) !== true) bad.push('res-alias-hit');
+            if (await sr('@/components/Nope', 'src', mmap, exists) !== false) bad.push('res-alias-miss');
+            if (await sr('../lib/x', 'src/pages', mmap, exists) !== true) bad.push('res-rel-hit');
+            if (await sr('../lib/ghost', 'src/pages', mmap, exists) !== false) bad.push('res-rel-miss');
+            if (await sr('react-router-dom', 'src', mmap, exists) !== true) bad.push('res-dep-hit');
+            if (await sr('left-pad-xyz', 'src', mmap, exists) !== false) bad.push('res-dep-miss');
+            if (await sr('', 'src', mmap, exists) !== false) bad.push('res-empty');
+          }
         }
       }
       // Permission cards: structured kind/target + middle-ellipsis titles.

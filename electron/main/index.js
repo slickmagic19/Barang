@@ -191,11 +191,23 @@ function ensureStartMenuShortcut() {
         // into userData once and link that instead.
         let iconPath = process.execPath;
         try {
-          const shipped = path.join(process.resourcesPath, 'icon.ico');
           const vault = path.join(app.getPath('userData'), 'barang-icon.ico');
           // Always refresh: a rebrand (new shipped icon) must replace the
           // vaulted copy, not linger behind a copy-once shortcut icon.
-          await fs.copyFile(shipped, vault).catch(() => null);
+          // Dev fallback: resourcesPath has no icon.ico outside the packaged
+          // app, so fall back to the repo build output (same file).
+          const candidates = [
+            path.join(process.resourcesPath, 'icon.ico'),
+            path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'build', 'icon.ico'),
+          ];
+          for (const src of candidates) {
+            try {
+              await fs.copyFile(src, vault);
+              break;
+            } catch {
+              /* try next */
+            }
+          }
           try {
             await fs.stat(vault);
             iconPath = vault;

@@ -26,6 +26,7 @@ export interface AgentSnap {
   busy: boolean;
   error: string | null;
   perms: number;
+  questions: number;
   activeId: string | null;
 }
 
@@ -34,16 +35,17 @@ export function decideAgentNotification(prev: AgentSnap, next: AgentSnap): Notif
   if (next.root !== prev.root) return null; // project switch, not a run edge
   if (next.activeId !== prev.activeId && next.activeId !== null && prev.activeId !== null) return null; // session switch
   if (next.error && next.error !== prev.error) return 'error';
-  // Approval waits happen mid-run (busy stays true) — fire on arrival and
-  // when a run ends with asks still pending, not only when idle.
-  if (next.perms > prev.perms || (prev.busy && !next.busy && next.perms > 0)) return 'approval';
-  if (prev.busy && !next.busy && next.activeId && !next.error && next.perms === 0) return 'done';
+  // Approval/question waits happen mid-run (busy stays true) — fire on
+  // arrival and when a run ends with asks still pending, not only when idle.
+  const waiting = (s: AgentSnap) => s.perms + s.questions;
+  if (waiting(next) > waiting(prev) || (prev.busy && !next.busy && waiting(next) > 0)) return 'approval';
+  if (prev.busy && !next.busy && next.activeId && !next.error && waiting(next) === 0) return 'done';
   return null;
 }
 
 export function snapAgent(): AgentSnap {
   const a = agentStore.get();
-  return { root: a.root, busy: a.busy, error: a.error, perms: a.permissions.length, activeId: a.activeId };
+  return { root: a.root, busy: a.busy, error: a.error, perms: a.permissions.length, questions: a.questions.length, activeId: a.activeId };
 }
 
 export function watchAgentNotifications(onEvent: (kind: NotifyKind) => void): () => void {

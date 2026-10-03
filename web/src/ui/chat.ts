@@ -432,6 +432,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   sessSection.append(sessRow);
 
   const perms = el('div', { class: 'perms' });
+  const quests = el('div', { class: 'quests' });
   const list = el('div', { class: 'chat-list' });
   const errBox = el('div', { class: 'chat-err hidden' });
   const busyRow = el('div', { class: 'busy-row hidden' });
@@ -494,7 +495,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   box.append(input, sendRow);
   composer.append(attachBar, box, suggest);
 
-  panel.append(sessSection, perms, list, errBox, busyRow, todosSec, changesSec, composer);
+  panel.append(sessSection, perms, quests, list, errBox, busyRow, todosSec, changesSec, composer);
 
   // --- image attachments (opencode-style): files become @mentions instead ---
   interface ImgAttach { filename: string; mime: string; dataUrl: string }
@@ -812,10 +813,41 @@ function paintTodos() {
     paintChanges();
     // agent todos (server-owned checklist)
     paintTodos();
+    // agent question-tool waits: 1.18 serve has no HTTP reply route, so the
+    // card is read-only — options shown, recovery via Stop + chat answer.
+    quests.innerHTML = '';
+    for (const q of s.questions) {
+      const card = el('div', { class: 'quest-card' });
+      const title = el('div', { class: 'quest-title' }, q.header || 'The agent has a question');
+      title.prepend(iconEl('help', 14));
+      card.append(title);
+      card.append(el('div', { class: 'quest-q' }, q.question));
+      if (q.options.length) {
+        const opts = el('div', { class: 'quest-opts' });
+        for (const o of q.options) {
+          const row = el('div', { class: 'quest-opt' });
+          row.append(el('span', { class: 'quest-opt-label' }, o.label));
+          if (o.description) row.append(el('span', { class: 'quest-opt-desc' }, o.description));
+          opts.append(row);
+        }
+        card.append(opts);
+      }
+      card.append(el('div', { class: 'quest-note' }, 'Barang cannot answer this yet — Stop the run, then reply with your choice in chat.'));
+      const row = el('div', { class: 'perm-row' });
+      const bStop = el('button', { class: 'btn btn-danger btn-sm' }, 'Stop the run');
+      bStop.onclick = () => void abortActive();
+      row.append(bStop);
+      card.append(row);
+      quests.append(card);
+    }
     // messages / busy / error
     renderMessages(list, hooks);
     busyRow.classList.toggle('hidden', !s.busy);
-    if (s.busy) busyTxt.textContent = statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
+    if (s.busy) {
+      busyTxt.textContent = s.status === 'stalled' && s.lastActivity
+        ? `Agent stalled — ${s.lastActivity} (Stop, then send again)`
+        : statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
+    }
     if (s.error) {
       errBox.innerHTML = '';
       errBox.append(iconEl('alert', 14), el('span', {}, s.error));

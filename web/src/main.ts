@@ -3,7 +3,8 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress } from './lib/agent';
+import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
+  questionFromEvent, describeActivity, decideStatus } from './lib/agent';
 import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -662,8 +663,13 @@ async function boot() {
       : kind === 'approval' ? 'Barang — approval needed' : 'Barang — agent finished';
     const body = kind === 'error'
       ? (agentStore.get().error ?? 'The run failed.').slice(0, 200)
-      : kind === 'approval'
-        ? `${agentStore.get().permissions.length} change(s) waiting for your review.`
+    : kind === 'approval'
+      ? (() => {
+        const bits: string[] = [];
+        if (agentStore.get().permissions.length) bits.push(`${agentStore.get().permissions.length} approval(s)`);
+        if (agentStore.get().questions.length) bits.push(`${agentStore.get().questions.length} question(s)`);
+        return `${bits.join(' + ') || 'Something'} waiting for your review.`;
+      })()
         : (activeSessionTitle() ?? 'Your task is complete.');
     if (s.notifSound) {
       const url = resolveSoundUrl(kind === 'error' ? 'alert' : s.notifSoundName, s.notifCustomPath);
@@ -706,6 +712,9 @@ async function boot() {
     isTransportDown,
     findUserMessage,
     todoProgress,
+    questionFromEvent,
+    describeActivity,
+    decideStatus,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

@@ -1467,7 +1467,7 @@ async function runUiSmoke() {
     notifDecide = await w.webContents.executeJavaScript(`(() => {
       const d = window.__barangNotifDecide;
       if (typeof d !== 'function') return 'no-hook';
-      const idle = { root: 'r', busy: false, error: null, perms: 0, activeId: 's' };
+      const idle = { root: 'r', busy: false, error: null, perms: 0, questions: 0, activeId: 's' };
       const cases = [
         [{ ...idle, busy: true }, { ...idle }, 'done'],
         [{ ...idle }, { ...idle }, null],
@@ -1479,17 +1479,19 @@ async function runUiSmoke() {
         [{ ...idle, busy: true, activeId: 's1' }, { ...idle, activeId: 's2' }, null],
         [{ ...idle, busy: true, perms: 0 }, { ...idle, busy: true, perms: 1 }, 'approval'],
         [{ ...idle, busy: true, perms: 1 }, { ...idle, busy: true, perms: 1 }, null],
+        [{ ...idle, busy: true, questions: 0 }, { ...idle, busy: true, questions: 1 }, 'approval'],
+        [{ ...idle, busy: true, questions: 1 }, { ...idle, questions: 0 }, 'done'],
       ];
       const bad = [];
       cases.forEach(([a, b, want], i) => {
         const got = d(a, b);
         if (got !== want) bad.push(i + ':' + got + '!==' + want);
       });
-      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-10';
+      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-12';
     })()`);
   } catch (e) { notifDecide = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] notif-decide: ' + notifDecide);
-  pass = pass && notifDecide === 'ok-10';
+  pass = pass && notifDecide === 'ok-12';
   let notifIpc = 'skip';
   try {
     notifIpc = await w.webContents.executeJavaScript(`(async () => {
@@ -1674,6 +1676,42 @@ async function runUiSmoke() {
           if (!todosSec.classList.contains('hidden') && todosSec.querySelectorAll('.todo-row').length === 0) bad.push('todos-visible-no-rows');
         }
       }
+      // Missing status entry = idle (server deletes entries on run end).
+      const dst = u.decideStatus;
+      if (typeof dst !== 'function') bad.push('no-dst-fn');
+      else {
+        const prev = { busy: true, status: 'busy', statusInfo: { type: 'busy' } };
+        const idlePrev = { busy: false, status: 'idle', statusInfo: null };
+        let r = dst(undefined, prev, 100000, 0);
+        if (r.busy !== false || r.status !== 'idle') bad.push('dst-missing-idle');
+        r = dst(undefined, prev, 3000, 0);
+        if (r.busy !== true || r.status !== 'busy') bad.push('dst-grace-busy');
+        r = dst({ type: 'retry', attempt: 2 }, prev, 100000, 0);
+        if (r.busy !== true || r.status !== 'retry' || r.statusInfo.attempt !== 2) bad.push('dst-retry');
+        r = dst({ type: 'idle' }, prev, 100000, 0);
+        if (r.busy !== false) bad.push('dst-idle');
+        r = dst(undefined, idlePrev, 100000, 0);
+        if (r.busy !== false) bad.push('dst-idle-missing');
+      }
+      // Agent question waits: real 1.18 question.asked shape.
+      const qf = u.questionFromEvent;
+      if (typeof qf !== 'function') bad.push('no-q-fn');
+      else {
+        const q = qf({ id: 'que_1', sessionID: 'ses_1', questions: [{ header: 'Color', question: 'Red or Blue?', options: [{ label: 'Red', description: 'warm' }, { label: 'Blue' }] }], tool: { messageID: 'm1', callID: 'c1' } });
+        if (!q || q.questionID !== 'que_1' || q.question !== 'Red or Blue?' || q.options.length !== 2 || q.options[0].label !== 'Red') bad.push('q-shape');
+        if (qf(null) !== null || qf({}) !== null || qf({ id: 'x', sessionID: 's', questions: [] }) !== null) bad.push('q-garbage');
+      }
+      // Stall diagnosis copy.
+      const da = u.describeActivity;
+      if (typeof da !== 'function') bad.push('no-da-fn');
+      else {
+        if (!da([], [], [{ question: 'Red or Blue?' }]).includes('Red or Blue?')) bad.push('da-question');
+        if (!da([], [{ title: 'bash: ls' }], []).includes('bash: ls')) bad.push('da-perm');
+        const toolMsg = [{ info: { role: 'assistant' }, parts: [{ type: 'tool', tool: 'bash', state: { status: 'running', title: 'ls -la' } }] }];
+        if (!da(toolMsg, [], []).includes('bash')) bad.push('da-tool');
+        if (da([], [], []) !== 'no output yet') bad.push('da-empty');
+      }
+      if (st('stopping', 0) !== 'Agent stopping…') bad.push('status-stopping');
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       // Self-heal leftovers from an interrupted run (a stale 2000-file dir
       // would blow the cap budget and hide this probe's own files).

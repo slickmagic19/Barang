@@ -6,7 +6,7 @@ export type IconName =
   | 'refresh' | 'trash' | 'plus' | 'x' | 'chevL' | 'chevR' | 'chevD'
   | 'send' | 'stop' | 'shield' | 'spark' | 'search' | 'prompt'
   | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip' | 'download'
-  | 'splitV' | 'maximize' | 'branch' | 'minus' | 'upload' | 'sync' | 'discard' | 'meatball' | 'bolt';
+  | 'splitV' | 'maximize' | 'branch' | 'minus' | 'upload' | 'sync' | 'discard' | 'meatball' | 'bolt' | 'help';
 
 const S = (inner: string) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
@@ -50,6 +50,7 @@ export const ICONS: Record<IconName, string> = {
   discard: S('<path d="M3 12a9 9 0 1 0 2.64-6.36"/><path d="M3 3.5V9h5.5"/>'),
   meatball: `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>`,
   bolt: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 2.5L4.5 13.5H11l-1.5 8L18.5 10H12z"/></svg>`,
+  help: S('<circle cx="12" cy="12" r="8.5"/><path d="M9.5 9.3a2.6 2.6 0 0 1 5 .9c0 1.8-2.4 2.1-2.4 3.8"/><path d="M12 17.5h.01"/>'),
 };
 
 /** Span wrapper sized for flex layouts (icons align to text baseline). */

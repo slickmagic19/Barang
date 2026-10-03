@@ -89,6 +89,17 @@ export interface PendingPermission {
   detail?: string;
 }
 
+export interface PendingQuestion {
+  key: string;
+  sessionID: string;
+  questionID: string;
+  header: string;
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+  messageID?: string;
+  callID?: string;
+}
+
 export interface RunStatusInfo {
   type: 'idle' | 'busy' | 'retry';
   attempt?: number;
@@ -124,6 +135,8 @@ interface AgentState {
   status: string;
   statusInfo: RunStatusInfo | null; // raw server run state (carries retry attempt)
   permissions: PendingPermission[];
+  questions: PendingQuestion[]; // agent question-tool waits (event-sourced)
+  lastActivity: string; // human summary of what the run is doing (stall row)
   connected: boolean;
   error: string | null;
 }
@@ -142,6 +155,8 @@ export const agentStore = createStore<AgentState>({
   status: 'idle',
   statusInfo: null,
   permissions: [],
+  questions: [],
+  lastActivity: '',
   connected: false,
   error: null,
 });
@@ -245,6 +260,115 @@ export function removePermission(sessionID: string, permissionID: string): boole
   return true;
 }
 
+/** Map a question event payload to a card. 1.18 shape: {id, sessionID,
+ *  questions:[{header, question, options:[{label, description}]}], tool}.
+ *  Null when unusable. Pure. */
+export function questionFromEvent(props: unknown): PendingQuestion | null {
+  if (!props || typeof props !== 'object') return null;
+  const p = props as Record<string, unknown>;
+  const id = typeof p.id === 'string' ? p.id : '';
+  const sessionID = typeof p.sessionID === 'string' ? p.sessionID : '';
+  const qs = Array.isArray(p.questions) ? p.questions : [];
+  if (!id || !sessionID || !qs.length) return null;
+  const first = (qs[0] && typeof qs[0] === 'object' ? qs[0] : {}) as Record<string, unknown>;
+  const tool = (p.tool && typeof p.tool === 'object' ? p.tool : null) as Record<string, unknown> | null;
+  const options = Array.isArray(first.options)
+    ? (first.options as unknown[]).filter((o) => o && typeof o === 'object').map((o) => {
+      const oo = o as Record<string, unknown>;
+      return { label: String(oo.label ?? ''), description: typeof oo.description === 'string' ? oo.description : undefined };
+    }).filter((o) => o.label)
+    : [];
+  return {
+    key: `${sessionID}:${id}`,
+    sessionID,
+    questionID: id,
+    header: typeof first.header === 'string' ? first.header.slice(0, 120) : '',
+    question: typeof first.question === 'string' ? first.question.slice(0, 500) : `${qs.length} question(s)`,
+    options: options.slice(0, 8),
+    messageID: tool && typeof tool.messageID === 'string' ? tool.messageID : undefined,
+    callID: tool && typeof tool.callID === 'string' ? tool.callID : undefined,
+  };
+}
+
+/** Track a newly asked question (dedupe by id). */
+export function upsertQuestion(props: unknown): PendingQuestion | null {
+  const card = questionFromEvent(props);
+  if (!card) return null;
+  const cur = agentStore.get().questions;
+  if (cur.some((q) => q.key === card.key)) return cur.find((q) => q.key === card.key) ?? null;
+  agentStore.set({ questions: [...cur, card] });
+  return card;
+}
+
+/** Drop a resolved question (replied/rejected event). */
+export function removeQuestion(sessionID: string, questionID: string): boolean {
+  const cur = agentStore.get().questions;
+  const next = cur.filter((q) => !(q.sessionID === sessionID && q.questionID === questionID));
+  if (next.length === cur.length) return false;
+  agentStore.set({ questions: next });
+  return true;
+}
+
+/** Drop all of one session's questions (fresh send / confirmed stop: the
+ *  wait belongs to a dead run). */
+export function clearSessionQuestions(sessionID: string) {
+  const cur = agentStore.get().questions;
+  if (cur.some((q) => q.sessionID === sessionID)) {
+    agentStore.set({ questions: cur.filter((q) => q.sessionID !== sessionID) });
+  }
+}
+
+/** Reconcile with the server's live question list (GET /question covers
+ *  waits from before this window subscribed — e.g. app restart). Prunes
+ *  dead entries; never invents any. */
+export async function backfillQuestions() {
+  try {
+    const list = await oc.get<unknown[]>('/question');
+    if (!Array.isArray(list)) return;
+    const cards = list.map(questionFromEvent).filter((c): c is PendingQuestion => !!c);
+    const seen = new Set(cards.map((c) => c.key));
+    const kept = agentStore.get().questions.filter((q) => seen.has(q.key));
+    const fresh = cards.filter((c) => !kept.some((q) => q.key === c.key));
+    if (fresh.length || kept.length !== agentStore.get().questions.length) {
+      agentStore.set({ questions: [...kept, ...fresh] });
+    }
+  } catch { /* older server / offline — events still cover live waits */ }
+}
+
+/** One-line summary of what the run is doing (stall row + diagnosis).
+ *  Waits the user can resolve come first. Pure. */
+export function describeActivity(messages: ChatMessage[], permissions: PendingPermission[], questions: PendingQuestion[]): string {
+  const q = (questions ?? [])[0];
+  if (q) return `waiting for your answer: “${q.question.slice(0, 100)}”`;
+  const p = (permissions ?? [])[0];
+  if (p) return `waiting for your approval: ${p.title.slice(0, 100)}`;
+  const list = messages ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    const parts = m?.parts ?? [];
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j] as Record<string, unknown>;
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'question') return 'waiting for your answer (question tool)';
+      if (part.type === 'tool') {
+        const state = (part.state && typeof part.state === 'object' ? part.state : {}) as Record<string, unknown>;
+        const st = String(state.status ?? part.status ?? '');
+        if (st === 'completed' || st === 'error') continue;
+        const tool = String(part.tool ?? part.name ?? 'tool');
+        const title = typeof state.title === 'string' && state.title ? state.title : '';
+        return `running ${tool}${title ? ` — ${title.slice(0, 80)}` : ''}`;
+      }
+    }
+    if (String(m?.info?.role ?? '') === 'assistant') {
+      const hasText = (m?.parts ?? []).some((x) => x?.type === 'text' && String(x?.text ?? '').trim());
+      if (hasText) return 'writing a reply…';
+      const hasReason = (m?.parts ?? []).some((x) => typeof x?.type === 'string' && /reason|think/i.test(x.type));
+      if (hasReason) return 'reasoning…';
+    }
+  }
+  return 'no output yet';
+}
+
 export function connectEvents() {
   if (eventsConnected) return;
   eventsConnected = true;
@@ -257,7 +381,7 @@ export function connectEvents() {
     const relevant =
       blob.includes('message') || blob.includes('session') ||
       blob.includes('part') || blob.includes('todo') || blob.includes('diff') ||
-      blob.includes('permission') || blob.includes('file.edited');
+      blob.includes('permission') || blob.includes('question') || blob.includes('file.edited');
     if (!relevant) return;
     bumpProgress();
     // Permission lifecycle is event-sourced (permissions are NOT message
@@ -284,6 +408,27 @@ export function connectEvents() {
             const sid = typeof props.sessionID === 'string' ? props.sessionID : '';
             const pid = typeof props.permissionID === 'string' ? props.permissionID : '';
             if (sid && pid) removePermission(sid, pid);
+          }
+        }
+      }
+      scheduleRefresh();
+      scheduleSessions();
+      return;
+    }
+    // Agent question-tool waits: 1.18 has no HTTP reply route for them, so
+    // the card is read-only (options shown, Stop + answer-in-chat recovery).
+    if (blob.includes('question')) {
+      const ev = parseAgentEvent(data);
+      if (ev) {
+        const root = agentStore.get().root || '';
+        const sameProject = !ev.directory || !root || normDir(ev.directory) === normDir(root);
+        if (sameProject) {
+          if (ev.type === 'question.asked') upsertQuestion(ev.props);
+          else if (ev.type === 'question.replied' || ev.type === 'question.rejected') {
+            const props = ev.props;
+            const sid = typeof props.sessionID === 'string' ? props.sessionID : '';
+            const qid = typeof props.requestID === 'string' ? props.requestID : '';
+            if (sid && qid) removeQuestion(sid, qid);
           }
         }
       }
@@ -523,6 +668,8 @@ export async function deleteSession(id: string) {
     sessions: rest,
     activeId: s.activeId === id ? (rest[0]?.id ?? null) : s.activeId,
     messages: s.activeId === id ? [] : s.messages,
+    permissions: s.permissions.filter((p) => p.sessionID !== id),
+    questions: s.questions.filter((q) => q.sessionID !== id),
   });
   if (agentStore.get().activeId) await refreshActive();
 }
@@ -532,19 +679,40 @@ export async function refreshStatus(sessionId: string) {
     const st = await oc.get<Record<string, RunStatusInfo>>('/session/status');
     // Switched mid-flight — a stale session's busy flag must not leak in.
     if (agentStore.get().activeId !== sessionId) return;
-    const cur = st?.[sessionId];
-    const type = cur?.type ?? (agentStore.get().busy ? 'busy' : 'idle');
-    // A locally flagged stall clears on any fresh server state.
-    agentStore.set({ busy: type !== 'idle', status: type, statusInfo: cur ?? null });
+    agentStore.set(decideStatus(st?.[sessionId], agentStore.get()));
   } catch { /* non-fatal */ }
 }
+
+/** Map a raw server status onto store state. Proven live: the server
+ *  DELETES a session's entry when its run ends (no idle entries, ever) —
+ *  so a missing entry means idle, not "keep previous". The only exception
+ *  is the seconds right after our own submit, before the run publishes.
+ *  Pure. */
+export function decideStatus(
+  cur: RunStatusInfo | null | undefined,
+  prev: { busy: boolean; status: string; statusInfo: RunStatusInfo | null },
+  nowMs = Date.now(),
+  lastSubmitMs = lastSubmitAt,
+): { busy: boolean; status: string; statusInfo: RunStatusInfo | null } {
+  if (cur) {
+    const t = cur.type ?? 'busy';
+    return { busy: t !== 'idle', status: t, statusInfo: cur };
+  }
+  if (prev.busy && nowMs - lastSubmitMs < 5000) {
+    return { busy: true, status: 'busy', statusInfo: { type: 'busy' } };
+  }
+  return { busy: false, status: 'idle', statusInfo: null };
+}
+
+let lastSubmitAt = 0;
 
 /** Busy-row label: the server retries failed runs itself (status type
  *  'retry' + attempt) — surfacing it is what "retry like opencode" means.
  *  Back to 'Agent working…' the moment the run resumes. Pure. */
 export function statusTextFor(status: string, attempt = 0): string {
   if (status === 'retry') return attempt > 0 ? `Agent retrying… (attempt ${attempt})` : 'Agent retrying…';
-  if (status === 'stalled') return 'Agent stalled — no updates for a while (Stop, then send again)';
+  if (status === 'stalled') return 'Agent stalled';
+  if (status === 'stopping') return 'Agent stopping…';
   return `Agent working… (${status || 'busy'})`;
 }
 
@@ -593,8 +761,15 @@ export async function refreshActive() {
   }
   // NOTE: permissions are event-sourced (permission.asked/updated), never
   // message parts — the old part-scanner found nothing and is gone.
-  agentStore.set({ messages, todos: todoList, error: runError });
+  const st = agentStore.get();
+  agentStore.set({
+    messages,
+    todos: todoList,
+    error: runError,
+    lastActivity: describeActivity(messages, st.permissions, st.questions),
+  });
   if (messages.length !== s.messages.length) bumpProgress();
+  if (st.busy) void backfillQuestions().catch(() => {});
 }
 
 export async function respondPermission(p: PendingPermission, response: PermissionResponse) {
@@ -710,7 +885,9 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   // The client messageID makes submit retries idempotent; a reconcile check
   // after any failure guarantees we never stack duplicate user messages.
   const messageID = `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null });
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: 'sending…' });
+  lastSubmitAt = Date.now();
+  clearSessionQuestions(id); // a fresh run supersedes any dead waits
   bumpProgress();
   const payload = {
     messageID,
@@ -763,11 +940,36 @@ const SEND_RETRY_FACTOR = 2;
 const SEND_RETRY_JITTER = 0.25;
 const SEND_RETRY_MAX_MS = 30000;
 
+const ABORT_TIMEOUT_MS = 15000;
+
 export async function abortActive() {
   const s = agentStore.get();
   if (!s.activeId) return;
-  await oc.post(`/session/${s.activeId}/abort`).catch(() => {});
-  await refreshActive();
+  const id = s.activeId;
+  // Optimistic stopping state: the button visibly does something even if the
+  // server is wedged. Verified after (missing status entry = stopped).
+  agentStore.set({ status: 'stopping', lastActivity: 'stopping the run…' });
+  try {
+    await oc.post(`/session/${id}/abort`, undefined, { timeoutMs: ABORT_TIMEOUT_MS });
+  } catch { /* fall through to verify — the run may already be dead */ }
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    if (agentStore.get().activeId !== id) return; // switched away mid-stop
+    await refreshStatus(id).catch(() => {});
+    const cur = agentStore.get();
+    if (cur.activeId !== id || !cur.busy) {
+      clearSessionQuestions(id); // confirmed dead — its waits died with it
+      await refreshActive().catch(() => {});
+      return;
+    }
+    // Still going: hold the stopping state so the button state stays honest.
+    agentStore.set({ status: 'stopping' });
+  }
+  // Still busy server-side: say so plainly instead of pretending.
+  agentStore.set({
+    status: 'busy',
+    error: 'Stop did not take — the run is still going server-side. Switch projects (or restart Barang) to force-stop it.',
+  });
 }
 
 const SEND_FATAL = [

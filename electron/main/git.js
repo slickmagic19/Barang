@@ -23,10 +23,20 @@ function git(cwd) {
   // User-config env (EDITOR/PAGER/SSH/ASKPASS from installers and dotfiles)
   // is legitimate ambient configuration — allowlist it. Arg-based guards
   // (upload-pack, exec, config paths) stay at full strength.
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  // The bridge injects opencode credentials for its own server calls — git
+  // children must not inherit them.
+  delete env.OPENCODE_SERVER_PASSWORD;
+  // CRITICAL scope guard: GIT_CEILING_DIRECTORIES stops git from ascending
+  // past the OPENED folder, so a bare subfolder of a repo never sees (or
+  // mutates!) the parent's .git. The ceiling is the parent dir itself —
+  // cwd stays searchable, everything above is invisible to every op.
+  env.GIT_CEILING_DIRECTORIES = path.dirname(cwd);
   return simpleGit({
     baseDir: cwd,
     allowEnvironment: [
       'GIT_TERMINAL_PROMPT',
+      'GIT_CEILING_DIRECTORIES',
       'EDITOR', 'VISUAL', 'PAGER',
       'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'GIT_PAGER',
       'GIT_SSH', 'GIT_SSH_COMMAND',
@@ -41,7 +51,7 @@ function git(cwd) {
       allowUnsafeGitProxy: true,
       allowUnsafeDiffExternal: true,
     },
-  }).env({ ...process.env, GIT_TERMINAL_PROMPT: '0' });
+  }).env(env);
 }
 
 function err(e) {

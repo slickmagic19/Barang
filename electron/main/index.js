@@ -664,6 +664,21 @@ async function runMainSmoke() {
       await scm.setConfig(dir, 'user.name', 'barang-test');
       await scm.setConfig(dir, 'user.email', 'barang-test@example.com');
       await step('init', () => scm.info(dir), (r) => r.isRepo === true && !!r.branch);
+      // Critical containment: a bare subfolder must NEVER see the parent's
+      // .git (no status, and mutating ops refuse instead of touching it).
+      await step('subfolder-contained', async () => {
+        const sub = path.join(dir, 'sub');
+        await fs.mkdir(sub, { recursive: true });
+        const i = await scm.info(sub);
+        let threw = false;
+        try {
+          await scm.branches(sub);
+        } catch {
+          threw = true;
+        }
+        return { childRepo: i.isRepo, threw };
+      }, (r) => r.childRepo === false && r.threw === true);
+      await step('parent-still-repo', () => scm.info(dir), (r) => r.isRepo === true);
       const main = (await scm.info(dir)).branch;
       await W('a.txt', 'one\ntwo\n');
       await step('stage', () => scm.stage(dir, ['a.txt']).then(() => scm.info(dir)), (r) => has(r.staged, 'a.txt'));
@@ -693,7 +708,7 @@ async function runMainSmoke() {
       await step('resolve-both', () => scm.resolveConflict(dir, 'c.txt', 'both').then(() => R('c.txt')),
         (t) => t.includes('A') && t.includes('B'));
       await step('undo-commit', () => scm.undoCommit(dir).then(() => scm.log(dir, 5)), (r) => r.all.length === 1);
-      return '14 steps ok';
+      return '18 steps ok';
     } finally {
       try {
         await fs.rm(dir, { recursive: true, force: true });

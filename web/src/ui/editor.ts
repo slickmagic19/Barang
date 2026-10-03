@@ -58,16 +58,20 @@ function hasMonsterLine(content: string): boolean {
   return content.length - prev > 200000;
 }
 
-/** Monaco language id for a path. tsx/jsx MUST be the *react variants —
- *  plain typescript/javascript plus default compiler options is exactly the
- *  "Cannot use JSX unless the '--jsx' flag is provided" (17004) swamp. */
+/** Monaco language id for a path. Deliberately the PLAIN ids (typescript /
+ *  javascript), never *react: monaco 0.52 registers no typescriptreact /
+ *  javascriptreact Monarch grammar, so those models get zero tokenization
+ *  (flat gray, no validation at all). JSX parsing is driven by the TS
+ *  worker from the model's file URI (.tsx preserved in inmemory:// URLs)
+ *  plus jsx: ReactJSX in the compiler options — that combination kills the
+ *  17004 swamp with highlighting intact. */
 export function langOf(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? '';
   const map: Record<string, string> = {
     ts: 'typescript', mts: 'typescript', cts: 'typescript',
-    tsx: 'typescriptreact',
+    tsx: 'typescript',
     js: 'javascript', mjs: 'javascript', cjs: 'javascript',
-    jsx: 'javascriptreact',
+    jsx: 'javascript',
     json: 'json', html: 'html', css: 'css',
     scss: 'scss', less: 'less', md: 'markdown', py: 'python', rs: 'rust',
     go: 'go', java: 'java', c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp',
@@ -75,6 +79,18 @@ export function langOf(path: string): string {
     toml: 'ini', xml: 'xml', sql: 'sql', vue: 'html', svelte: 'html',
   };
   return map[ext] ?? 'plaintext';
+}
+
+/** Ids Monaco actually tokenizes (Monarch registry). The smoke probe
+ *  asserts every langOf() output is in here — an unregistered id renders
+ *  flat gray with zero diagnostics, which is how the *react regression
+ *  slipped through. */
+export function registeredLanguageIds(): string[] {
+  try {
+    return monaco ? monaco.languages.getLanguages().map((l) => l.id) : [];
+  } catch {
+    return [];
+  }
 }
 
 /** The TS compiler options applied to Monaco (set in initEditor). Exposed
@@ -235,7 +251,7 @@ export async function openFile(path: string, opts?: { focus?: boolean }) {
       models.set(path, model);
       // First TS model per project: surface the project's own @types/react
       // so module + JSX-runtime errors resolve like the real tsc would.
-      if (lang === 'typescriptreact' || lang === 'typescript') {
+      if (lang === 'typescript' || lang === 'javascript') {
         void ensureProjectTypes().catch(() => {});
       }
     } catch (e) {

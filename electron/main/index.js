@@ -1730,14 +1730,23 @@ async function runUiSmoke() {
         if (da([], [], []) !== 'no output yet') bad.push('da-empty');
       }
       if (st('stopping', 0) !== 'Agent stopping…') bad.push('status-stopping');
-      // Editor TS setup: tsx/jsx map to *react languages, jsx is never None.
-      if (typeof u.langOf !== 'function' || typeof u.getTsDiagOptions !== 'function') bad.push('no-ts-fns');
+      // Editor TS setup: plain registered ids (worker reads JSX from the
+      // file URI) + jsx flag on; every mapping must tokenize.
+      if (typeof u.langOf !== 'function' || typeof u.getTsDiagOptions !== 'function' || typeof u.registeredLanguageIds !== 'function') bad.push('no-ts-fns');
       else {
-        if (u.langOf('src/main.tsx') !== 'typescriptreact') bad.push('lang-tsx');
-        if (u.langOf('src/a.jsx') !== 'javascriptreact') bad.push('lang-jsx');
+        if (u.langOf('src/main.tsx') !== 'typescript') bad.push('lang-tsx');
+        if (u.langOf('src/a.jsx') !== 'javascript') bad.push('lang-jsx');
         if (u.langOf('src/a.ts') !== 'typescript') bad.push('lang-ts');
         if (u.langOf('src/a.js') !== 'javascript') bad.push('lang-js');
         if (u.langOf('x.mts') !== 'typescript') bad.push('lang-mts');
+        const reg = u.registeredLanguageIds();
+        if (!Array.isArray(reg) || !reg.includes('typescript') || !reg.includes('javascript')) bad.push('no-reg-list');
+        else {
+          for (const f of ['a.tsx', 'a.ts', 'a.jsx', 'a.js', 'a.mts', 'a.json', 'a.css', 'a.md', 'a.py', 'a.rs', 'x.unknown']) {
+            if (!reg.includes(u.langOf(f))) bad.push('unregistered:' + f);
+          }
+          if (reg.includes('typescriptreact') && u.langOf('a.tsx') === 'typescriptreact') bad.push('react-id-unneeded');
+        }
         const to = u.getTsDiagOptions();
         if (!to) bad.push('no-ts-opts');
         else {

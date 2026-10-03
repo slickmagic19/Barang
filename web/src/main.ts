@@ -23,6 +23,8 @@ deleteFocusedEntry, pathOf } from './ui/explorer';
 import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
+import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
+import { pomoNext, formatClock, normalizePomoSettings, POMO_DEFAULTS } from './lib/pomodoro';
 import { initTerminal, type TerminalApi } from './ui/terminal';
 import { initScm, decoration, type ScmApi } from './ui/scm';
 import { initSearchView, highlightLine, type SearchApi } from './ui/search';
@@ -466,6 +468,7 @@ async function boot() {
       setSideView('scm');
       void scmApi.openBranchMenu(x, y);
     },
+    onOpenPomo: () => setSideView('pomo'),
   });
 
   // Integrated terminal (bottom panel). Statusbar toggle lives next to agent-idle.
@@ -632,22 +635,27 @@ async function boot() {
   btnViewApi.append(iconEl('bolt', 15));
   const btnViewSearch = el('button', { class: 'icon-btn side-view-btn', title: 'Search (Ctrl+Shift+F)' }) as HTMLButtonElement;
   btnViewSearch.append(iconEl('search', 15));
-  viewBar.append(btnViewExplorer, btnViewScm, btnViewApi, btnViewSearch);
+  const btnViewPomo = el('button', { class: 'icon-btn side-view-btn', title: 'Pomodoro (Ctrl+Shift+T)' }) as HTMLButtonElement;
+  btnViewPomo.append(iconEl('timer', 15));
+  viewBar.append(btnViewExplorer, btnViewScm, btnViewApi, btnViewSearch, btnViewPomo);
   const explorerHost = el('div', { class: 'side-view', id: 'view-explorer' });
   const scmHost = el('div', { class: 'side-view hidden', id: 'view-scm' });
   const apiHost = el('div', { class: 'side-view hidden', id: 'view-api' });
   const searchHost = el('div', { class: 'side-view hidden', id: 'view-search' });
-  type SideView = 'explorer' | 'scm' | 'api' | 'search';
+  const pomoHost = el('div', { class: 'side-view hidden', id: 'view-pomo' });
+  type SideView = 'explorer' | 'scm' | 'api' | 'search' | 'pomo';
   let searchApi: SearchApi | null = null;
   const setSideView = (v: SideView) => {
     explorerHost.classList.toggle('hidden', v !== 'explorer');
     scmHost.classList.toggle('hidden', v !== 'scm');
     apiHost.classList.toggle('hidden', v !== 'api');
     searchHost.classList.toggle('hidden', v !== 'search');
+    pomoHost.classList.toggle('hidden', v !== 'pomo');
     btnViewExplorer.classList.toggle('active', v === 'explorer');
     btnViewScm.classList.toggle('active', v === 'scm');
     btnViewApi.classList.toggle('active', v === 'api');
     btnViewSearch.classList.toggle('active', v === 'search');
+    btnViewPomo.classList.toggle('active', v === 'pomo');
     try {
       localStorage.setItem('barang:side-view', v);
     } catch { /* private mode */ }
@@ -658,12 +666,13 @@ async function boot() {
   btnViewScm.onclick = () => setSideView('scm');
   btnViewApi.onclick = () => setSideView('api');
   btnViewSearch.onclick = () => setSideView('search');
+  btnViewPomo.onclick = () => setSideView('pomo');
   const buildSideViews = () => {
     // Hosts persist across switches (view state lives on them) — clear their
     // painted content so re-init never stacks duplicate headers/trees.
     explorerHost.innerHTML = '';
     sidebar.innerHTML = '';
-    sidebar.append(railBtn, viewBar, explorerHost, scmHost, apiHost, searchHost);
+    sidebar.append(railBtn, viewBar, explorerHost, scmHost, apiHost, searchHost, pomoHost);
   };
   buildSideViews();
 
@@ -685,7 +694,7 @@ async function boot() {
   });
   try {
     const v = localStorage.getItem('barang:side-view');
-    if (v === 'scm' || v === 'api' || v === 'search') setSideView(v as SideView);
+    if (v === 'scm' || v === 'api' || v === 'search' || v === 'pomo') setSideView(v as SideView);
   } catch { /* fresh default */ }
 
   // Sidebar Search view (project find + replace).
@@ -702,6 +711,9 @@ async function boot() {
   // repaints flow through the editorStore subscription (every bolt mutation
   // already goes through editorStore.set), so onTabs is a noop.
   boltApi = initBolt(apiHost, { toast, onTabs: () => undefined });
+
+  // Pomodoro timer (sidebar view + statusbar readout, own settings in-view).
+  initPomodoro(pomoHost, { toast });
 
   // Hot project switch: no page reload (Monaco stays warm, no bundle
   // re-parse). Explorer re-inits, tabs reset, sessions reload scoped.
@@ -856,6 +868,10 @@ async function boot() {
     specResolves,
     groupTabs,
     editorSplitState,
+    pomoNext,
+    formatClock,
+    normalizePomoSettings,
+    pomoDotsFilled,
     resolveSendVariant,
     loadCommands,
     parseSlashCommand,
@@ -958,6 +974,9 @@ async function boot() {
     } else if (mod && e.key.toLowerCase() === 'f' && e.shiftKey) {
       e.preventDefault();
       setSideView('search');
+    } else if (mod && e.key.toLowerCase() === 't' && e.shiftKey) {
+      e.preventDefault();
+      setSideView('pomo');
     } else if (mod && e.key.toLowerCase() === 's' && !termFocus) {
       e.preventDefault();
       if (e.shiftKey) {

@@ -1,5 +1,6 @@
 // Bottom status bar: project, opencode link state, session state, cursor.
 import { agentStore, readSettings, sessionUsage, usageCard } from '../lib/agent';
+import { pomoStore, formatClock } from '../lib/pomodoro';
 import { editorStore } from './editor';
 import type { GitRepoInfo } from './scm';
 import { el } from '../lib/util';
@@ -17,7 +18,7 @@ function dot(cls: string): HTMLElement {
   return s;
 }
 
-export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void; onOpenScm?: (x: number, y: number) => void } = {}) {
+export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void; onOpenScm?: (x: number, y: number) => void; onOpenPomo?: () => void } = {}) {
   const left = el('div', { class: 'status-left' });
   const right = el('div', { class: 'status-right' });
   bar.append(left, right);
@@ -36,6 +37,10 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   termEl.onclick = () => hooks.onToggleTerminal?.();
   const sessEl = el('span', { class: 'status-item' });
   const modelEl = el('span', { class: 'status-item' });
+  const pomoEl = el('button', { class: 'status-item status-pomo hidden', title: 'Open Pomodoro' }) as HTMLButtonElement;
+  const pomoLabel = el('span', {}, '');
+  pomoEl.append(iconEl('timer', 12), pomoLabel);
+  pomoEl.onclick = () => hooks.onOpenPomo?.();
   const usageEl = el('span', { class: 'status-item status-usage hidden' });
   const usageLabel = el('span', {}, '');
   usageEl.append(iconEl('spark', 12), usageLabel);
@@ -103,7 +108,7 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   const dirtyEl = el('span', { class: 'status-item' });
   const posEl = el('span', { class: 'status-item' }, 'Ln 1, Col 1');
   left.append(rootEl, gitEl, ocEl);
-  right.append(termEl, sessEl, modelEl, usageEl, dirtyEl, posEl);
+    right.append(termEl, sessEl, modelEl, usageEl, pomoEl, dirtyEl, posEl);
   let termCount = 0;
   let termOpen = false;
   let git: GitRepoInfo | null = null;
@@ -160,11 +165,24 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
     dirtyEl.innerHTML = '';
     if (dirty) dirtyEl.append(dot('warn'), el('span', {}, `${dirty} unsaved`));
 
+    // Pomodoro readout (own store tick): hidden until a session starts.
+    const pomo = pomoStore.get();
+    const pomoLive = pomo.status !== 'idle';
+    pomoEl.classList.toggle('hidden', !pomoLive);
+    if (pomoLive) {
+      pomoLabel.textContent = formatClock(pomo.remainingMs);
+      pomoEl.title = pomo.status === 'paused'
+        ? `Pomodoro paused — ${pomo.phase} (click to open)`
+        : `Pomodoro ${pomo.phase} — ${formatClock(pomo.remainingMs)} left (click to open)`;
+      pomoEl.classList.toggle('is-run', pomo.status === 'running');
+    }
+
     const active = e.tabs.find((t) => t.path === e.active);
     posEl.textContent = active ? `${active.title ?? active.path.split('/').pop()} · ${posEl.dataset.pos || 'Ln 1, Col 1'}` : 'no file';
   };
   agentStore.subscribe(paint);
   editorStore.subscribe(paint);
+  pomoStore.subscribe(paint);
   paint();
 
   return {

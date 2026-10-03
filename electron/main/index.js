@@ -1786,6 +1786,23 @@ async function runUiSmoke() {
         if (po('C:\\\\proj\\\\', 'src/a.ts', true) !== 'C:\\\\proj\\\\src\\\\a.ts') bad.push('path-clean');
         if (po('', 'src/a.ts', true) !== 'src/a.ts') bad.push('path-noroot');
       }
+      // Pomodoro engine: phase table, clock, settings validation, dots.
+      if (typeof u.pomoNext !== 'function' || typeof u.formatClock !== 'function' ||
+        typeof u.normalizePomoSettings !== 'function' || typeof u.pomoDotsFilled !== 'function') bad.push('no-pomo-fns');
+      else {
+        const n1 = u.pomoNext('focus', 2, 4);
+        if (n1.phase !== 'short' || n1.cycle !== 3) bad.push('pomo-short');
+        const n2 = u.pomoNext('focus', 3, 4);
+        if (n2.phase !== 'long' || n2.cycle !== 4) bad.push('pomo-long');
+        const n3 = u.pomoNext('short', 3, 4);
+        if (n3.phase !== 'focus' || n3.cycle !== 3) bad.push('pomo-back');
+        if (u.formatClock(25 * 60000) !== '25:00') bad.push('pomo-clock');
+        if (u.formatClock(59000) !== '0:59' || u.formatClock(0) !== '0:00' || u.formatClock(60001) !== '1:01') bad.push('pomo-clock-edge');
+        const ns = u.normalizePomoSettings({ focusMin: 999, shortMin: 0, cycles: -3, autoFocus: 'yes' });
+        if (ns.focusMin !== 180 || ns.shortMin !== 1 || ns.cycles !== 1 || ns.autoFocus !== false || ns.autoBreaks !== true) bad.push('pomo-clamp');
+        if (u.normalizePomoSettings(null).focusMin !== 25) bad.push('pomo-defaults');
+        if (u.pomoDotsFilled(0, 4) !== 0 || u.pomoDotsFilled(2, 4) !== 2 || u.pomoDotsFilled(4, 4) !== 4 || u.pomoDotsFilled(5, 4) !== 1) bad.push('pomo-dots');
+      }
       // Agent todos: header counts + checklist rendering data.
       const tp = u.todoProgress;
       if (typeof tp !== 'function') bad.push('no-todo-fn');
@@ -2390,6 +2407,39 @@ async function runUiSmoke() {
   } catch (e) { splitEd = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] split-editor: ' + splitEd);
   pass = pass && splitEd === 'ok';
+  // Pomodoro: rail tab opens the view, Start ticks, Reset idles.
+  let pomoUi = 'skip';
+  try {
+    pomoUi = await w.webContents.executeJavaScript(`(async () => {
+      const rail = [...document.querySelectorAll('.side-viewbar .side-view-btn')];
+      if (rail.length !== 5) return 'rail-count:' + rail.length;
+      const btn = rail.find((b) => (b.title || '').toLowerCase().includes('pomodoro'));
+      if (!btn) return 'no-pomo-btn';
+      btn.click();
+      await new Promise((r) => setTimeout(r, 500));
+      const host = document.querySelector('#view-pomo');
+      if (!host || host.classList.contains('hidden')) return 'pomo-not-open';
+      if (!host.querySelector('.pomo-ring') || !host.querySelector('.pomo-clock')) return 'pomo-no-ring';
+      const steps = host.querySelectorAll('.pomo-stepper').length;
+      const toggles = host.querySelectorAll('.switch-input').length;
+      if (steps < 4 || toggles < 4) return 'pomo-settings-thin:' + steps + '/' + toggles;
+      const start = [...host.querySelectorAll('.pomo-btns .btn')].find((b) => /^(start|continue)$/i.test((b.textContent || '').trim()));
+      if (!start) return 'no-start-btn';
+      start.click();
+      await new Promise((r) => setTimeout(r, 1600));
+      const clock = host.querySelector('.pomo-clock')?.textContent ?? '';
+      if (!/^\\d+:\\d\\d$/.test(clock)) return 'bad-clock:' + clock;
+      const meter = document.querySelector('.status-pomo');
+      if (!meter || meter.classList.contains('hidden')) return 'no-status-pomo';
+      const reset = [...host.querySelectorAll('.pomo-btns .btn')].find((b) => /^reset$/i.test((b.textContent || '').trim()));
+      if (!reset) return 'no-reset-btn';
+      reset.click();
+      await new Promise((r) => setTimeout(r, 400));
+      return 'ok';
+    })()`);
+  } catch (e) { pomoUi = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] pomodoro: ' + pomoUi);
+  pass = pass && pomoUi === 'ok';
   // Search-replace E2E (hermetic throwaway dir in the project). The marker
   // is timestamp-unique per run so the harness's own source (which mentions
   // the queries) can never collide with the scanned content.

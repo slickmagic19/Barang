@@ -175,8 +175,8 @@ button { font-family: inherit; }
 /* slim overlay-style Monaco scrollbars (match the 10px option size) */
 .monaco-editor .scrollbar.vertical { width: 10px !important; }
 .monaco-editor .scrollbar.horizontal { height: 10px !important; }
-.monaco-editor .scrollbar > .slider { background: #ffffff2e !important; border-radius: 5px !important; }
-.monaco-editor .scrollbar > .slider:hover { background: #ffffff4d !important; }
+.monaco-editor .scrollbar > .slider { background: #ffffff1c !important; border-radius: 5px !important; }
+.monaco-editor .scrollbar > .slider:hover, .monaco-editor .scrollbar > .slider.active { background: #ffffff4d !important; }
 .center { flex: 1; display: flex; flex-direction: column; min-width: 120px; background: var(--bg); }
 .agent-wrap {
   width: var(--agent-w); flex: 0 0 auto; border-left: 1px solid var(--border);
@@ -507,7 +507,7 @@ button.status-git:hover { color: var(--text); }
 .editor-col + .editor-col { border-left: 1px solid var(--border); }
 .tabs-spacer { flex: 1; }
 .split-btn { flex: 0 0 auto; align-self: center; margin: 0 4px 4px 2px; }
-.group-tabs.group-focus { box-shadow: inset 0 1px 0 var(--accent-strong); }
+
 .welcome { flex: 1; display: grid; place-items: center; overflow: auto; }
 .welcome-inner { text-align: center; max-width: 560px; padding: 32px 24px; }
 .welcome-logo { margin-bottom: 14px; display: flex; justify-content: center; }
@@ -1246,3 +1246,36 @@ button.status-item:hover { color: var(--text); }
 .change-stat { font-family: var(--mono); font-size: 11px; flex: 0 0 auto; white-space: nowrap; }
 .change-stat .stat-add { color: var(--green); }
 .change-stat .stat-del { color: var(--red); }
+
+/* Pomodoro timer view */
+.pomo { display: flex; flex-direction: column; gap: 4px; padding: 16px 14px 20px; overflow-y: auto; }
+.pomo-ring-wrap { position: relative; width: 148px; height: 148px; margin: 6px auto 4px; }
+.pomo-ring { width: 148px; height: 148px; transform: rotate(-90deg); }
+.pomo-ring-track { fill: none; stroke: var(--border); stroke-width: 9; }
+.pomo-ring-prog {
+  fill: none; stroke-width: 9; stroke-linecap: round;
+  transition: stroke-dashoffset 1s linear, stroke .3s;
+}
+.pomo-center {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px; pointer-events: none;
+}
+.pomo-clock { font-size: 27px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: .5px; }
+.pomo-phase { font-size: 11px; color: var(--text-dim); letter-spacing: 1.1px; text-transform: uppercase; font-weight: 700; }
+.pomo-dots { display: flex; gap: 7px; justify-content: center; margin: 8px 0 10px; }
+.pomo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
+.pomo-dot.done { background: var(--green); }
+.pomo-dot.now { background: var(--yellow); animation: pulse 1.1s ease-in-out infinite; }
+.pomo-btns { display: flex; gap: 7px; justify-content: center; margin-bottom: 10px; }
+.pomo-sec-title {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 1.1px; text-transform: uppercase;
+  color: var(--text-faint); user-select: none; margin: 8px 0 2px;
+}
+.pomo-settings { display: flex; flex-direction: column; }
+.pomo-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.pomo-row .settings-row-label { font-size: 12.5px; }
+.pomo-stepper { display: flex; align-items: center; gap: 7px; }
+.pomo-step-val { min-width: 52px; text-align: center; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.pomo-step-btn { min-width: 30px; }
+.status-pomo { font-variant-numeric: tabular-nums; }
+.status-pomo.is-run { color: var(--green); }

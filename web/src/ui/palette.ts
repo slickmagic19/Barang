@@ -18,7 +18,7 @@ export interface PaletteHooks {
   splitToggle(): void;
   focusGroup(g: 1 | 2): void;
   closeSplit(): void;
-  showView(v: 'explorer' | 'scm' | 'api' | 'search'): void;
+  showView(v: 'explorer' | 'scm' | 'api' | 'search' | 'pomo'): void;
   boltNew(): void;
   refreshExplorer(): void;
   openRecent(path: string): void;
@@ -33,6 +33,7 @@ const COMMANDS = [
   { id: 'view.scm', label: 'View: Source Control' },
   { id: 'view.bolt', label: 'View: Bolt API client' },
   { id: 'view.search', label: 'View: Search' },
+  { id: 'view.pomodoro', label: 'View: Pomodoro timer' },
   { id: 'terminal.toggle', label: 'Terminal: Toggle panel' },
   { id: 'terminal.new', label: 'Terminal: New terminal' },
   { id: 'terminal.clear', label: 'Terminal: Clear' },
@@ -243,6 +244,7 @@ export function initPalette(hooks: PaletteHooks) {
     else if (id === 'view.scm') hooks.showView('scm');
     else if (id === 'view.bolt') hooks.showView('api');
     else if (id === 'view.search') hooks.showView('search');
+    else if (id === 'view.pomodoro') hooks.showView('pomo');
     else if (id === 'bolt.new') hooks.boltNew();
     else if (id === 'file.saveAll') void hooks.saveAll();
     else if (id === 'file.openRecent') open('~ ');

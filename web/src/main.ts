@@ -20,7 +20,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
 }
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry,
 deleteFocusedEntry, pathOf } from './ui/explorer';
-import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves } from './ui/editor';
+import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initTerminal, type TerminalApi } from './ui/terminal';
@@ -297,8 +297,10 @@ async function boot() {
   const sidebar = el('div', { class: 'sidebar' });
   const gutterL = el('div', { class: 'gutter-v', title: 'Drag to resize · double-click to reset' });
   const center = el('div', { class: 'center' });
-  const tabs = el('div', { class: 'tabs' });
+  const tabs = el('div', { class: 'tabs group-tabs' });
   const editorHost = el('div', { class: 'editor-host' });
+  const tabs2 = el('div', { class: 'tabs group-tabs' });
+  const editorHost2 = el('div', { class: 'editor-host' });
   const boltHost = el('div', { class: 'bolt-host hidden', id: 'bolt-host' });
   const welcome = el('div', { class: 'welcome' });
   welcome.innerHTML = `
@@ -319,10 +321,21 @@ async function boot() {
         <div><kbd>Ctrl+Shift+G</kbd><span>source control</span></div>
         <div><kbd>Ctrl+Shift+E</kbd><span>explorer</span></div>
         <div><kbd>Ctrl+J</kbd><span>agent panel</span></div>
+        <div><kbd>Ctrl+\</kbd><span>split editor</span></div>
+        <div><kbd>Ctrl+1 / Ctrl+2</kbd><span>focus group</span></div>
       </div>
     </div>`;
   (welcome.querySelector('.welcome-logo') as HTMLElement).append(logoImg(52));
-  center.append(tabs, editorHost, boltHost, welcome);
+  // Editor groups (VSCode split): each column owns a tab strip + pane.
+  // Bolt/welcome stay center-wide overlays above the columns.
+  const col1 = el('div', { class: 'editor-col' });
+  col1.append(tabs, editorHost);
+  const splitCol = el('div', { class: 'editor-col split-col hidden' });
+  splitCol.append(tabs2, editorHost2);
+  const editorCols = el('div', { class: 'editor-cols' });
+  editorCols.append(col1, splitCol);
+  center.append(editorCols, boltHost, welcome);
+  setSplitHost(editorHost2);
 
   // Welcome extras: open entry points + recent projects (from app state below
   // once loaded — painted by paintWelcome()).
@@ -462,15 +475,18 @@ async function boot() {
   // Bolt API client (declared early: paintTabs routes bolt tabs through it).
   let boltApi: BoltApi | null = null;
 
-  const paintTabs = () => {
-    const { tabs: ts, active } = editorStore.get();
-    tabs.innerHTML = '';
-    // Welcome (shortcuts + recents) is an empty-state screen only: hidden
-    // once any tab is open OR a project is loaded.
-    welcome.classList.toggle('hidden', ts.length > 0 || root !== '');
-    const activeIsBolt = !!active?.startsWith('bolt:');
-    editorHost.classList.toggle('hidden', ts.length === 0 || activeIsBolt);
-    boltHost.classList.toggle('hidden', !activeIsBolt);
+  const activateTab = (path: string, group: 1 | 2) => {
+    const t = editorStore.get().tabs.find((x) => x.path === path && (x.group || 1) === group);
+    if (!t) return;
+    if (t.path.startsWith('bolt:')) boltApi?.activate(t.path.slice(5));
+    else if (t.diff) showDiffTab(t.path, group);
+    else void openFile(t.path, { group });
+  };
+
+  const paintStrip = (host: HTMLElement, group: 1 | 2, isFocused: boolean) => {
+    host.innerHTML = '';
+    host.classList.toggle('group-focus', isFocused);
+    const ts = groupTabs(editorStore.get().tabs, group);
     for (const t of ts) {
       const isBolt = t.path.startsWith('bolt:');
       const file = t.file ?? t.path;
@@ -479,7 +495,7 @@ async function boot() {
         : (t.title ?? file.split('/').pop() ?? file);
       const isDiff = !!t.diff;
       const b = el('button', {
-        class: `tab${t.path === active ? ' active' : ''}${isDiff ? ' is-diff' : ''}`,
+        class: `tab${t.path === (group === 2 ? editorStore.get().active2 : editorStore.get().active) ? ' active' : ''}${isDiff ? ' is-diff' : ''}`,
         title: isBolt ? `Bolt request — ${name}` : isDiff ? `${file} — session changes (read-only review)` : t.path,
         'data-path': t.path,
       }) as HTMLButtonElement;
@@ -488,24 +504,22 @@ async function boot() {
       else b.append(fileIconEl(isDiff ? (t.file ?? '') : name, 14));
       b.append(el('span', { class: 'tab-name' }, name));
       if (t.dirty) b.append(el('span', { class: 'dirty-dot', title: 'Unsaved changes' }));
-      b.onclick = () => {
-        if (isBolt) boltApi?.activate(t.path.slice(5));
-        else if (t.diff) showDiffTab(t.path);
-        else void openFile(t.path);
-      };
+      b.onclick = () => activateTab(t.path, group);
       b.onauxclick = (e) => {
-        if (e.button === 1) void closeTab(t.path);
+        if (e.button === 1) void closeTab(t.path, group);
       };
       b.oncontextmenu = (e) => {
         e.preventDefault();
         e.stopPropagation();
         const p = t.path;
         const f = t.file ?? t.path;
+        const splitOpen = editorStore.get().split;
         showContextMenu(e.clientX, e.clientY, [
-          { label: 'Close', icon: 'x', run: () => void closeTab(p) },
-          { label: 'Close Others', icon: 'x', run: () => void closeOtherTabs(p) },
-          { label: 'Close Saved', icon: 'check', run: () => closeSavedTabs() },
+          { label: 'Close', icon: 'x', run: () => void closeTab(p, group) },
+          { label: 'Close Others', icon: 'x', run: () => void closeOtherTabs(p, group) },
+          { label: 'Close Saved', icon: 'check', run: () => closeSavedTabs(group) },
           { label: 'Close All', icon: 'x', run: () => void closeAllTabs() },
+          { label: splitOpen ? 'Open in Other Group' : 'Split Right', icon: 'splitV', run: () => void openInOtherGroup(p) },
           ...(isBolt ? [] : [
             { sep: true as const },
             {
@@ -520,11 +534,41 @@ async function boot() {
       x.append(iconEl('x', 12));
       x.onclick = (e) => {
         e.stopPropagation();
-        void closeTab(t.path);
+        void closeTab(t.path, group);
       };
       b.append(x);
-      tabs.append(b);
+      host.append(b);
     }
+  };
+
+  const paintTabs = () => {
+    const { tabs: ts, active, split, focus } = editorStore.get();
+    // Welcome (shortcuts + recents) is an empty-state screen only: hidden
+    // once any tab is open OR a project is loaded.
+    welcome.classList.toggle('hidden', ts.length > 0 || root !== '');
+    const activeIsBolt = !!active?.startsWith('bolt:');
+    // Bolt renders center-wide (like before the split): it takes the whole
+    // editor area while active, whatever the split state.
+    editorCols.classList.toggle('hidden', ts.length === 0 || activeIsBolt);
+    boltHost.classList.toggle('hidden', !activeIsBolt);
+    if (activeIsBolt || !ts.length) {
+      splitCol.classList.add('hidden');
+      return;
+    }
+    // A stray bolt view never traps the editor behind it.
+    paintStrip(tabs, 1, !split || focus === 1);
+    if (split) {
+      splitCol.classList.remove('hidden');
+      paintStrip(tabs2, 2, focus === 2);
+    } else {
+      splitCol.classList.add('hidden');
+    }
+    // Split toggle lives at the end of the primary strip.
+    const spacer = el('span', { class: 'tabs-spacer' });
+    const splitBtn = el('button', { class: 'icon-btn split-btn', title: 'Split editor right (Ctrl+\\)' }) as HTMLButtonElement;
+    splitBtn.append(iconEl('splitV', 14));
+    splitBtn.onclick = () => toggleSplit();
+    tabs.append(spacer, splitBtn);
   };
   editorStore.subscribe(paintTabs);
 
@@ -688,7 +732,14 @@ async function boot() {
     void ensureSession();
   }
 
-  initChat(agentPanel, { toast });
+  initChat(agentPanel, {
+    toast,
+    onOpenSettings: () => openSettings({ toast, onCheckUpdates: () => void refreshUpdateBadge(true) }),
+    onOpenPalette: (prefill = '') => {
+      if (palette.isOpen()) palette.close();
+      palette.open(prefill ? `> ${prefill}` : '> ');
+    },
+  });
   connectEvents();
   // First-run UX: with a project open and the agent online but zero
   // sessions, boot straight into a fresh session — never strand the user
@@ -803,6 +854,8 @@ async function boot() {
     packageNameOf,
     candidateImportPaths,
     specResolves,
+    groupTabs,
+    editorSplitState,
     resolveSendVariant,
     loadCommands,
     parseSlashCommand,
@@ -829,6 +882,9 @@ async function boot() {
     terminalNew: () => termApi.newTerminal(true),
     terminalClear: () => termApi.clearActive(),
     terminalKill: () => termApi.killActive(),
+    splitToggle: () => toggleSplit(),
+    focusGroup: (g) => focusGroup(g),
+    closeSplit: () => closeSplitGroup(),
     showView: (v) => setSideView(v),
     boltNew: () => {
       setSideView('api');
@@ -907,8 +963,9 @@ async function boot() {
       if (e.shiftKey) {
         void saveAll();
       } else {
-        const active = editorStore.get().active;
-        if (active?.startsWith('bolt:')) {
+        const st = editorStore.get();
+        const act = st.focus === 2 && st.split ? st.active2 : st.active;
+        if (act?.startsWith('bolt:')) {
           // Bolt request tabs save into their collection, not to disk.
           if (boltApi?.saveActiveTab()) toast('Saved', 'info');
         } else {
@@ -922,8 +979,16 @@ async function boot() {
       openUntitled();
     } else if (mod && e.key.toLowerCase() === 'w' && !e.shiftKey && !termFocus) {
       e.preventDefault();
-      const active = editorStore.get().active;
-      if (active) void closeTab(active);
+      const st = editorStore.get();
+      const act = st.focus === 2 && st.split ? st.active2 : st.active;
+      if (act) void closeTab(act);
+    } else if (mod && e.key === '\\' && !e.shiftKey) {
+      // Split editor right (VSCode Ctrl+\). Backquote is the terminal chord.
+      e.preventDefault();
+      toggleSplit();
+    } else if (mod && (e.key === '1' || e.key === '2') && !e.shiftKey) {
+      e.preventDefault();
+      focusGroup(e.key === '2' ? 2 : 1);
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && !isTypingTarget()) {
       e.preventDefault();
       deleteFocusedEntry();

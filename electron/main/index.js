@@ -2330,6 +2330,66 @@ async function runUiSmoke() {
   } catch (e) { slashCmd = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] slash-cmd: ' + slashCmd);
   pass = pass && slashCmd === 'ok';
+  // Split editor: toggle, per-group strips, open-in-other, auto-collapse.
+  let splitEd = 'skip';
+  try {
+    splitEd = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.groupTabs !== 'function') return 'no-split-fns';
+      const mixed = [{ path: 'a', group: 1 }, { path: 'b', group: 2 }, { path: 'c' }];
+      if (u.groupTabs(mixed, 1).length !== 2 || u.groupTabs(mixed, 2).length !== 1) return 'unit-FAIL:groups';
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const visibleStrips = () => [...document.querySelectorAll('.center .tabs')].filter((s) => !s.closest('.hidden'));
+      const fileTab0 = [...document.querySelectorAll('.center .tabs .tab')].find((b) => !(b.dataset.path || '').startsWith('bolt:') && !b.classList.contains('is-diff'));
+      if (!fileTab0) return 'no-file-tab';
+      fileTab0.click();
+      await sleep(600);
+      if (visibleStrips().length !== 1) return 'no-single-strip';
+      // Deterministic start: a real file tab active (bolt overlay would take
+      // the whole center and hide the split by design).
+      // Open via the strip button.
+      const openBtn = document.querySelector('.split-btn');
+      if (!openBtn) return 'no-split-btn';
+      openBtn.click();
+      await sleep(800);
+      if (visibleStrips().length !== 2) {
+        const snap = u.editorSplitState ? JSON.stringify(u.editorSplitState()) : 'no-snap-fn';
+        return 'no-split-open state=' + snap;
+      }
+      const tab = [...document.querySelectorAll('.center .tabs .tab')].find((b) => !(b.dataset.path || '').startsWith('bolt:') && !b.classList.contains('is-diff'));
+      if (!tab) return 'no-tab';
+      tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 220, clientY: 220 }));
+      await sleep(500);
+      const menu = document.querySelector('.ctx-menu');
+      const item = [...(menu?.querySelectorAll('.ctx-item') ?? [])].find((b) => /Other Group|Split Right/.test(b.textContent || ''));
+      if (!item) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        return 'no-split-item:' + ((menu?.textContent || '').slice(0, 80));
+      }
+      item.click();
+      await sleep(1500);
+      const snap = u.editorSplitState ? JSON.stringify(u.editorSplitState()) : 'no-snap-fn';
+      const counts = visibleStrips().map((s) => s.querySelectorAll('.tab').length);
+      if (!(counts.length === 2 && counts[0] >= 1 && counts[1] >= 1)) return 'no-right-tab:' + counts.join(',') + ' state=' + snap;
+      // Ctrl+W closes the focused (right) tab; last right tab collapses.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true, cancelable: true, ctrlKey: true }));
+      await sleep(1000);
+      if (visibleStrips().length !== 1) {
+        const c = visibleStrips().map((s) => s.querySelectorAll('.tab').length);
+        return 'no-collapse:' + c.join(',');
+      }
+      // Ctrl+\ reopens (keybinding path), Ctrl+\ again closes (toggle).
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '\\\\', bubbles: true, cancelable: true, ctrlKey: true }));
+      await sleep(800);
+      if (visibleStrips().length !== 2) return 'no-key-open';
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '\\\\', bubbles: true, cancelable: true, ctrlKey: true }));
+      await sleep(800);
+      if (visibleStrips().length !== 1) return 'no-key-close';
+      return 'ok';
+    })()`);
+  } catch (e) { splitEd = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] split-editor: ' + splitEd);
+  pass = pass && splitEd === 'ok';
   // Search-replace E2E (hermetic throwaway dir in the project). The marker
   // is timestamp-unique per run so the harness's own source (which mentions
   // the queries) can never collide with the scanned content.

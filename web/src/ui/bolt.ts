@@ -274,9 +274,10 @@ export function initBolt(sideHost: HTMLElement, hooks: BoltHooks) {
       const path = `bolt:${id}`;
       const exists = editorStore.get().tabs.some((t) => t.path === path);
       if (!exists) {
-        editorStore.set((s) => ({ tabs: [...s.tabs, { path, dirty: false }], active: path }));
+        // Bolt renders center-wide: its tabs always live in group 1.
+        editorStore.set((s) => ({ ...s, tabs: [...s.tabs, { path, dirty: false, group: 1 as const }], active: path, focus: 1 as const }));
       } else {
-        editorStore.set({ active: path });
+        editorStore.set({ active: path, focus: 1 as const });
       }
       hooks.onTabs();
       this.activate(id);
@@ -298,7 +299,7 @@ export function initBolt(sideHost: HTMLElement, hooks: BoltHooks) {
     },
     activate(id: string) {
       persistBuilder();
-      editorStore.set({ active: `bolt:${id}` });
+      editorStore.set({ active: `bolt:${id}`, focus: 1 as const });
       hooksRef.onTabs();
       renderBuilder(id);
     },

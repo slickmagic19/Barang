@@ -965,6 +965,57 @@ export async function sendCommand(name: string, args: string): Promise<boolean> 
   await loadSessions().catch(() => {});
   return true;
 }
+
+/** Compact the session (opencode /compact): server-side summarization.
+ *  Uses the session's own model (last user message), falling back to the
+ *  free default chain — summarize requires an explicit model. */
+export async function compactSession(id: string): Promise<boolean> {
+  const s = agentStore.get();
+  let model = s.model;
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const m = s.messages[i];
+    if (String(m?.info?.role ?? '').toLowerCase() === 'user') {
+      const im = (m?.info as { model?: { providerID?: string; modelID?: string } })?.model;
+      if (im?.providerID && im?.modelID) {
+        model = { providerID: im.providerID, modelID: im.modelID };
+        break;
+      }
+    }
+  }
+  model ??= pickDefaultModel(s.providerModels);
+  if (!model) return false; // caller toasts "pick a model"
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: 'compacting…' });
+  lastSubmitAt = Date.now();
+  bumpProgress();
+  try {
+    await oc.post(`/session/${id}/summarize`, { providerID: model.providerID, modelID: model.modelID });
+  } catch (e) {
+    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
+    return false;
+  }
+  await refreshActive().catch(() => {});
+  await loadSessions().catch(() => {});
+  return true;
+}
+
+/** Share the session (opencode /share). Resolves the public URL, or null
+ *  when the server didn't return one. */
+export async function shareSession(id: string): Promise<string | null> {
+  const r = await oc.post<unknown>(`/session/${id}/share`);
+  const o = (r && typeof r === 'object' ? r : {}) as Record<string, unknown>;
+  const share = (o.share && typeof o.share === 'object' ? o.share : null) as Record<string, unknown> | null;
+  const url = typeof o.url === 'string' ? o.url
+    : share && typeof share.url === 'string' ? share.url as string
+    : null;
+  await loadSessions().catch(() => {});
+  return url;
+}
+
+/** Unshare the session (opencode /unshare). */
+export async function unshareSession(id: string): Promise<void> {
+  await oc.del(`/session/${id}/share`);
+  await loadSessions().catch(() => {});
+}
 /** Resolve the reasoning variant to send: only when a model is selected
  *  AND it advertises that variant (a stale pick silently becomes Default).
  *  Verified live: top-level `variant` lands on the message model. Pure. */

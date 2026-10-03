@@ -8,17 +8,20 @@ import {
   refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
   statusTextFor, messageErrorText, todoProgress, classifyAttachFile,
   loadCommands, parseSlashCommand, sendCommand,
+  compactSession, shareSession, unshareSession,
   type ChatMessage, type ChangeEntry,
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
 import { barang } from '../lib/transport';
-import { el, md, timeAgo, debounce, roundTripChange, sliceWindow, truncateText } from '../lib/util';
+import { el, md, timeAgo, debounce, roundTripChange, sliceWindow, truncateText, copyText } from '../lib/util';
 import { iconEl } from './icons';
 import { confirmDialog } from './dialog';
 import { revealInEditor, openDiffTab } from './editor';
 
 export interface ChatHooks {
   toast(msg: string, kind?: 'info' | 'error'): void;
+  onOpenSettings?: () => void;
+  onOpenPalette?: (prefill?: string) => void;
 }
 
 const SKIP_KEYS = new Set(['type', 'tool', 'name', 'state', 'status']);
@@ -697,12 +700,119 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     paintEffortMini();
   };
 
+  // opencode TUI built-ins the server doesn't expose as /commands.
+  // 1:1 behavior: compact/undo/redo/share/unshare act, models/agents/help
+  // open the matching UI.
+  const LOCAL_COMMANDS: Record<string, { description: string; run: (args: string) => Promise<void> }> = {
+    compact: {
+      description: 'Summarize the session to free context',
+      run: async () => {
+        const id = agentStore.get().activeId;
+        if (!id) {
+          hooks.toast('Open or start a session first.', 'error');
+          return;
+        }
+        const ok = await compactSession(id);
+        if (!ok && !agentStore.get().error) hooks.toast('Pick a model first (composer model picker).', 'error');
+      },
+    },
+    undo: {
+      description: 'Revert the last message and restore files',
+      run: async () => {
+        const s = agentStore.get();
+        if (!s.activeId) return;
+        const lastUser = [...s.messages].reverse().find((m) => String(m?.info?.role ?? '').toLowerCase() === 'user' && m?.info?.id);
+        if (!lastUser?.info?.id) {
+          hooks.toast('Nothing to undo.', 'error');
+          return;
+        }
+        try {
+          await revertMessage(s.activeId, String(lastUser.info.id));
+          hooks.toast('Reverted — Unrevert (clock button) undoes this.', 'info');
+        } catch (e) {
+          hooks.toast(`Undo failed: ${(e as Error).message}`, 'error');
+        }
+      },
+    },
+    redo: {
+      description: 'Restore messages hidden by revert',
+      run: async () => {
+        const id = agentStore.get().activeId;
+        if (!id) return;
+        try {
+          await unrevertSession(id);
+          hooks.toast('Reverted messages restored.', 'info');
+        } catch (e) {
+          hooks.toast(`Redo failed: ${(e as Error).message}`, 'error');
+        }
+      },
+    },
+    share: {
+      description: 'Publish a public link to this session',
+      run: async () => {
+        const id = agentStore.get().activeId;
+        if (!id) return;
+        try {
+          const url = await shareSession(id);
+          if (!url) {
+            hooks.toast('Shared, but the server returned no link.', 'error');
+            return;
+          }
+          const ok = await copyText(url);
+          hooks.toast(ok ? `Session shared — link copied: ${url}` : `Session shared: ${url}`, ok ? 'info' : 'error');
+        } catch (e) {
+          hooks.toast(`Share failed: ${(e as Error).message}`, 'error');
+        }
+      },
+    },
+    unshare: {
+      description: 'Remove the public link',
+      run: async () => {
+        const id = agentStore.get().activeId;
+        if (!id) return;
+        try {
+          await unshareSession(id);
+          hooks.toast('Session unshared.', 'info');
+        } catch (e) {
+          hooks.toast(`Unshare failed: ${(e as Error).message}`, 'error');
+        }
+      },
+    },
+    models: {
+      description: 'Open model settings',
+      run: async () => {
+        hooks.onOpenSettings?.();
+      },
+    },
+    agents: {
+      description: 'Open agent settings',
+      run: async () => {
+        hooks.onOpenSettings?.();
+      },
+    },
+    help: {
+      description: 'Keyboard shortcuts',
+      run: async () => {
+        hooks.onOpenPalette?.('help');
+      },
+    },
+  };
+
   const doSend = async () => {
     const v = input.value;
     if ((!v.trim() && !imgAttaches.length) || agentStore.get().busy) return;
-    // Slash commands go to the command endpoint, never the prompt one.
+    // Slash commands go to the command endpoint (server list) or the local
+    // TUI-parity map — never the prompt endpoint.
     const slash = !imgAttaches.length ? parseSlashCommand(v) : null;
     if (slash) {
+      const local = LOCAL_COMMANDS[slash.name];
+      if (local) {
+        input.value = '';
+        autoGrow();
+        suggest.classList.add('hidden');
+        await local.run(slash.args);
+        return;
+      }
       const known = await loadCommands().catch(() => []);
       if (known.length && !known.some((c) => c.name === slash.name)) {
         hooks.toast(`Unknown command: /${slash.name}`, 'error');
@@ -754,14 +864,23 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     const before = input.value.slice(0, pos);
     const cmdM = /^\/([A-Za-z0-9_-]*)$/.exec(before);
     if (cmdM) {
-      // Leading-slash command being typed: complete from the server list.
+      // Leading-slash command being typed: server list + local TUI-parity
+      // commands, so /compact & co complete even offline from the server.
       try {
         const list = await loadCommands().catch(() => []);
+        const seen = new Set(list.map((c) => c.name));
+        const local = Object.entries(LOCAL_COMMANDS)
+          .filter(([name]) => !seen.has(name))
+          .map(([name, c]) => ({ name, description: c.description }));
+        const all = [
+          ...local.map((c) => ({ name: c.name, description: c.description })),
+          ...list.map((c) => ({ name: c.name, description: typeof c.description === 'string' ? c.description : '' })),
+        ];
         const q = cmdM[1].toLowerCase();
-        suggestItems = list
+        suggestItems = all
           .filter((c) => c.name.toLowerCase().startsWith(q))
           .slice(0, 8)
-          .map((c) => ({ path: `/${c.name}`, sub: c.description?.slice(0, 80), kind: 'cmd' as const }));
+          .map((c) => ({ path: `/${c.name}`, sub: (c.description ?? '').slice(0, 80), kind: 'cmd' as const }));
         suggestIdx = 0;
         paintSuggest();
       } catch { /* ignore */ }

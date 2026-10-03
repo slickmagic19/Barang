@@ -15,21 +15,36 @@ export interface Tab {
   mtime?: number;
   diff?: { before: string; after: string }; // present on session-diff review tabs
   diffKind?: 'git' | 'session'; // diff provenance (git tabs get range-staging)
+  group: 1 | 2; // editor group (VSCode-style split)
 }
+
+export type EditorGroup = 1 | 2;
 
 interface EditorState {
   tabs: Tab[];
-  active: string | null;
+  active: string | null; // group 1
+  active2: string | null; // group 2
+  focus: EditorGroup; // group receiving opens/saves/closes
+  split: boolean; // second group visible
 }
 
-export const editorStore = createStore<EditorState>({ tabs: [], active: null });
+/** Tabs of one group, in order. Pure. */
+export function groupTabs(tabs: Tab[], group: EditorGroup): Tab[] {
+  return (tabs ?? []).filter((t) => (t.group || 1) === group);
+}
+
+export const editorStore = createStore<EditorState>({ tabs: [], active: null, active2: null, focus: 1, split: false });
 
 type Monaco = typeof import('monaco-editor');
 let monaco: Monaco | null = null;
 let editor: import('monaco-editor').editor.IStandaloneCodeEditor | null = null;
+let editor2: import('monaco-editor').editor.IStandaloneCodeEditor | null = null;
 let diffEditor: import('monaco-editor').editor.IStandaloneDiffEditor | null = null;
 let editorDiv: HTMLElement | null = null;
+let editorDiv2: HTMLElement | null = null;
 let diffDiv: HTMLElement | null = null;
+let host1: HTMLElement | null = null;
+let host2: HTMLElement | null = null;
 const models = new Map<string, import('monaco-editor').editor.ITextModel>();
 const diffModels = new Map<string, { original: import('monaco-editor').editor.ITextModel; modified: import('monaco-editor').editor.ITextModel }>();
 let suppressDirty = false;
@@ -403,11 +418,12 @@ function wireMarkerFilter() {
   markersWired = true;
   monaco.editor.onDidChangeMarkers(() => scheduleMarkerFilter());
 }
-/** Apply persisted editor prefs (font size, minimap) to the live editor. */
+/** Apply persisted editor prefs (font size, minimap) to both editors. */
 export function applyEditorPrefs() {
-  if (!editor) return;
   const s = readSettings();
-  editor.updateOptions({ fontSize: s.fontSize, minimap: { enabled: s.minimap }, wordWrap: s.wordWrap ? 'on' : 'off' });
+  const opts = { fontSize: s.fontSize, minimap: { enabled: s.minimap }, wordWrap: s.wordWrap ? 'on' as const : 'off' as const };
+  editor?.updateOptions(opts);
+  editor2?.updateOptions(opts);
 }
 
 export async function initEditor(container: HTMLElement, h: EditorHooks) {
@@ -415,29 +431,15 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
   monaco = await monacoLoader.load();
   configureTsDiagnostics();
   wireMarkerFilter();
+  host1 = container;
   const prefs = readSettings();
   editorDiv = document.createElement('div');
   editorDiv.className = 'editor-pane';
   diffDiv = document.createElement('div');
   diffDiv.className = 'editor-pane hidden';
   container.append(editorDiv, diffDiv);
-  editor = monaco.editor.create(editorDiv, {
-    theme: 'barang-dark',
-    automaticLayout: true,
-    fontFamily: "'JetBrains Mono','Cascadia Code',Consolas,monospace",
-    fontSize: prefs.fontSize,
-    lineHeight: 1.55,
-    minimap: { enabled: prefs.minimap },
-    wordWrap: prefs.wordWrap ? 'on' : 'off',
-    // Slim overlay-style scrollbars (the 14px default dominates the edge).
-    scrollbar: { vertical: 'auto', horizontal: 'auto', verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
-    scrollBeyondLastLine: false,
-    padding: { top: 10 },
-    renderLineHighlight: 'all',
-    smoothScrolling: true,
-    cursorBlinking: 'smooth',
-    tabSize: 2,
-  });
+  editor = monaco.editor.create(editorDiv, baseEditorOptions(prefs));
+  wireCodeEditor(editor, 1);
   monaco.editor.defineTheme('barang-dark', {
     base: 'vs-dark',
     inherit: true,
@@ -454,36 +456,135 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
     },
   });
   monaco.editor.setTheme('barang-dark');
-  editor.onDidChangeModelContent(() => {
-    if (suppressDirty || !editor) return;
-    const path = editorStore.get().active;
-    if (!path) return;
+}
+
+type EditorPrefs = { fontSize: number; minimap: boolean; wordWrap: boolean };
+
+function baseEditorOptions(prefs: EditorPrefs): import('monaco-editor').editor.IStandaloneEditorConstructionOptions {
+  return {
+    theme: 'barang-dark',
+    automaticLayout: true,
+    fontFamily: "'JetBrains Mono','Cascadia Code',Consolas,monospace",
+    fontSize: prefs.fontSize,
+    lineHeight: 1.55,
+    minimap: { enabled: prefs.minimap },
+    wordWrap: prefs.wordWrap ? 'on' : 'off',
+    // Slim overlay-style scrollbars (the 14px default dominates the edge).
+    scrollbar: { vertical: 'auto', horizontal: 'auto', verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
+    scrollBeyondLastLine: false,
+    padding: { top: 10 },
+    renderLineHighlight: 'all',
+    smoothScrolling: true,
+    cursorBlinking: 'smooth',
+    tabSize: 2,
+  };
+}
+
+/** Per-editor wiring bound to one group: dirty marks that group's tabs
+ *  (shared model → every group showing the path), focus moves the group. */
+function wireCodeEditor(ed: import('monaco-editor').editor.IStandaloneCodeEditor, group: EditorGroup) {
+  ed.onDidChangeModelContent(() => {
+    if (suppressDirty) return;
+    const model = ed.getModel();
+    if (!model) return;
+    const hit = editorStore.get().tabs.some((t) => model === models.get(t.path));
+    if (!hit) return;
     editorStore.set((s) => ({
       ...s,
-      tabs: s.tabs.map((t) => (t.path === path ? { ...t, dirty: true } : t)),
+      tabs: s.tabs.map((t) => (models.get(t.path) === model ? { ...t, dirty: true } : t)),
     }));
     hooks?.onTabs();
   });
-  editor.onDidChangeCursorPosition((e) => hooks?.onCursor({ line: e.position.lineNumber, col: e.position.column }));
+  ed.onDidChangeCursorPosition((e) => hooks?.onCursor({ line: e.position.lineNumber, col: e.position.column }));
+  ed.onDidFocusEditorText(() => {
+    if (editorStore.get().focus !== group) editorStore.set({ focus: group });
+  });
 }
 
-export async function openFile(path: string, opts?: { focus?: boolean }) {
+/** Remember the second group's host (main builds it hidden at boot). */
+export function setSplitHost(host: HTMLElement) {
+  host2 = host;
+}
+
+/** Lazily build the group-2 editor inside its host. False when impossible. */
+export function ensureSplitEditor(): boolean {
+  if (editor2 || !monaco || !host2) return !!editor2;
+  const prefs = readSettings();
+  editorDiv2 = document.createElement('div');
+  editorDiv2.className = 'editor-pane';
+  host2.append(editorDiv2);
+  editor2 = monaco.editor.create(editorDiv2, baseEditorOptions(prefs));
+  wireCodeEditor(editor2, 2);
+  const active = editorStore.get().active2;
+  if (active) editor2.setModel(models.get(active) ?? null);
+  return true;
+}
+
+/** Introspection for smoke (and debugging): split state snapshot. */
+export function editorSplitState() {
+  const s = editorStore.get();
+  return {
+    split: s.split,
+    focus: s.focus,
+    hasEditor2: !!editor2,
+    hasHost2: !!host2,
+    tabs1: groupTabs(s.tabs, 1).length,
+    tabs2: groupTabs(s.tabs, 2).length,
+  };
+}
+
+/** The group receiving opens, saves and closes (1 when unsplit). */
+export function focusedGroup(): EditorGroup {
+  const s = editorStore.get();
+  return s.split && s.focus === 2 ? 2 : 1;
+}
+
+function groupActive(s: { active: string | null; active2: string | null }, group: EditorGroup): string | null {
+  return group === 2 ? s.active2 : s.active;
+}
+
+function editorFor(group: EditorGroup): import('monaco-editor').editor.IStandaloneCodeEditor | null {
+  return group === 2 ? editor2 : editor;
+}
+
+function setGroupActive(group: EditorGroup, path: string | null) {
+  editorStore.set(group === 2 ? { active2: path, focus: 2 } : { active: path, focus: 1 });
+}
+
+export async function openFile(path: string, opts?: { focus?: boolean; group?: EditorGroup }) {
   if (!editor || !monaco) return;
   const wantFocus = opts?.focus ?? true;
-  let tab = editorStore.get().tabs.find((t) => t.path === path);
-  if (!tab) {
-    tab = { path, file: path, dirty: false };
-    editorStore.set((s) => ({ tabs: [...s.tabs, tab!], active: path }));
-  } else {
-    editorStore.set({ active: path });
+  const group = opts?.group ?? focusedGroup();
+  if (group === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
+    // Split unavailable — fall back to group 1 rather than stranding.
+    return openFile(path, { focus: wantFocus, group: 1 });
   }
+  const ed = editorFor(group);
+  if (!ed) return;
+  let tab = editorStore.get().tabs.find((t) => t.path === path && (t.group || 1) === group);
+  if (!tab) {
+    const fresh: Tab = { path, file: path, dirty: false, group };
+    editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
+    tab = fresh;
+  }
+  setGroupActive(group, path);
   let model = models.get(path);
   if (!model) {
     try {
       const file = await fsApi.read(path);
       if (file.binary) {
         hooks?.toast(`${path} is binary — preview not supported`, 'error');
-        editorStore.set((s) => ({ ...s, tabs: s.tabs.filter((t) => t.path !== path), active: s.tabs.find((t) => t.path !== path)?.path ?? null }));
+        editorStore.set((s) => {
+          const rest = s.tabs.filter((t) => !(t.path === path && (t.group || 1) === group));
+          const g1 = rest.filter((t) => (t.group || 1) === 1);
+          const g2 = rest.filter((t) => (t.group || 1) === 2);
+          return {
+            ...s,
+            tabs: rest,
+            active: s.active === path && group === 1 ? (g1[g1.length - 1]?.path ?? null) : s.active,
+            active2: s.active2 === path && group === 2 ? (g2[g2.length - 1]?.path ?? null) : s.active2,
+          };
+        });
         hooks?.onTabs();
         return;
       }
@@ -506,28 +607,42 @@ export async function openFile(path: string, opts?: { focus?: boolean }) {
       }
     } catch (e) {
       hooks?.toast(`Cannot open ${path}: ${(e as Error).message}`, 'error');
-      editorStore.set((s) => ({ ...s, tabs: s.tabs.filter((t) => t.path !== path), active: s.active === path ? (s.tabs.find((t) => t.path !== path)?.path ?? null) : s.active }));
+      editorStore.set((s) => {
+        const rest = s.tabs.filter((t) => !(t.path === path && (t.group || 1) === group));
+        const g1 = rest.filter((t) => (t.group || 1) === 1);
+        const g2 = rest.filter((t) => (t.group || 1) === 2);
+        return {
+          ...s,
+          tabs: rest,
+          active: s.active === path && group === 1 ? (g1[g1.length - 1]?.path ?? null) : s.active,
+          active2: s.active2 === path && group === 2 ? (g2[g2.length - 1]?.path ?? null) : s.active2,
+        };
+      });
       hooks?.onTabs();
       return;
     }
   }
   suppressDirty = true;
-  showNormal();
-  editor.setModel(model);
+  showNormal(group);
+  ed.setModel(model);
   suppressDirty = false;
   hooks?.onTabs();
-  if (wantFocus) editor.focus();
+  if (wantFocus) ed.focus();
 }
 
-/** Show the normal editor pane (hide the diff pane). */
-function showNormal() {
+/** Show a group's code pane (the diff overlay, if open elsewhere, is left
+ *  alone — groups are independent like VSCode). */
+function showNormal(group: EditorGroup) {
   diffDiv?.classList.add('hidden');
-  editorDiv?.classList.remove('hidden');
+  (group === 2 ? editorDiv2 : editorDiv)?.classList.remove('hidden');
 }
 
-/** Show the diff pane (hide the normal editor), re-laying out after unhide. */
-function showDiff() {
-  editorDiv?.classList.add('hidden');
+/** Show the diff overlay inside one group's host (the other group keeps
+ *  editing behind it — closer to VSCode than a full-center takeover). */
+function showDiff(group: EditorGroup) {
+  const host = group === 2 ? host2 : host1;
+  if (host && diffDiv && diffDiv.parentElement !== host) host.append(diffDiv);
+  (group === 2 ? editorDiv2 : editorDiv)?.classList.add('hidden');
   diffDiv?.classList.remove('hidden');
   if (diffEditor) requestAnimationFrame(() => diffEditor!.layout());
 }
@@ -559,7 +674,8 @@ function ensureDiffEditor() {
     contextMenuOrder: 1.5,
     run: (ed) => {
       const s = editorStore.get();
-      const tab = s.tabs.find((t) => t.path === s.active);
+      const g = focusedGroup();
+      const tab = s.tabs.find((t) => t.path === groupActive(s, g) && (t.group || 1) === g);
       if (!tab?.diff || tab.diffKind !== 'git' || !tab.file) {
         hooks?.toast('Stage Selected Ranges needs a git file diff with a selection.', 'info');
         return;
@@ -587,7 +703,7 @@ export function registerStageRangesAction(handler: (sel: { file: string; start: 
  * Reuses the tab + models when already open, refreshing contents.
  * Loads Monaco on demand: a diff can be the very first thing opened.
  */
-export async function openDiffTab(file: string, before: string, after: string, kind: 'git' | 'session' = 'session') {
+export async function openDiffTab(file: string, before: string, after: string, kind: 'git' | 'session' = 'session', group?: EditorGroup) {
   if (!monaco) {
     try {
       monaco = await monacoLoader.load();
@@ -597,38 +713,48 @@ export async function openDiffTab(file: string, before: string, after: string, k
     }
   }
   if (!ensureDiffEditor()) return;
+  const g = group ?? focusedGroup();
+  if (g === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
+    return openDiffTab(file, before, after, kind, 1);
+  }
   const path = `diff:${file}`;
-  const tab = editorStore.get().tabs.find((t) => t.path === path);
+  const key = `${g}:${path}`;
+  const tab = editorStore.get().tabs.find((t) => t.path === path && (t.group || 1) === g);
   if (!tab) {
-    editorStore.set((s) => ({ tabs: [...s.tabs, { path, file, dirty: false, diff: { before, after }, diffKind: kind }], active: path }));
+    const fresh: Tab = { path, file, dirty: false, diff: { before, after }, diffKind: kind, group: g };
+    editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
   } else {
     tab.diff = { before, after };
     tab.diffKind = kind;
-    editorStore.set({ active: path });
   }
-  diffModels.get(path)?.original.dispose();
-  diffModels.get(path)?.modified.dispose();
+  setGroupActive(g, path);
+  diffModels.get(key)?.original.dispose();
+  diffModels.get(key)?.modified.dispose();
   const original = monaco.editor.createModel(before, langOf(file));
   const modified = monaco.editor.createModel(after, langOf(file));
-  diffModels.set(path, { original, modified });
+  diffModels.set(key, { original, modified });
   diffEditor!.setModel({ original, modified });
-  showDiff();
+  showDiff(g);
   hooks?.onTabs();
 }
 
 /** Activate an already-open diff tab (models cached on the tab). */
-export function showDiffTab(path: string) {
-  const pair = diffModels.get(path);
+export function showDiffTab(path: string, group?: EditorGroup) {
+  const s = editorStore.get();
+  const g = group ?? (s.tabs.find((t) => t.path === path && (t.group || 1) === s.focus)?.group as EditorGroup | undefined)
+    ?? (s.tabs.find((t) => t.path === path)?.group as EditorGroup | undefined) ?? 1;
+  const pair = diffModels.get(`${g}:${path}`);
   if (!ensureDiffEditor() || !pair) return;
-  editorStore.set({ active: path });
+  setGroupActive(g, path);
   diffEditor!.setModel({ original: pair.original, modified: pair.modified });
-  showDiff();
+  showDiff(g);
   hooks?.onTabs();
 }
 
-export async function closeTab(path: string) {
+export async function closeTab(path: string, group?: EditorGroup) {
   const s = editorStore.get();
-  const tab = s.tabs.find((t) => t.path === path);
+  const g = group ?? focusedGroup();
+  const tab = s.tabs.find((t) => t.path === path && (t.group || 1) === g);
   if (tab?.dirty) {
     const name = tab.title ?? path.split('/').pop() ?? path;
     const ok = await confirmDialog({
@@ -639,49 +765,68 @@ export async function closeTab(path: string) {
     });
     if (!ok) return;
   }
-  dropTabs([path]);
+  dropTabs(s.tabs.filter((t) => t.path === path && (t.group || 1) === g));
 }
 
 /** Remove tabs without asking (callers confirm first). Shared by all batch closes. */
-function dropTabs(paths: string[]) {
-  if (!paths.length) return;
-  const gone = new Set(paths);
-  for (const p of paths) {
-    models.get(p)?.dispose();
-    models.delete(p);
-    const pair = diffModels.get(p);
+function dropTabs(gone: Tab[]) {
+  if (!gone.length) return;
+  const goneKeys = new Set(gone.map((t) => `${t.group || 1}:${t.path}`));
+  const s = editorStore.get();
+  const rest = s.tabs.filter((t) => !goneKeys.has(`${t.group || 1}:${t.path}`));
+  // Shared file models survive while any group still shows the path.
+  const live = new Set(rest.map((t) => t.path));
+  for (const t of gone) {
+    if (!live.has(t.path)) {
+      models.get(t.path)?.dispose();
+      models.delete(t.path);
+    }
+    const key = `${t.group || 1}:${t.path}`;
+    const pair = diffModels.get(key);
     if (pair) {
       pair.original.dispose();
       pair.modified.dispose();
-      diffModels.delete(p);
+      diffModels.delete(key);
     }
   }
-  const s = editorStore.get();
-  const rest = s.tabs.filter((t) => !gone.has(t.path));
-  const active = s.active && !gone.has(s.active) ? s.active : (rest[rest.length - 1]?.path ?? null);
-  editorStore.set({ tabs: rest, active });
-  const activeTab = rest.find((t) => t.path === active);
-  const pair = active ? diffModels.get(active) : undefined;
+  const g1 = rest.filter((t) => (t.group || 1) === 1);
+  const g2 = rest.filter((t) => (t.group || 1) === 2);
+  const active = s.active && g1.some((t) => t.path === s.active) ? s.active : (g1[g1.length - 1]?.path ?? null);
+  const active2 = s.active2 && g2.some((t) => t.path === s.active2) ? s.active2 : (g2[g2.length - 1]?.path ?? null);
+  const split = s.split && g2.length > 0;
+  editorStore.set({ tabs: rest, active, active2, split, focus: split ? s.focus : 1 });
   if (editor && monaco) {
-    if (activeTab?.diff && pair && diffEditor) {
-      diffEditor.setModel({ original: pair.original, modified: pair.modified });
-      showDiff();
-    } else {
-      showNormal();
-      editor.setModel(active ? (models.get(active) ?? null) : null);
-    }
+    paintGroupModel(1);
+    if (split) paintGroupModel(2);
   }
   hooks?.onTabs();
 }
 
-function dirtyAmong(paths: string[]) {
-  const set = new Set(paths);
-  return editorStore.get().tabs.filter((t) => set.has(t.path) && t.dirty);
+/** Show a group's active tab in its editor (or the diff overlay). */
+function paintGroupModel(group: EditorGroup) {
+  if (!editor || !monaco) return;
+  const s = editorStore.get();
+  const path = groupActive(s, group);
+  const tab = s.tabs.find((t) => t.path === path && (t.group || 1) === group);
+  const pair = path ? diffModels.get(`${group}:${path}`) : undefined;
+  const ed = editorFor(group);
+  if (!ed) return;
+  if (tab?.diff && pair && diffEditor) {
+    diffEditor.setModel({ original: pair.original, modified: pair.modified });
+    showDiff(group);
+  } else {
+    showNormal(group);
+    ed.setModel(path ? (models.get(path) ?? null) : null);
+  }
+}
+
+function dirtyAmong(tabs: Tab[]) {
+  return tabs.filter((t) => t.dirty);
 }
 
 /** One confirm for a batch (VSCode-style) instead of per-tab prompts. */
-async function confirmDiscard(paths: string[]): Promise<boolean> {
-  const dirty = dirtyAmong(paths);
+async function confirmDiscard(tabs: Tab[]): Promise<boolean> {
+  const dirty = dirtyAmong(tabs);
   if (!dirty.length) return true;
   const names = dirty.slice(0, 4).map((t) => t.title ?? t.path.split('/').pop()).join(', ') +
     (dirty.length > 4 ? `, +${dirty.length - 4} more` : '');
@@ -693,28 +838,104 @@ async function confirmDiscard(paths: string[]): Promise<boolean> {
   });
 }
 
-export async function closeOtherTabs(keep: string) {
-  const others = editorStore.get().tabs.map((t) => t.path).filter((p) => p !== keep);
+export async function closeOtherTabs(keep: string, group?: EditorGroup) {
+  const g = group ?? focusedGroup();
+  const others = editorStore.get().tabs.filter((t) => (t.group || 1) === g && t.path !== keep);
   if (!(await confirmDiscard(others))) return;
   dropTabs(others);
 }
 
 export async function closeAllTabs(): Promise<boolean> {
-  const all = editorStore.get().tabs.map((t) => t.path);
+  const all = editorStore.get().tabs;
   if (!(await confirmDiscard(all))) return false;
   dropTabs(all);
   return true;
 }
 
-export function closeSavedTabs() {
-  dropTabs(editorStore.get().tabs.filter((t) => !t.dirty).map((t) => t.path));
+export function closeSavedTabs(group?: EditorGroup) {
+  const g = group ?? focusedGroup();
+  dropTabs(editorStore.get().tabs.filter((t) => (t.group || 1) === g && !t.dirty));
+}
+
+/** Toggle the second editor group. Opening mirrors the current file right
+ *  (shared model, instant) when group 2 has nothing to show. */
+export function toggleSplit(): boolean {
+  const s = editorStore.get();
+  if (s.split) {
+    closeSplitGroup();
+    return false;
+  }
+  if (!ensureSplitEditor()) {
+    hooks?.toast('Split unavailable.', 'error');
+    return false;
+  }
+  const show = s.active && !s.active2 ? s.active : s.active2;
+  editorStore.set({ split: true, focus: 2, active2: show ?? null });
+  if (show) {
+    const pair = diffModels.get(`2:${show}`);
+    const tab = editorStore.get().tabs.find((t) => t.path === show && (t.group || 1) === 2);
+    if (tab?.diff && pair && diffEditor) {
+      diffEditor.setModel({ original: pair.original, modified: pair.modified });
+      showDiff(2);
+    } else {
+      showNormal(2);
+      editor2?.setModel(models.get(show) ?? null);
+    }
+  } else {
+    showNormal(2);
+    editor2?.setModel(null);
+  }
+  hooks?.onTabs();
+  editor2?.focus();
+  return true;
+}
+
+/** Close group 2, moving its tabs into group 1 (VSCode semantics). */
+export function closeSplitGroup() {
+  const s = editorStore.get();
+  if (!s.split) return;
+  const g1paths = new Set(s.tabs.filter((t) => (t.group || 1) === 1).map((t) => t.path));
+  const moved = s.tabs.map((t) => {
+    if ((t.group || 1) !== 2) return t;
+    if (g1paths.has(t.path)) return null; // already open left — drop the dup
+    g1paths.add(t.path);
+    return { ...t, group: 1 as const };
+  }).filter((t): t is Tab => !!t);
+  const active = moved.some((t) => t.path === s.active) ? s.active : (moved[moved.length - 1]?.path ?? null);
+  editorStore.set({ tabs: moved, active, active2: null, focus: 1, split: false });
+  if (editor && monaco) paintGroupModel(1);
+  hooks?.onTabs();
+}
+
+/** Focus a group (Ctrl+1 / Ctrl+2), opening the split when targeting 2. */
+export function focusGroup(group: EditorGroup) {
+  const s = editorStore.get();
+  if (group === 2 && !s.split) {
+    if (!toggleSplit()) return;
+  } else {
+    editorStore.set({ focus: group });
+  }
+  editorFor(group)?.focus();
+}
+
+/** Open a path in the group that isn't showing it (tab ctx menu). The tab's
+ *  own group decides — not the focused one (they differ right after a
+ *  split opens, when focus has already moved right). */
+export async function openInOtherGroup(path: string) {
+  const s = editorStore.get();
+  const tab = s.tabs.find((t) => t.path === path);
+  const here = ((tab?.group || 1) as EditorGroup);
+  const other = (here === 2 ? 1 : 2) as EditorGroup;
+  await openFile(path, { group: other });
 }
 
 /** Close a tab and any tabs under it (deleted/renamed folder). False = user cancelled. */
 export async function closePathAndChildren(prefix: string): Promise<boolean> {
   const hit = editorStore.get().tabs
-    .map((t) => t.path)
-    .filter((p) => p === prefix || p.startsWith(prefix + '/') || p === `diff:${prefix}` || p.startsWith(`diff:${prefix}/`));
+    .filter((t) => {
+      const p = t.path;
+      return p === prefix || p.startsWith(prefix + '/') || p === `diff:${prefix}` || p.startsWith(`diff:${prefix}/`);
+    });
   if (!hit.length) return true;
   if (!(await confirmDiscard(hit))) return false;
   dropTabs(hit);
@@ -722,17 +943,20 @@ export async function closePathAndChildren(prefix: string): Promise<boolean> {
 }
 
 export async function saveActive(): Promise<boolean> {
-  const { active } = editorStore.get();
-  if (!active || !editor) return false;
-  const tab = editorStore.get().tabs.find((t) => t.path === active);
+  const s = editorStore.get();
+  const g = focusedGroup();
+  const active = groupActive(s, g);
+  const ed = editorFor(g);
+  if (!active || !ed) return false;
+  const tab = s.tabs.find((t) => t.path === active && (t.group || 1) === g);
   if (tab?.untitled) return saveUntitledAs(tab);
   const model = models.get(active);
   if (!model) return false;
   try {
     const res = await fsApi.write(active, model.getValue());
-    editorStore.set((s) => ({
-      ...s,
-      tabs: s.tabs.map((t) => (t.path === active ? { ...t, dirty: false, mtime: res.mtime } : t)),
+    editorStore.set((st) => ({
+      ...st,
+      tabs: st.tabs.map((t) => (t.path === active ? { ...t, dirty: false, mtime: res.mtime } : t)),
     }));
     hooks?.onTabs();
     return true;
@@ -757,9 +981,9 @@ async function saveUntitledAs(tab: Tab): Promise<boolean> {
   const content = model.getValue();
   try {
     const res = await fsApi.writeAbsolute(picked.path, content);
-    dropTabs([tab.path]);
+    dropTabs([tab]);
     if (res.rootRel) {
-      await openFile(res.rootRel);
+      await openFile(res.rootRel, { group: tab.group || 1 });
       hooks?.toast(`Saved ${res.rootRel}.`, 'info');
     } else {
       hooks?.toast(`Saved outside the project: ${res.path}. Open its folder to keep editing it.`, 'info');
@@ -781,6 +1005,8 @@ let untitledSeq = 0;
 /** New untitled scratch tab (VSCode Ctrl+N). No disk footprint until saved. */
 export function openUntitled() {
   if (!editor || !monaco) return;
+  let group = focusedGroup();
+  if (group === 2 && (!editorStore.get().split || !ensureSplitEditor())) group = 1;
   untitledSeq++;
   let n = untitledSeq;
   while (editorStore.get().tabs.some((t) => t.path === `untitled:${n}`)) n++;
@@ -789,15 +1015,19 @@ export function openUntitled() {
   const model = monaco.editor.createModel('', 'plaintext', monaco.Uri.parse(`inmemory://barang/${path}`));
   models.set(path, model);
   editorStore.set((s) => ({
-    tabs: [...s.tabs, { path, title: `Untitled-${n}`, untitled: true, dirty: false }],
-    active: path,
+    ...s,
+    tabs: [...s.tabs, { path, title: `Untitled-${n}`, untitled: true, dirty: false, group }],
+    active: group === 2 ? s.active : path,
+    active2: group === 2 ? path : s.active2,
+    focus: group,
   }));
-  showNormal();
+  showNormal(group);
+  const ed = editorFor(group);
   suppressDirty = true;
-  editor.setModel(model);
+  ed?.setModel(model);
   suppressDirty = false;
   hooks?.onTabs();
-  editor.focus();
+  ed?.focus();
 }
 
 export async function saveAll() {
@@ -845,10 +1075,12 @@ export async function checkExternalChanges() {
 }
 
 export function revealInEditor(path: string, line?: number) {
-  void openFile(path).then(() => {
-    if (line && editor && monaco) {
-      editor.revealLineInCenter(line);
-      editor.setPosition({ lineNumber: line, column: 1 });
+  const group = focusedGroup();
+  void openFile(path, { group }).then(() => {
+    const ed = editorFor(group);
+    if (line && ed && monaco) {
+      ed.revealLineInCenter(line);
+      ed.setPosition({ lineNumber: line, column: 1 });
     }
   });
 }

@@ -501,6 +501,13 @@ button.status-git:hover { color: var(--text); }
 .tab:hover .tab-x, .tab.active .tab-x { opacity: .85; }
 .tab-x:hover { background: #ffffff1a; color: var(--text); }
 .editor-host { flex: 1; min-height: 0; }
+/* VSCode-style split groups: two columns, each with its own tab strip. */
+.editor-cols { flex: 1; display: flex; min-height: 0; min-width: 0; }
+.editor-col { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.editor-col + .editor-col { border-left: 1px solid var(--border); }
+.tabs-spacer { flex: 1; }
+.split-btn { flex: 0 0 auto; align-self: center; margin: 0 4px 4px 2px; }
+.group-tabs.group-focus { box-shadow: inset 0 1px 0 var(--accent-strong); }
 .welcome { flex: 1; display: grid; place-items: center; overflow: auto; }
 .welcome-inner { text-align: center; max-width: 560px; padding: 32px 24px; }
 .welcome-logo { margin-bottom: 14px; display: flex; justify-content: center; }

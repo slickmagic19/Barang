@@ -15,6 +15,9 @@ export interface PaletteHooks {
   terminalNew(): void;
   terminalClear(): void;
   terminalKill(): void;
+  splitToggle(): void;
+  focusGroup(g: 1 | 2): void;
+  closeSplit(): void;
   showView(v: 'explorer' | 'scm' | 'api' | 'search'): void;
   boltNew(): void;
   refreshExplorer(): void;
@@ -34,6 +37,10 @@ const COMMANDS = [
   { id: 'terminal.new', label: 'Terminal: New terminal' },
   { id: 'terminal.clear', label: 'Terminal: Clear' },
   { id: 'terminal.kill', label: 'Terminal: Kill active' },
+  { id: 'view.split', label: 'View: Split editor right' },
+  { id: 'view.focusGroup1', label: 'View: Focus left group' },
+  { id: 'view.focusGroup2', label: 'View: Focus right group' },
+  { id: 'view.closeSplit', label: 'View: Close split group' },
   { id: 'bolt.new', label: 'Bolt: New request' },
   { id: 'file.saveAll', label: 'File: Save all' },
   { id: 'file.openRecent', label: 'File: Open recent…' },
@@ -44,6 +51,7 @@ const COMMANDS = [
 const SHORTCUTS = `Ctrl+P — quick open · Ctrl+Shift+P — commands · Ctrl+Shift+F — search view
 Enter — send agent message · Shift+Enter — newline · Ctrl+S — save file · Ctrl+Shift+S — save all
 Ctrl+N — new untitled tab · Ctrl+W — close tab · Ctrl+B — explorer rail · Ctrl+J — agent panel
+Ctrl+\\ — split editor · Ctrl+1/Ctrl+2 — focus group
 Ctrl+\` — terminal · Ctrl+Shift+\` — new terminal · Ctrl+Shift+G — source control · Ctrl+Shift+E — explorer · Ctrl+F — find in terminal
 Delete — delete focused file · @ — attach file in agent input · Esc — close palette`;
 
@@ -227,6 +235,10 @@ export function initPalette(hooks: PaletteHooks) {
     else if (id === 'terminal.new') hooks.terminalNew();
     else if (id === 'terminal.clear') hooks.terminalClear();
     else if (id === 'terminal.kill') hooks.terminalKill();
+    else if (id === 'view.split') hooks.splitToggle();
+    else if (id === 'view.focusGroup1') hooks.focusGroup(1);
+    else if (id === 'view.focusGroup2') hooks.focusGroup(2);
+    else if (id === 'view.closeSplit') hooks.closeSplit();
     else if (id === 'view.explorer') hooks.showView('explorer');
     else if (id === 'view.scm') hooks.showView('scm');
     else if (id === 'view.bolt') hooks.showView('api');

@@ -688,6 +688,29 @@ async function runMainSmoke() {
     await ocCall(`/session/${s.id}`, { method: 'DELETE' });
     return s.id;
   });
+  await check('command-list', async () => {
+    const r = await ocCall('/command');
+    const list = JSON.parse(r.text);
+    const arr = Array.isArray(list) ? list : list.value;
+    if (!Array.isArray(arr) || arr.some((c) => !c || typeof c.name !== 'string' || !c.name)) {
+      throw new Error('bad command list');
+    }
+    return `${arr.length} commands`;
+  });
+  await check('command-shape', async () => {
+    // Empty-payload command must fail VALIDATION (400), proving the route is
+    // live without running anything side-effectful.
+    const c = await ocCall('/session', { method: 'POST', body: { title: 'barang cmd probe' } });
+    const s = JSON.parse(c.text);
+    if (!s.id) throw new Error('no session id');
+    try {
+      const r = await ocCall(`/session/${s.id}/command`, { method: 'POST', body: {} });
+      if (r.status !== 400) throw new Error(`expected 400, got ${r.status}: ${r.text.slice(0, 120)}`);
+      return '400 as expected';
+    } finally {
+      await ocCall(`/session/${s.id}`, { method: 'DELETE' });
+    }
+  });
   await check('update-shape', async () => {
     const i = await checkForUpdates();
     if (typeof i.update !== 'boolean' || i.current !== app.getVersion()) {
@@ -893,7 +916,7 @@ async function runUiSmoke() {
         const qa = (s) => [...document.querySelectorAll(s)];
         // Explorer context menu: synthetic right-click must open a populated
         // menu, and Escape must close it.
-        let ctxMenu = false, ctxItems = 0, ctxClosed = false;
+        let ctxMenu = false, ctxItems = 0, ctxClosed = false, ctxCopyPaths = false;
         try {
           const lbl = qa('.tree-label')[0];
           if (lbl) {
@@ -903,6 +926,8 @@ async function runUiSmoke() {
             const m = q('.ctx-menu');
             ctxMenu = !!m;
             ctxItems = m ? m.querySelectorAll('.ctx-item').length : 0;
+            const t = m ? (m.textContent || '') : '';
+            ctxCopyPaths = t.includes('Copy Path') && t.includes('Copy Relative Path');
             document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
             await new Promise((rr) => setTimeout(rr, 300));
             ctxClosed = !q('.ctx-menu');
@@ -1263,7 +1288,7 @@ async function runUiSmoke() {
           settingsBtn: !!btn,
           settingsModal: !!q('.settings-overlay .settings-modal select.settings-select'),
           defaultModel: (() => { const s = q('.settings-overlay select.settings-select'); return s ? s.value : null; })(),
-          ctxMenu, ctxItems, ctxClosed,
+          ctxMenu, ctxItems, ctxClosed, ctxCopyPaths,
           diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, renamePlaced, openedAtOnce,
           modalTrail: modalTrail.join(','), hotSwitch, switchMs, focusCreate, untitled, delKey,
           aboutVer: (q('.about-ver')?.textContent || '').trim(),
@@ -1291,7 +1316,7 @@ async function runUiSmoke() {
     dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true &&     dom.icons >= 8 && dom.selects === 3 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
-    dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true &&
+    dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true && dom.ctxCopyPaths === true &&
     dom.fsRoundtrip === 'ok' && dom.changesSec === true &&
     dom.attachBtn === true && dom.modelMini === true && dom.sendIcon === true &&
     (dom.brandAlign.s === 'ok' || dom.brandAlign.s === 'skip') &&
@@ -1748,6 +1773,18 @@ async function runUiSmoke() {
         ];
         if (fu(msgs, 'msg_abc', 'hi') !== true) bad.push('fu-id');
         if (fu(msgs, 'msg_nope', 'hi') !== false) bad.push('fu-miss');
+      }
+      // Explorer copy paths: absolute vs root-relative, separator-aware.
+      const po = u.pathOf;
+      if (typeof po !== 'function') bad.push('no-pathof-fn');
+      else {
+        // NOTE: 4x backslashes in this file = 2x in the evaluated script =
+        // a real single backslash at runtime (template-literal layering).
+        if (po('C:\\\\proj', 'src/a.ts', true) !== 'C:\\\\proj\\\\src\\\\a.ts') bad.push('path-abs');
+        if (po('C:\\\\proj', 'src/a.ts', false) !== 'src\\\\a.ts') bad.push('path-rel');
+        if (po('/home/u/proj', 'src/a.ts', true) !== '/home/u/proj/src/a.ts') bad.push('path-posix');
+        if (po('C:\\\\proj\\\\', 'src/a.ts', true) !== 'C:\\\\proj\\\\src\\\\a.ts') bad.push('path-clean');
+        if (po('', 'src/a.ts', true) !== 'src/a.ts') bad.push('path-noroot');
       }
       // Agent todos: header counts + checklist rendering data.
       const tp = u.todoProgress;
@@ -2251,6 +2288,48 @@ async function runUiSmoke() {
   } catch (e) { updateVis = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] update-vis: ' + updateVis);
   pass = pass && updateVis === 'ok';
+  // Slash commands: server list shapes, composer suggest, unknown stays put.
+  let slashCmd = 'skip';
+  try {
+    slashCmd = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.parseSlashCommand !== 'function' || typeof u.loadCommands !== 'function') return 'no-cmd-fns';
+      const bad = [];
+      const p1 = u.parseSlashCommand('/compact');
+      if (!p1 || p1.name !== 'compact' || p1.args !== '') bad.push('parse-bare');
+      const p2 = u.parseSlashCommand('/init focus area');
+      if (!p2 || p2.name !== 'init' || p2.args !== 'focus area') bad.push('parse-args');
+      if (u.parseSlashCommand('hello') !== null || u.parseSlashCommand('/ spaced') !== null || u.parseSlashCommand('') !== null) bad.push('parse-no');
+      if (bad.length) return 'unit-FAIL:' + bad.join(';');
+      const list = await u.loadCommands().catch(() => null);
+      if (!Array.isArray(list)) return 'cmd-not-array';
+      if (list.some((c) => !c || typeof c.name !== 'string' || !c.name)) return 'cmd-nameless';
+      const input = document.querySelector('.composer-input');
+      if (!input) return 'no-composer';
+      const fireInput = () => input.dispatchEvent(new Event('input', { bubbles: true }));
+      // Known prefix suggests; unknown keeps text + error toast on send.
+      input.focus();
+      input.value = '/in';
+      fireInput();
+      await new Promise((r) => setTimeout(r, 1500));
+      const sug = document.querySelector('.suggest');
+      const items = [...(sug?.querySelectorAll('.suggest-item') ?? [])].map((b) => (b.textContent || '').trim());
+      if (sug && !sug.classList.contains('hidden')) {
+        if (!items.some((t) => t.startsWith('/in'))) return 'suggest-wrong:' + items.slice(0, 3).join('|');
+      }
+      input.value = '/nope-cmd-xyz';
+      fireInput();
+      await new Promise((r) => setTimeout(r, 900));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 1500));
+      if (input.value !== '/nope-cmd-xyz') return 'unknown-cleared';
+      const toast = [...document.querySelectorAll('#toasts .toast.is-error')].map((t) => t.textContent || '').join(' ');
+      if (!/Unknown command/.test(toast)) return 'unknown-no-toast';
+      return 'ok';
+    })()`);
+  } catch (e) { slashCmd = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] slash-cmd: ' + slashCmd);
+  pass = pass && slashCmd === 'ok';
   // Search-replace E2E (hermetic throwaway dir in the project). The marker
   // is timestamp-unique per run so the harness's own source (which mentions
   // the queries) can never collide with the scanned content.

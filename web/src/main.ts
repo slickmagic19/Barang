@@ -4,7 +4,7 @@ import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
 import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
-  questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard, resolveSendVariant } from './lib/agent';
+  questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard, resolveSendVariant, loadCommands, parseSlashCommand } from './lib/agent';
 import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -18,7 +18,8 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
   const img = el('img', { class: `brand-logo ${cls}`.trim(), src: logoUrl, alt: 'Barang logo', width: String(size), height: String(size) }) as HTMLImageElement;
   return img;
 }
-import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry, deleteFocusedEntry } from './ui/explorer';
+import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry,
+deleteFocusedEntry, pathOf } from './ui/explorer';
 import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
@@ -803,6 +804,9 @@ async function boot() {
     candidateImportPaths,
     specResolves,
     resolveSendVariant,
+    loadCommands,
+    parseSlashCommand,
+    pathOf,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

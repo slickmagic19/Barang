@@ -900,6 +900,71 @@ export interface SendSelection {
   agent?: string;
 }
 
+/** One opencode slash command (built-in + project custom). */
+export interface CommandInfo {
+  name: string;
+  description?: string;
+  [k: string]: unknown;
+}
+
+let commandCache: { root: string; list: CommandInfo[] } | null = null;
+
+/** List server slash commands (cached per project root). */
+export async function loadCommands(): Promise<CommandInfo[]> {
+  const root = agentStore.get().root || '';
+  if (commandCache && commandCache.root === root) return commandCache.list;
+  try {
+    const res = await oc.get<CommandInfo[] | { value?: CommandInfo[] }>('/command');
+    const all = Array.isArray(res) ? res : (res.value ?? []);
+    commandCache = { root, list: all.filter((c) => c && typeof c.name === 'string' && c.name) };
+  } catch {
+    commandCache = { root, list: [] };
+  }
+  return commandCache.list;
+}
+
+/** Parse a composer slash command ('/compact ...', '/init foo'). Null when
+ *  the text isn't one. Pure. */
+export function parseSlashCommand(text: string): { name: string; args: string } | null {
+  const m = /^\/([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$/.exec(String(text ?? '').trim());
+  return m ? { name: m[1], args: (m[2] ?? '').trim() } : null;
+}
+
+/** Execute a slash command in the active session (creating one if needed).
+ *  Returns false for unknown names (caller toasts, keeps the text) and for
+ *  failed runs (store error owns the message, like sendMessage). */
+export async function sendCommand(name: string, args: string): Promise<boolean> {
+  const s = agentStore.get();
+  let id = s.activeId;
+  if (!id) {
+    try {
+      id = await createSession(`/${name}`);
+    } catch {
+      return false;
+    }
+  }
+  const known = await loadCommands().catch(() => [] as CommandInfo[]);
+  if (known.length && !known.some((c) => c.name === name)) return false;
+  const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `running /${name}…` });
+  lastSubmitAt = Date.now();
+  clearSessionQuestions(id);
+  bumpProgress();
+  try {
+    await oc.post(`/session/${id}/command`, {
+      ...(sel.model ? { model: { providerID: sel.model.providerID, modelID: sel.model.modelID } } : {}),
+      ...(sel.agent ? { agent: sel.agent } : {}),
+      command: name,
+      arguments: args,
+    }, { timeoutMs: SUBMIT_TIMEOUT_MS });
+  } catch (e) {
+    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
+    return false;
+  }
+  await refreshActive().catch(() => {});
+  await loadSessions().catch(() => {});
+  return true;
+}
 /** Resolve the reasoning variant to send: only when a model is selected
  *  AND it advertises that variant (a stale pick silently becomes Default).
  *  Verified live: top-level `variant` lands on the message model. Pure. */

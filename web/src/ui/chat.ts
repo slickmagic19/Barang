@@ -7,6 +7,7 @@ import {
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
   refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
   statusTextFor, messageErrorText, todoProgress, classifyAttachFile,
+  loadCommands, parseSlashCommand, sendCommand,
   type ChatMessage, type ChangeEntry,
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
@@ -696,9 +697,23 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     paintEffortMini();
   };
 
-  const doSend = () => {
+  const doSend = async () => {
     const v = input.value;
     if ((!v.trim() && !imgAttaches.length) || agentStore.get().busy) return;
+    // Slash commands go to the command endpoint, never the prompt one.
+    const slash = !imgAttaches.length ? parseSlashCommand(v) : null;
+    if (slash) {
+      const known = await loadCommands().catch(() => []);
+      if (known.length && !known.some((c) => c.name === slash.name)) {
+        hooks.toast(`Unknown command: /${slash.name}`, 'error');
+        return; // keep the text so it can be fixed
+      }
+      input.value = '';
+      autoGrow();
+      suggest.classList.add('hidden');
+      await sendCommand(slash.name, slash.args);
+      return;
+    }
     const files = imgAttaches.map((a) => ({ mime: a.mime, filename: a.filename, url: a.dataUrl }));
     imgAttaches = [];
     paintAttach();
@@ -706,7 +721,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     autoGrow();
     void sendMessage(v, files);
   };
-  btnSend.onclick = doSend;
+  btnSend.onclick = () => void doSend();
 
   const autoGrow = () => {
     input.style.height = 'auto';
@@ -717,12 +732,41 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     void updateSuggest();
   });
 
-  // @file autocomplete
+  // @file + /command autocomplete
   let suggestIdx = 0;
-  let suggestItems: Array<{ path: string }> = [];
+  let suggestItems: Array<{ path: string; sub?: string; kind: 'file' | 'cmd' }> = [];
+  const paintSuggest = () => {
+    suggest.innerHTML = '';
+    suggestItems.forEach((it, i) => {
+      const b = el('button', { class: `suggest-item${i === 0 ? ' active' : ''}` }) as HTMLButtonElement;
+      b.append(iconEl(it.kind === 'cmd' ? 'prompt' : 'file', 13), el('span', {}, it.path));
+      if (it.sub) b.append(el('span', { class: 'suggest-sub' }, it.sub));
+      b.onmousedown = (e) => {
+        e.preventDefault();
+        insertSuggest(it);
+      };
+      suggest.append(b);
+    });
+    suggest.classList.toggle('hidden', suggestItems.length === 0);
+  };
   const updateSuggest = async () => {
     const pos = input.selectionStart ?? input.value.length;
     const before = input.value.slice(0, pos);
+    const cmdM = /^\/([A-Za-z0-9_-]*)$/.exec(before);
+    if (cmdM) {
+      // Leading-slash command being typed: complete from the server list.
+      try {
+        const list = await loadCommands().catch(() => []);
+        const q = cmdM[1].toLowerCase();
+        suggestItems = list
+          .filter((c) => c.name.toLowerCase().startsWith(q))
+          .slice(0, 8)
+          .map((c) => ({ path: `/${c.name}`, sub: c.description?.slice(0, 80), kind: 'cmd' as const }));
+        suggestIdx = 0;
+        paintSuggest();
+      } catch { /* ignore */ }
+      return;
+    }
     const m = before.match(/@([A-Za-z0-9_./\\-]*)$/);
     if (!m) {
       suggest.classList.add('hidden');
@@ -730,24 +774,28 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     }
     try {
       const r = await fsApi.find(m[1] || '', 8);
-      suggestItems = r.results;
+      suggestItems = r.results.map((x) => ({ path: x.path, kind: 'file' as const }));
       suggestIdx = 0;
       if (!suggestItems.length) {
         suggest.classList.add('hidden');
         return;
       }
-      suggest.innerHTML = '';
-      suggestItems.forEach((it, i) => {
-        const b = el('button', { class: `suggest-item${i === 0 ? ' active' : ''}` }) as HTMLButtonElement;
-        b.append(iconEl('file', 13), el('span', {}, it.path));
-        b.onmousedown = (e) => {
-          e.preventDefault();
-          insertMention(it.path);
-        };
-        suggest.append(b);
-      });
-      suggest.classList.remove('hidden');
+      paintSuggest();
     } catch { /* ignore */ }
+  };
+  const insertSuggest = (it: { path: string; kind: 'file' | 'cmd' }) => {
+    const pos = input.selectionStart ?? input.value.length;
+    const after = input.value.slice(pos);
+    if (it.kind === 'cmd') {
+      const before = input.value.slice(0, pos).replace(/\/[A-Za-z0-9_-]*$/, `${it.path} `);
+      input.value = before + after;
+    } else {
+      insertMention(it.path);
+      return;
+    }
+    suggest.classList.add('hidden');
+    input.focus();
+    autoGrow();
   };
   const insertMention = (path: string) => {
     const pos = input.selectionStart ?? input.value.length;
@@ -763,13 +811,13 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       e.preventDefault();
       if (e.key === 'ArrowDown') suggestIdx = Math.min(suggestIdx + 1, suggestItems.length - 1);
       else if (e.key === 'ArrowUp') suggestIdx = Math.max(suggestIdx - 1, 0);
-      else if (suggestItems[suggestIdx]) insertMention(suggestItems[suggestIdx].path);
+      else if (suggestItems[suggestIdx]) insertSuggest(suggestItems[suggestIdx]);
       suggest.querySelectorAll('.suggest-item').forEach((n, i) => n.classList.toggle('active', i === suggestIdx));
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      doSend();
+      void doSend();
     }
   });
 

@@ -2,6 +2,7 @@
 // VSCode-style right-click menus: new/rename/delete/copy path per entry.
 import { fsApi, type FsEntry } from '../lib/api';
 import { el, copyText } from '../lib/util';
+import { agentStore } from '../lib/agent';
 import { iconEl } from './icons';
 import { fileIconEl } from './fileIcons';
 import { showContextMenu } from './menu';
@@ -244,8 +245,21 @@ async function submitRename(hooks: ExplorerHooks, entry: FsEntry, name: string) 
   }
 }
 
-function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: number, y: number) {
-  const isDir = e.type === 'dir';
+/** Render a tree path for the clipboard: absolute (full path, VSCode
+ *  "Copy Path") or root-relative ("Copy Relative Path"). Explorer entries
+ *  are root-relative with forward slashes; separators follow the root
+ *  style. Outside-root / empty-root falls back to the entry as-is. Pure. */
+export function pathOf(root: string, rel: string, absolute: boolean): string {
+  const r = String(root ?? '').replace(/[/\\]+$/, '');
+  const clean = String(rel ?? '').replace(/^\.\//, '').replace(/^[/\\]+/, '');
+  if (!r) return clean;
+  const sep = r.includes('\\') ? '\\' : '/';
+  const relSep = clean.split('/').join(sep);
+  if (!absolute) return relSep;
+  return r + sep + relSep;
+}
+
+function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: number, y: number) {  const isDir = e.type === 'dir';
   showContextMenu(x, y, [
     ...(isDir
       ? []
@@ -271,7 +285,17 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
     { sep: true },
     {
       label: 'Copy Path', icon: 'file',
-      run: () => void copyText(e.path).then((ok) => hooks.toast(ok ? 'Path copied.' : 'Copy failed.', ok ? 'info' : 'error')),
+      run: () => {
+        const full = pathOf(agentStore.get().root || '', e.path, true);
+        void copyText(full).then((ok) => hooks.toast(ok ? 'Full path copied.' : 'Copy failed.', ok ? 'info' : 'error'));
+      },
+    },
+    {
+      label: 'Copy Relative Path', icon: 'file',
+      run: () => {
+        const rel = pathOf(agentStore.get().root || '', e.path, false);
+        void copyText(rel).then((ok) => hooks.toast(ok ? 'Relative path copied.' : 'Copy failed.', ok ? 'info' : 'error'));
+      },
     },
     ...(isDir && hooks.onSearchInFolder
       ? [{ label: 'Search in Folder', icon: 'search' as const, run: () => hooks.onSearchInFolder!(e.path) }]

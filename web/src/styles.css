@@ -758,6 +758,7 @@ kbd {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .suggest-item.active, .suggest-item:hover { background: var(--accent-dim); color: var(--text); }
+.suggest-sub { color: var(--text-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* palette */
 .palette-overlay {

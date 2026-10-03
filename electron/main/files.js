@@ -431,17 +431,34 @@ export async function searchReplace(
       re.lastIndex = 0;
       let m;
       let lineMatches = 0;
-      const cols = [];
+      const rawCols = [];
       while ((m = re.exec(lines[i])) !== null) {
         lineMatches++;
-        if (cols.length < 40) cols.push(m.index, m[0].length);
+        if (rawCols.length < 40) rawCols.push(m.index, m[0].length);
         if (lineMatches > 200) break;
         if (m.index === re.lastIndex) re.lastIndex++; // zero-length guard
       }
       if (lineMatches) {
         matches += lineMatches;
         if (details.length < 500) {
-          fileDetails.push({ path: rel, line: i + 1, text: lines[i].trim().slice(0, 240), cols });
+          // Preview text is trimmed + sliced — rebase offsets onto THAT, or
+          // highlights drift on indented lines and past the slice edge.
+          const rawLine = lines[i];
+          const lead = rawLine.length - rawLine.trimStart().length;
+          const text = rawLine.trim().slice(0, 240);
+          const cols = [];
+          for (let k = 0; k + 1 < rawCols.length && cols.length < 40; k += 2) {
+            let s = rawCols[k] - lead;
+            let len = rawCols[k + 1];
+            if (s + len <= 0 || s >= 240) continue;
+            if (s < 0) {
+              len += s;
+              s = 0;
+            }
+            if (s + len > 240) len = 240 - s;
+            if (len > 0) cols.push(s, len);
+          }
+          fileDetails.push({ path: rel, line: i + 1, text, cols });
         } else {
           detailTruncated = true;
         }

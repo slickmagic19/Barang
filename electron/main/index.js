@@ -1865,6 +1865,7 @@ async function runUiSmoke() {
       try { await window.barang.fs.remove(dir); } catch (e) {}
       await window.barang.fs.write(dir + '/a.txt', M + ' one\\n' + M + ' two\\n');
       await window.barang.fs.write(dir + '/sub/b.txt', M + '\\n' + M + '\\n' + M + '\\n');
+      await window.barang.fs.write(dir + '/ind.txt', '    ' + M + ' padded\\n\\t' + M + '\\n');
       const vb = AQ('[title="Search (Ctrl+Shift+F)"]');
       if (!vb) return 'no-view-btn';
       vb.click();
@@ -1879,15 +1880,20 @@ async function runUiSmoke() {
         for (let i = 0; i < 25; i++) {
           await sleep(300);
           const t = AQ('#view-search .search-count')?.textContent ?? '';
-          if (/5 results? in 2 files/.test(t)) return t;
+          if (/7 results? in 3 files/.test(t)) return t;
         }
         return AQ('#view-search .search-count')?.textContent ?? 'none';
       };
       let head = await headText();
-      if (!/5 results? in 2 files/.test(head)) return 'no-results:' + head;
+      if (!/7 results? in 3 files/.test(head)) return 'no-results:' + head;
       const rows = AQA('#view-search .search-match').length;
-      if (rows < 5) return 'rows:' + rows;
+      if (rows < 7) return 'rows:' + rows;
       if (!AQA('#view-search .search-preview mark').length) return 'no-highlight';
+      // Highlight POSITION: every mark must be exactly the query — catches
+      // offset drift on indented lines (backend offsets vs trimmed preview).
+      const marks = AQA('#view-search .search-preview mark').map((n) => n.textContent);
+      const badMarks = marks.filter((t) => t !== M);
+      if (!marks.length || badMarks.length) return 'highlight-pos:' + JSON.stringify(badMarks.slice(0, 3));
       // include scope (subdir only) then exclude scope (top file only)
       inputs[2].value = dir + '/sub';
       inputs[2].dispatchEvent(new Event('input', { bubbles: true }));
@@ -1906,9 +1912,9 @@ async function runUiSmoke() {
       for (let i = 0; i < 20; i++) {
         await sleep(300);
         h3 = AQ('#view-search .search-count')?.textContent ?? '';
-        if (/2 results? in 1 file/.test(h3)) break;
+        if (/4 results? in 2 files/.test(h3)) break;
       }
-      if (!/2 results? in 1 file/.test(h3)) return 'exclude-scope:' + h3;
+      if (!/4 results? in 2 files/.test(h3)) return 'exclude-scope:' + h3;
       inputs[3].value = '';
       inputs[3].dispatchEvent(new Event('input', { bubbles: true }));
       await sleep(1500);
@@ -1930,9 +1936,9 @@ async function runUiSmoke() {
       for (let i = 0; i < 40; i++) {
         await sleep(300);
         h4 = AQ('#view-search .search-count')?.textContent ?? '';
-        if (/3 results? in 1 file/.test(h4)) break;
+        if (/5 results? in 2 files/.test(h4)) break;
       }
-      if (!/3 results? in 1 file/.test(h4)) return 'per-file-replace:' + h4;
+      if (!/5 results? in 2 files/.test(h4)) return 'per-file-replace:' + h4;
       const fa = await window.barang.fs.read(dir + '/a.txt');
       if (fa.content !== R + ' one\\n' + R + ' two\\n') return 'per-file-content';
       // global replace all for the rest

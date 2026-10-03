@@ -6,6 +6,7 @@ import {
   agentStore, loadSessions, createSession, selectSession, deleteSession,
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
   refreshActive, readSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
+  statusTextFor, messageErrorText,
   type ChatMessage, type ChangeEntry,
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
@@ -311,7 +312,7 @@ let dcSig = '';
 let dcOut: ChangeEntry[] = [];
 
 function renderMessages(list: HTMLElement, hooks: ChatHooks) {
-  const { messages, activeId, busy, status } = agentStore.get();
+  const { messages, activeId, busy, status, statusInfo, error } = agentStore.get();
   const showReasoning = readSettings().showReasoning;
   const showActivity = readSettings().showActivity;
   // Scroll anchor: capture BEFORE clearing (innerHTML resets scrollTop).
@@ -352,6 +353,7 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     };
     list.append(more);
   }
+  const shownRunErrors = new Set<string>();
   for (const m of visible) {
     const role = String(m.info?.role ?? 'assistant').toLowerCase();
     const parts = (m.parts ?? []).filter(
@@ -364,6 +366,17 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     meta.append(`${role === 'user' ? 'You' : 'Agent'}${m.info?.time?.created ? ` · ${timeAgo(m.info.time.created)}` : ''}`);
     wrap.append(meta);
     for (const p of parts) renderPart(p as Record<string, unknown>, wrap);
+    // Server-reported run failures live on the assistant message — show them
+    // inline in the transcript, not just as a toast.
+    if (role !== 'user') {
+      const runErr = messageErrorText(m.info?.error);
+      if (runErr) {
+        shownRunErrors.add(runErr);
+        const eb = el('div', { class: 'msg-runerr' });
+        eb.append(iconEl('alert', 13), el('span', {}, runErr));
+        wrap.append(eb);
+      }
+    }
     if (role === 'user' && m.info?.id && activeId) {
       const actions = el('div', { class: 'msg-actions' });
       const btn = el('button', { class: 'msg-action', title: 'Revert this message and restore files to before it' }) as HTMLButtonElement;
@@ -381,6 +394,17 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
       wrap.append(actions);
     }
     list.append(wrap);
+  }
+  // Transport/submit failures (store error) also land in the transcript —
+  // a toast alone is gone before the user reads it. Skipped when the same
+  // text already renders on a run-error row above.
+  if (error && !shownRunErrors.has(error)) {
+    const eb = el('div', { class: 'msg is-agent' });
+    eb.append(el('div', { class: 'msg-meta' }, 'Agent'));
+    const row = el('div', { class: 'msg-runerr' });
+    row.append(iconEl('alert', 13), el('span', {}, error));
+    eb.append(row);
+    list.append(eb);
   }
   if (chatKeepScroll) {
     // "Show more" prepends above: hold the reading position steady.
@@ -731,9 +755,10 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       const bAllow = el('button', { class: 'btn btn-primary btn-sm' }, 'Allow');
       const bOnce = el('button', { class: 'btn btn-sm' }, 'Allow once');
       const bDeny = el('button', { class: 'btn btn-sm' }, 'Deny');
-      bAllow.onclick = () => void respondPermission(p, true, true).catch((e) => hooks.toast(e.message, 'error'));
-      bOnce.onclick = () => void respondPermission(p, true, false).catch((e) => hooks.toast(e.message, 'error'));
-      bDeny.onclick = () => void respondPermission(p, false, false).catch((e) => hooks.toast(e.message, 'error'));
+      // Server enum (verified live): once | always | reject.
+      bAllow.onclick = () => void respondPermission(p, 'always').catch((e) => hooks.toast(e.message, 'error'));
+      bOnce.onclick = () => void respondPermission(p, 'once').catch((e) => hooks.toast(e.message, 'error'));
+      bDeny.onclick = () => void respondPermission(p, 'reject').catch((e) => hooks.toast(e.message, 'error'));
       row.append(bAllow, bOnce, bDeny);
       card.append(row);
       perms.append(card);
@@ -743,7 +768,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     // messages / busy / error
     renderMessages(list, hooks);
     busyRow.classList.toggle('hidden', !s.busy);
-    if (s.busy) busyTxt.textContent = `Agent working… (${s.status})`;
+    if (s.busy) busyTxt.textContent = statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
     if (s.error) {
       errBox.innerHTML = '';
       errBox.append(iconEl('alert', 14), el('span', {}, s.error));

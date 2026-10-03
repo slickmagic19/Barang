@@ -25,15 +25,18 @@ export const fsApi = {
 };
 
 /** Direct opencode calls through main (auth injected there). Paths like '/session'. */
+export interface OcOpts {
+  timeoutMs?: number; // per-call timeout (agent submit) — hung accepts fail fast
+}
 export const oc = {
-  get: <T>(path: string) => barang().oc(path) as Promise<T>,
-  post: <T>(path: string, body?: unknown) =>
-    barang().oc(path, { method: 'POST', body }) as Promise<T>,
-  put: <T>(path: string, body?: unknown) =>
-    barang().oc(path, { method: 'PUT', body }) as Promise<T>,
-  patch: <T>(path: string, body?: unknown) =>
-    barang().oc(path, { method: 'PATCH', body }) as Promise<T>,
-  del: <T>(path: string) => barang().oc(path, { method: 'DELETE' }) as Promise<T>,
+  get: <T>(path: string, opts?: OcOpts) => barang().oc(path, { timeoutMs: opts?.timeoutMs }) as Promise<T>,
+  post: <T>(path: string, body?: unknown, opts?: OcOpts) =>
+    barang().oc(path, { method: 'POST', body, timeoutMs: opts?.timeoutMs }) as Promise<T>,
+  put: <T>(path: string, body?: unknown, opts?: OcOpts) =>
+    barang().oc(path, { method: 'PUT', body, timeoutMs: opts?.timeoutMs }) as Promise<T>,
+  patch: <T>(path: string, body?: unknown, opts?: OcOpts) =>
+    barang().oc(path, { method: 'PATCH', body, timeoutMs: opts?.timeoutMs }) as Promise<T>,
+  del: <T>(path: string, opts?: OcOpts) => barang().oc(path, { method: 'DELETE', timeoutMs: opts?.timeoutMs }) as Promise<T>,
 };
 
 export const appState = () => barang().app.state();

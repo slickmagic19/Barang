@@ -570,6 +570,12 @@ kbd {
   background: #f7768e10; border: 1px solid #f7768e4d; color: var(--red); font-size: 12px; line-height: 1.5;
 }
 .chat-err .ic { margin-top: 1px; }
+.msg-runerr {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 9px 11px; border-radius: var(--radius);
+  background: #f7768e10; border: 1px solid #f7768e4d; color: var(--red); font-size: 12px; line-height: 1.5;
+}
+.msg-runerr .ic { margin-top: 1px; flex: none; }
 .msg { display: flex; flex-direction: column; gap: 6px; max-width: 100%; }
 .msg-meta {
   display: flex; align-items: center; gap: 6px;

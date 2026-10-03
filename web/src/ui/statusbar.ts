@@ -79,8 +79,11 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
     ocEl.classList.toggle('is-busy', a.busy);
 
     sessEl.innerHTML = '';
-    sessEl.classList.toggle('is-warn', a.permissions.length > 0 && !a.busy);
-    if (a.busy) sessEl.append(dot('run'), el('span', {}, `agent: ${a.status}`));
+    sessEl.classList.toggle('is-warn', a.permissions.length > 0);
+    if (a.busy && a.status === 'retry') {
+      const n = a.statusInfo?.attempt ?? 0;
+      sessEl.append(dot('run'), el('span', {}, n > 0 ? `agent: retrying (attempt ${n})` : 'agent: retrying'));
+    } else if (a.busy) sessEl.append(dot('run'), el('span', {}, `agent: ${a.status}`));
     else if (a.permissions.length) {
       sessEl.append(iconEl('shield', 12), el('span', {}, `${a.permissions.length} approval${a.permissions.length > 1 ? 's' : ''}`));
     } else sessEl.append(dot('ok'), el('span', {}, 'agent idle'));

@@ -27,8 +27,8 @@ const barang = {
     searchReplace: (args) => invoke('fs:search-replace', args),
   },
   /** Raw opencode call. Resolves parsed JSON (or undefined) / throws Error. */
-  oc: async (path, { method = 'GET', body } = {}) => {
-    const res = await ipcRenderer.invoke('oc:call', { path, method, body });
+  oc: async (path, { method = 'GET', body, timeoutMs } = {}) => {
+    const res = await ipcRenderer.invoke('oc:call', { path, method, body, timeoutMs });
     if (res.ok === false) throw new Error(res.error || 'opencode call failed');
     if (res.status >= 400) {
       let msg = `HTTP ${res.status}`;

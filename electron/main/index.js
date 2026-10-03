@@ -483,7 +483,7 @@ function registerIpc() {
 
   ipcMain.handle('oc:call', async (_ev, p = {}) => {
     try {
-      const res = await ocCall(p.path, { method: p.method || 'GET', body: p.body });
+      const res = await ocCall(p.path, { method: p.method || 'GET', body: p.body, timeoutMs: p.timeoutMs });
       return { ok: true, status: res.status, text: res.text };
     } catch (e) {
       return { ok: false, error: e?.message || String(e) };
@@ -1477,17 +1477,19 @@ async function runUiSmoke() {
         [{ ...idle, root: 'a', busy: true }, { ...idle, root: 'b' }, null],
         [{ ...idle, error: 'boom' }, { ...idle, error: 'boom' }, null],
         [{ ...idle, busy: true, activeId: 's1' }, { ...idle, activeId: 's2' }, null],
+        [{ ...idle, busy: true, perms: 0 }, { ...idle, busy: true, perms: 1 }, 'approval'],
+        [{ ...idle, busy: true, perms: 1 }, { ...idle, busy: true, perms: 1 }, null],
       ];
       const bad = [];
       cases.forEach(([a, b, want], i) => {
         const got = d(a, b);
         if (got !== want) bad.push(i + ':' + got + '!==' + want);
       });
-      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-8';
+      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-10';
     })()`);
   } catch (e) { notifDecide = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] notif-decide: ' + notifDecide);
-  pass = pass && notifDecide === 'ok-8';
+  pass = pass && notifDecide === 'ok-10';
   let notifIpc = 'skip';
   try {
     notifIpc = await w.webContents.executeJavaScript(`(async () => {
@@ -1586,6 +1588,69 @@ async function runUiSmoke() {
         if (rm(null, cat, ['build'], 'build').agent !== 'build') bad.push('sendmodel-agent');
         if (rm(null, cat, ['build'], 'ghost').agent !== undefined) bad.push('sendmodel-ghost-agent');
         if (rm({ providerID: 'opencode', modelID: 'mimo-v2.6-flash-free' }, [], [], 'build').agent !== 'build') bad.push('sendmodel-passthru');
+      }
+      // Opencode-style run state: server retry, stall, errors, permissions.
+      const st = u.statusTextFor;
+      if (typeof st !== 'function') bad.push('no-status-fn');
+      else {
+        if (st('retry', 2) !== 'Agent retrying… (attempt 2)') bad.push('status-retry');
+        if (st('retry', 0) !== 'Agent retrying…') bad.push('status-retry0');
+        if (st('busy', 0) !== 'Agent working… (busy)') bad.push('status-busy');
+        if (!st('stalled', 0).startsWith('Agent stalled')) bad.push('status-stalled');
+      }
+      const me = u.messageErrorText;
+      if (typeof me !== 'function') bad.push('no-msgerr-fn');
+      else {
+        if (me({ name: 'UnknownError', data: { message: 'boom happened' } }) !== 'boom happened') bad.push('msgerr-unknown');
+        if (me({ name: 'APIError', data: { message: 'bad', statusCode: 400 } }) !== 'bad (HTTP 400)') bad.push('msgerr-api');
+        if (me({ name: 'ProviderAuthError', data: { providerID: 'x', message: 'expired' } }) !== 'Provider sign-in error (x): expired') bad.push('msgerr-auth');
+        if (me({ name: 'MessageAbortedError', data: { message: 'x' } }) !== null) bad.push('msgerr-abort');
+        if (me(null) !== null || me('s') !== null) bad.push('msgerr-null');
+      }
+      const ds = u.decideStalled;
+      if (typeof ds !== 'function') bad.push('no-stall-fn');
+      else {
+        if (ds(0, 121000, true, 'busy') !== true) bad.push('stall-yes');
+        if (ds(0, 119000, true, 'busy') !== false) bad.push('stall-soon');
+        if (ds(0, 999999, true, 'retry') !== false) bad.push('stall-retry');
+        if (ds(0, 999999, false, 'busy') !== false) bad.push('stall-idle');
+      }
+      // Permission events: real 1.18 server shape (permission.asked) + newer.
+      const pf = u.permissionFromEvent;
+      if (typeof pf !== 'function') bad.push('no-perm-fn');
+      else {
+        const asked = { id: 'per_1', sessionID: 'ses_1', permission: 'bash', patterns: ['echo hi'], metadata: { command: 'echo hi' }, always: ['echo *'], tool: { messageID: 'msg_1', callID: 'call_1' } };
+        const c1 = pf(asked);
+        if (!c1 || c1.permissionID !== 'per_1' || c1.sessionID !== 'ses_1' || !c1.title.includes('bash') || !c1.title.includes('echo hi')) bad.push('perm-asked');
+        if (!c1 || !(c1.detail || '').includes('echo *')) bad.push('perm-detail');
+        const upd = { id: 'p2', type: 'edit', pattern: ['a.txt'], sessionID: 's2', messageID: 'm2', callID: 'c2', metadata: {} };
+        const c2 = pf(upd);
+        if (!c2 || c2.key !== 's2:p2' || !c2.title.includes('edit')) bad.push('perm-updated');
+        if (pf(null) !== null || pf({}) !== null || pf({ id: 'x' }) !== null) bad.push('perm-garbage');
+        const pa = u.parseAgentEvent;
+        if (typeof pa !== 'function') bad.push('no-parse-fn');
+        else {
+          const ev = pa(JSON.stringify({ directory: '/x', payload: { type: 'permission.asked', properties: asked } }));
+          if (!ev || ev.type !== 'permission.asked' || ev.directory !== '/x' || ev.props.id !== 'per_1') bad.push('parse-ev');
+          if (pa('not json') !== null || pa('{"a":1}') !== null) bad.push('parse-garbage');
+        }
+      }
+      const td = u.isTransportDown;
+      if (typeof td !== 'function') bad.push('no-td-fn');
+      else {
+        if (td('opencode upstream failed: fetch failed') !== true) bad.push('td-fetch');
+        if (td('HTTP 500') !== false) bad.push('td-http');
+        if (td('invalid parameters') !== false) bad.push('td-fatal');
+      }
+      const fu = u.findUserMessage;
+      if (typeof fu !== 'function') bad.push('no-fu-fn');
+      else {
+        const msgs = [
+          { info: { id: 'msg_abc', role: 'user', time: { created: 1 } }, parts: [{ type: 'text', text: 'hi' }] },
+          { info: { id: 'm2', role: 'assistant' }, parts: [] },
+        ];
+        if (fu(msgs, 'msg_abc', 'hi') !== true) bad.push('fu-id');
+        if (fu(msgs, 'msg_nope', 'hi') !== false) bad.push('fu-miss');
       }
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       // Self-heal leftovers from an interrupted run (a stale 2000-file dir

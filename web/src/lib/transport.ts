@@ -31,7 +31,7 @@ export interface FsBridge {
 
 export interface BarangBridge {
   fs: FsBridge;
-  oc(path: string, opts?: { method?: string; body?: unknown }): Promise<unknown>;
+  oc(path: string, opts?: { method?: string; body?: unknown; timeoutMs?: number }): Promise<unknown>;
   term: {
     list(): Promise<Array<{ id: string; pid: number | null; shell: string; cwd: string; dead: boolean; exitCode: number | null }>>;
     defaultShell(): Promise<{ shell: string; label: string }>;

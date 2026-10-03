@@ -17,7 +17,7 @@ export function opencodeState() {
 }
 
 /** One opencode REST call. Returns { status, text }. GETs retry through cold boot. */
-export async function ocCall(path, { method = 'GET', body } = {}) {
+export async function ocCall(path, { method = 'GET', body, timeoutMs } = {}) {
   if (!server) throw new Error('opencode server is not running yet');
   const headers = { ...serverAuthHeader() };
   let bodyInit;
@@ -30,7 +30,11 @@ export async function ocCall(path, { method = 'GET', body } = {}) {
   for (let attempt = 0; attempt < (retryable ? 4 : 1); attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 700));
     try {
-      const res = await fetch(server.base + path, { method, headers, body: bodyInit });
+      const opts = { method, headers, body: bodyInit };
+      // Per-call timeout (agent submit): a hung accept must fail fast into
+      // the reconcile path instead of wedging the composer forever.
+      if (timeoutMs) opts.signal = AbortSignal.timeout(timeoutMs);
+      const res = await fetch(server.base + path, opts);
       return { status: res.status, text: await res.text() };
     } catch (e) {
       lastErr = e;

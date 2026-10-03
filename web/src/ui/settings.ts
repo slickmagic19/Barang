@@ -66,6 +66,8 @@ export function openSettings(hooks: SettingsHooks) {
   const agentSel = el('select', { class: 'agent-sel settings-select', title: 'Agent' }) as HTMLSelectElement;
   body.append(agentSel);
   const usageBox = checkRow('Show session cost meter');
+  const fullAutoBox = checkRow('Full permissions (auto-approve agent requests)');
+  body.append(el('p', { class: 'settings-note' }, 'Like opencode --auto: permission prompts are approved and remembered automatically. Explicit deny rules still apply.'));
 
   // --- Chat ---
 
@@ -268,6 +270,7 @@ export function openSettings(hooks: SettingsHooks) {
     }
     freeBox.checked = st0.freeOnly;
     usageBox.checked = st0.showUsage;
+    fullAutoBox.checked = st0.agentFullAuto;
     reasonBox.checked = st0.showReasoning;
     activityBox.checked = st0.showActivity;
     minimapBox.checked = st0.minimap;
@@ -320,6 +323,10 @@ export function openSettings(hooks: SettingsHooks) {
   usageBox.onchange = () => {
     commit((s) => { s.showUsage = usageBox.checked; });
     agentStore.set({}); // repaint statusbar meter
+  };
+  fullAutoBox.onchange = () => {
+    commit((s) => { s.agentFullAuto = fullAutoBox.checked; });
+    hooks.toast(fullAutoBox.checked ? 'Full permissions on — agent requests are auto-approved.' : 'Full permissions off — the agent will ask again.', 'info');
   };
   reasonBox.onchange = () => commit((s) => { s.showReasoning = reasonBox.checked; });
   activityBox.onchange = () => commit((s) => { s.showActivity = activityBox.checked; });

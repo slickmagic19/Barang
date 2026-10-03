@@ -34,7 +34,9 @@ export function decideAgentNotification(prev: AgentSnap, next: AgentSnap): Notif
   if (next.root !== prev.root) return null; // project switch, not a run edge
   if (next.activeId !== prev.activeId && next.activeId !== null && prev.activeId !== null) return null; // session switch
   if (next.error && next.error !== prev.error) return 'error';
-  if (next.perms > 0 && !next.busy && (prev.busy || next.perms !== prev.perms)) return 'approval';
+  // Approval waits happen mid-run (busy stays true) — fire on arrival and
+  // when a run ends with asks still pending, not only when idle.
+  if (next.perms > prev.perms || (prev.busy && !next.busy && next.perms > 0)) return 'approval';
   if (prev.busy && !next.busy && next.activeId && !next.error && next.perms === 0) return 'done';
   return null;
 }

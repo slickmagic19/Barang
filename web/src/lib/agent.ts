@@ -79,12 +79,21 @@ export interface ChatMessage {
   info?: { id?: string; role?: string; time?: { created?: number }; [k: string]: unknown };
   parts?: MsgPart[];
 }
+export type PermissionResponse = 'once' | 'always' | 'reject';
+
 export interface PendingPermission {
   key: string;
   sessionID: string;
   permissionID: string;
   title: string;
   detail?: string;
+}
+
+export interface RunStatusInfo {
+  type: 'idle' | 'busy' | 'retry';
+  attempt?: number;
+  message?: string;
+  next?: number;
 }
 
 interface AgentState {
@@ -98,6 +107,7 @@ interface AgentState {
   agent: string;
   busy: boolean;
   status: string;
+  statusInfo: RunStatusInfo | null; // raw server run state (carries retry attempt)
   permissions: PendingPermission[];
   connected: boolean;
   error: string | null;
@@ -114,6 +124,7 @@ export const agentStore = createStore<AgentState>({
   agent: 'build',
   busy: false,
   status: 'idle',
+  statusInfo: null,
   permissions: [],
   connected: false,
   error: null,
@@ -123,6 +134,100 @@ const scheduleRefresh = debounce(() => void refreshActive().catch(() => {}), 300
 const scheduleSessions = debounce(() => void loadSessions().catch(() => {}), 800);
 
 let eventsConnected = false;
+let lastProgressAt = Date.now();
+let stallTimer: ReturnType<typeof setInterval> | null = null;
+/** Silence budget while a run is busy with zero updates (retry backoffs are
+ *  expected-quiet and excluded by decideStalled). Pure threshold is exported. */
+export const STALL_MS = 120000;
+
+export function bumpProgress() {
+  lastProgressAt = Date.now();
+}
+
+/** Stall decision (pure, smoke-tested): a busy non-retry run with no
+ *  message/part/status/permission activity for STALL_MS is stuck — the
+ *  server will never finish it on its own (e.g. an unanswered prompt the
+ *  client failed to surface, or a wedged provider stream). */
+export function decideStalled(lastProgress: number, now: number, busy: boolean, status: string): boolean {
+  return busy && status !== 'retry' && now - lastProgress > STALL_MS;
+}
+
+export interface AgentEvent {
+  type: string;
+  props: Record<string, unknown>;
+  directory: string;
+}
+
+/** Parse one upstream /event frame (GlobalEvent {directory, payload} or a
+ *  bare {type, properties} object). Null when not JSON / not an event. Pure. */
+export function parseAgentEvent(data: string): AgentEvent | null {
+  try {
+    const ev = JSON.parse(data) as { directory?: unknown; payload?: unknown; type?: unknown; properties?: unknown };
+    const inner = (ev?.payload ?? ev) as { type?: unknown; properties?: unknown };
+    if (!inner || typeof inner.type !== 'string') return null;
+    const props = (inner.properties ?? {}) as Record<string, unknown>;
+    if (!props || typeof props !== 'object') return null;
+    return {
+      type: inner.type,
+      props,
+      directory: typeof ev?.directory === 'string' ? ev.directory : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Map a permission event payload to a prompt card. Handles the 1.18 shape
+ *  {id, sessionID, permission, patterns, metadata{command}, always,
+ *  tool{messageID, callID}} and newer {id, type, pattern(s), sessionID,
+ *  messageID, callID, title, metadata, time} shapes. Null when unusable. Pure. */
+export function permissionFromEvent(props: unknown): PendingPermission | null {
+  if (!props || typeof props !== 'object') return null;
+  const p = props as Record<string, unknown>;
+  const id = typeof p.id === 'string' ? p.id : '';
+  const sessionID = typeof p.sessionID === 'string' ? p.sessionID : '';
+  if (!id || !sessionID) return null;
+  const tool = (p.tool && typeof p.tool === 'object' ? p.tool : null) as Record<string, unknown> | null;
+  const meta = (p.metadata && typeof p.metadata === 'object' ? p.metadata : null) as Record<string, unknown> | null;
+  const patterns = Array.isArray(p.patterns) ? (p.patterns as unknown[]).map(String)
+    : Array.isArray(p.pattern) ? (p.pattern as unknown[]).map(String)
+    : typeof p.pattern === 'string' ? [p.pattern] : [];
+  const name = typeof p.permission === 'string' && p.permission ? p.permission
+    : typeof p.type === 'string' && p.type ? p.type : 'tool';
+  const what = typeof p.title === 'string' && p.title ? p.title
+    : patterns[0]
+    ?? (typeof meta?.command === 'string' && meta.command ? meta.command : null)
+    ?? (typeof meta?.path === 'string' && meta.path ? meta.path : null)
+    ?? name;
+  const title = what === name || what.startsWith(`${name}:`) || what.startsWith(`${name} `) ? what : `${name}: ${what}`;
+  const always = Array.isArray(p.always) ? (p.always as unknown[]).map(String).filter(Boolean) : [];
+  return {
+    key: `${sessionID}:${id}`,
+    sessionID,
+    permissionID: id,
+    title: title.slice(0, 300),
+    detail: always.length ? `“Allow” remembers: ${always.join(', ')}`.slice(0, 300) : undefined,
+  };
+}
+
+/** Track a newly asked permission (dedupe by id). */
+export function upsertPermission(props: unknown): PendingPermission | null {
+  const card = permissionFromEvent(props);
+  if (!card) return null;
+  const cur = agentStore.get().permissions;
+  if (cur.some((p) => p.key === card.key)) return cur.find((p) => p.key === card.key) ?? null;
+  agentStore.set({ permissions: [...cur, card] });
+  return card;
+}
+
+/** Drop a resolved permission (replied event). Returns true when removed. */
+export function removePermission(sessionID: string, permissionID: string): boolean {
+  const cur = agentStore.get().permissions;
+  const next = cur.filter((p) => !(p.sessionID === sessionID && p.permissionID === permissionID));
+  if (next.length === cur.length) return false;
+  agentStore.set({ permissions: next });
+  return true;
+}
 
 export function connectEvents() {
   if (eventsConnected) return;
@@ -133,25 +238,63 @@ export function connectEvents() {
     // Hot path (every streamed frame): match on the raw string. Parsing +
     // re-stringifying multi-MB frames here used to stall the UI.
     const blob = data.toLowerCase();
+    const relevant =
+      blob.includes('message') || blob.includes('session') ||
+      blob.includes('part') || blob.includes('todo') || blob.includes('diff') ||
+      blob.includes('permission') || blob.includes('file.edited');
+    if (!relevant) return;
+    bumpProgress();
+    // Permission lifecycle is event-sourced (permissions are NOT message
+    // parts — scanning messages for them never found anything). Parse only
+    // these small frames as JSON; the 1.18 server emits permission.asked,
+    // newer ones permission.updated, both answered by permission.replied.
     if (blob.includes('permission')) {
-      void refreshActive().catch(() => {});
+      const ev = parseAgentEvent(data);
+      if (ev) {
+        const root = agentStore.get().root || '';
+        const sameProject = !ev.directory || !root || normDir(ev.directory) === normDir(root);
+        if (sameProject) {
+          if (ev.type === 'permission.asked' || ev.type === 'permission.updated') {
+            const card = upsertPermission(ev.props);
+            if (card && readSettings().agentFullAuto) {
+              // Full-permissions mode (TUI --auto): approve + remember, so
+              // matching future asks stop appearing mid-run.
+              void respondPermission(card, 'always').catch((e) => {
+                agentStore.set({ error: `Auto-approve failed: ${(e as Error).message}` });
+              });
+            }
+          } else if (ev.type === 'permission.replied') {
+            const props = ev.props;
+            const sid = typeof props.sessionID === 'string' ? props.sessionID : '';
+            const pid = typeof props.permissionID === 'string' ? props.permissionID : '';
+            if (sid && pid) removePermission(sid, pid);
+          }
+        }
+      }
+      scheduleRefresh();
       scheduleSessions();
       return;
     }
-    if (
-      blob.includes('message') || blob.includes('session') ||
-      blob.includes('part') || blob.includes('todo') || blob.includes('diff')
-    ) {
-      scheduleRefresh();
-      scheduleSessions();
-    }
+    scheduleRefresh();
+    scheduleSessions();
   });
+  if (stallTimer) clearInterval(stallTimer);
+  stallTimer = setInterval(() => {
+    const s = agentStore.get();
+    if (decideStalled(lastProgressAt, Date.now(), s.busy, s.status)) {
+      agentStore.set({ status: 'stalled' });
+    }
+  }, 15000);
+  if (typeof (stallTimer as unknown as { unref?: unknown }).unref === 'function') {
+    (stallTimer as unknown as { unref: () => void }).unref();
+  }
 }
 
 export interface BarangSettings {
   model: { providerID: string; modelID: string } | null; // null = auto
   modelChosen: boolean; // explicit pick (even Auto) — boot defaults never override
   agent: string | null;
+  agentFullAuto: boolean; // auto-approve permission asks (TUI --auto equivalent), default false
   freeOnly: boolean;
   showUsage: boolean; // statusbar session cost meter, default true
   showReasoning: boolean; // default false — reasoning rows hidden
@@ -184,6 +327,7 @@ const SETTING_DEFAULTS: BarangSettings = {
   model: null,
   modelChosen: false,
   agent: null,
+  agentFullAuto: false,
   freeOnly: true,
   showUsage: true,
   showReasoning: false,
@@ -244,6 +388,7 @@ export function readSettings(): BarangSettings {
       model: p.model?.providerID && p.model?.modelID ? { providerID: p.model.providerID, modelID: p.model.modelID } : null,
       modelChosen: p.modelChosen === true || !!(p.model?.providerID && p.model?.modelID),
       agent: typeof p.agent === 'string' ? p.agent : null,
+      agentFullAuto: p.agentFullAuto === true,
     };
   } catch {
     return { ...SETTING_DEFAULTS };
@@ -368,12 +513,42 @@ export async function deleteSession(id: string) {
 
 export async function refreshStatus(sessionId: string) {
   try {
-    const st = await oc.get<Record<string, { type?: string }>>('/session/status');
+    const st = await oc.get<Record<string, RunStatusInfo>>('/session/status');
     // Switched mid-flight — a stale session's busy flag must not leak in.
     if (agentStore.get().activeId !== sessionId) return;
     const cur = st?.[sessionId];
-    agentStore.set({ busy: !!cur && cur.type !== 'idle', status: cur?.type ?? (agentStore.get().busy ? 'busy' : 'idle') });
+    const type = cur?.type ?? (agentStore.get().busy ? 'busy' : 'idle');
+    // A locally flagged stall clears on any fresh server state.
+    agentStore.set({ busy: type !== 'idle', status: type, statusInfo: cur ?? null });
   } catch { /* non-fatal */ }
+}
+
+/** Busy-row label: the server retries failed runs itself (status type
+ *  'retry' + attempt) — surfacing it is what "retry like opencode" means.
+ *  Back to 'Agent working…' the moment the run resumes. Pure. */
+export function statusTextFor(status: string, attempt = 0): string {
+  if (status === 'retry') return attempt > 0 ? `Agent retrying… (attempt ${attempt})` : 'Agent retrying…';
+  if (status === 'stalled') return 'Agent stalled — no updates for a while (Stop, then send again)';
+  return `Agent working… (${status || 'busy'})`;
+}
+
+/** Human text for an assistant message's server-reported run error
+ *  (info.error). Null when there is nothing to show — user-initiated
+ *  aborts are normal, not errors. Pure. */
+export function messageErrorText(err: unknown): string | null {
+  if (!err || typeof err !== 'object') return null;
+  const e = err as { name?: string; data?: { message?: string; providerID?: string; statusCode?: number } };
+  if (e.name === 'MessageAbortedError') return null;
+  const d = e.data ?? {};
+  const msg = typeof d.message === 'string' ? d.message : '';
+  if (e.name === 'ProviderAuthError') {
+    return `Provider sign-in error${d.providerID ? ` (${d.providerID})` : ''}: ${msg || 'reconnect the provider, then send again.'}`;
+  }
+  if (e.name === 'MessageOutputLengthError') {
+    return 'The run hit the output length limit. Ask it to continue with a smaller scope.';
+  }
+  if (typeof d.statusCode === 'number') return `${msg || 'Provider request failed.'} (HTTP ${d.statusCode})`;
+  return msg || null;
 }
 
 export async function refreshActive() {
@@ -388,53 +563,25 @@ export async function refreshActive() {
   // painting another session's messages into the current view.
   if (agentStore.get().activeId !== id) return;
   const messages = Array.isArray(msgs) ? msgs : [];
-  agentStore.set({ messages, permissions: extractPermissions(id, messages), error: null });
+  // Run errors live ON the assistant message (info.error) — rendered inline
+  // by the chat list. The latest assistant message decides, so a new run
+  // clears a previous failure instead of showing it forever.
+  let runError: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as ChatMessage;
+    if (String(m?.info?.role ?? '').toLowerCase() !== 'assistant') continue;
+    runError = messageErrorText(m?.info?.error);
+    break;
+  }
+  // NOTE: permissions are event-sourced (permission.asked/updated), never
+  // message parts — the old part-scanner found nothing and is gone.
+  agentStore.set({ messages, error: runError });
+  if (messages.length !== s.messages.length) bumpProgress();
 }
 
-/** Best-effort permission-request extractor across opencode part schemas. */
-function extractPermissions(sessionID: string, messages: ChatMessage[]): PendingPermission[] {
-  const out: PendingPermission[] = [];
-  const push = (permissionID: string, title: string, detail?: string) => {
-    if (!permissionID || out.some((p) => p.permissionID === permissionID)) return;
-    out.push({ key: `${sessionID}:${permissionID}`, sessionID, permissionID, title, detail });
-  };
-  const scan = (node: unknown, trail: string) => {
-    if (!node || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      for (const v of node) scan(v, trail);
-      return;
-    }
-    const o = node as Record<string, unknown>;
-    const type = typeof o.type === 'string' ? o.type.toLowerCase() : '';
-    // Shape A: dedicated permission part { type:'permission…', permission:{id,…}, state:'pending' }
-    if (type.includes('permission')) {
-      const p = (o.permission ?? o) as Record<string, unknown>;
-      const id = String(p.id ?? o.id ?? o.permissionID ?? '');
-      const state = String(o.state ?? p.state ?? 'pending').toLowerCase();
-      if (id && (state === 'pending' || state === 'waiting' || state === 'asked')) {
-        push(id, String(p.title ?? o.title ?? 'Permission requested'), typeof p.detail === 'string' ? p.detail : typeof o.detail === 'string' ? o.detail : trail);
-      }
-    }
-    // Shape B: tool-call awaiting approval { status:'awaiting_approval'|'needs_approval', callID/id }
-    const status = typeof o.status === 'string' ? o.status.toLowerCase() : '';
-    if (status.includes('approv') || status.includes('permission')) {
-      const id = String(o.callID ?? o.callId ?? o.id ?? '');
-      if (id) push(id, `Approve ${String(o.tool ?? o.name ?? 'tool')}`, trail);
-    }
-    for (const [k, v] of Object.entries(o)) {
-      if (k === 'parent') continue;
-      scan(v, trail);
-    }
-  };
-  for (const m of messages) scan(m.parts ?? [], m.info?.role === 'user' ? 'user' : 'assistant');
-  return out;
-}
-
-export async function respondPermission(p: PendingPermission, allow: boolean, remember = false) {
-  await oc.post(`/session/${p.sessionID}/permissions/${p.permissionID}`, {
-    response: allow ? 'allow' : 'deny',
-    remember,
-  });
+export async function respondPermission(p: PendingPermission, response: PermissionResponse) {
+  await oc.post(`/session/${p.sessionID}/permissions/${p.permissionID}`, { response });
+  removePermission(p.sessionID, p.permissionID);
   await refreshActive();
 }
 
@@ -497,6 +644,29 @@ export function resolveSendModel(
   return sel;
 }
 
+const SUBMIT_TIMEOUT_MS = 30000;
+
+/** Transport-down signals (the request may never have reached the server).
+ *  Anything else (HTTP errors included) means the server answered — and a
+ *  failed prompt_async can still have stored the user message. Pure. */
+export function isTransportDown(message: string): boolean {
+  return /not running yet|failed to fetch|fetch failed|unreachable|load failed|econnrefused|enotfound|econnreset|socket|hang up|timeout/i.test(String(message ?? ''));
+}
+
+/** Locate our just-sent user message (server echoes the client messageID;
+ *  fall back to recent matching text). Pure. */
+export function findUserMessage(messages: ChatMessage[], messageID: string, body: string): boolean {
+  for (const m of messages ?? []) {
+    if (String(m?.info?.role ?? '').toLowerCase() !== 'user') continue;
+    if (m?.info?.id === messageID) return true;
+    if (body && m?.info?.id === undefined) continue;
+    const text = (m?.parts ?? []).filter((p) => p?.type === 'text').map((p) => String(p?.text ?? '')).join('\n');
+    const created = Number(m?.info?.time?.created ?? 0);
+    if (text === body && created > 0 && Date.now() - created < 180000) return true;
+  }
+  return false;
+}
+
 export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): Promise<boolean> {
   const s = agentStore.get();
   const body = text.trim();
@@ -504,7 +674,7 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   if (!body && !files.length) {
     // Everything attached was malformed — say so instead of sending a
     // part-less request the provider would reject as invalid parameters.
-    if (rawFiles.length) agentStore.set({ error: 'Attachment unreadable (only PNG, JPG, GIF, WebP, BMP up to 8 MB). Re-attach and try again.', busy: false, status: 'error' });
+    if (rawFiles.length) agentStore.set({ error: 'Attachment unreadable (only PNG, JPG, GIF, WebP, BMP up to 8 MB). Re-attach and try again.', busy: false, status: 'idle', statusInfo: null });
     return false;
   }
   let id = s.activeId;
@@ -515,36 +685,47 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
       return false; // createSession surfaces its own state; composer restores
     }
   }
-  // One flight per composer (send is disabled while busy): a new send or an
-  // abort supersedes any pending retry loop from an older attempt.
-  const my = ++sendSeq;
-  const sid = agentStore.get().activeId;
-  const isMine = () => my === sendSeq && agentStore.get().activeId === sid;
   const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
-  agentStore.set({ busy: true, status: 'busy', error: null });
-  try {
-    await withSendRetries(
-      () => oc.post(`/session/${id}/message`, {
-        ...(sel.model ? { model: { providerID: sel.model.providerID, modelID: sel.model.modelID } } : {}),
-        ...(sel.agent ? { agent: sel.agent } : {}),
-        parts: [
-          ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
-          ...(body ? [{ type: 'text', text: body }] : []),
-        ],
-      }),
-      {
-        isMine,
-        onAttempt: (n, max) => {
-          if (isMine()) agentStore.set({ status: `retry ${n}/${max}` });
-        },
-      },
-    );
-  } catch (e) {
-    if (!isMine()) return false; // superseded/aborted — the owner handles state
-    agentStore.set({ error: (e as Error).message, busy: false, status: 'error' });
+  // Opencode-style submission: prompt_async returns 204 immediately and the
+  // run streams over events — the composer never wedges on a blocking POST,
+  // and run-level retries happen server-side (surfaced as 'Agent retrying').
+  // The client messageID makes submit retries idempotent; a reconcile check
+  // after any failure guarantees we never stack duplicate user messages.
+  const messageID = `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null });
+  bumpProgress();
+  const payload = {
+    messageID,
+    ...(sel.model ? { model: { providerID: sel.model.providerID, modelID: sel.model.modelID } } : {}),
+    ...(sel.agent ? { agent: sel.agent } : {}),
+    parts: [
+      ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
+      ...(body ? [{ type: 'text', text: body }] : []),
+    ],
+  };
+  let sent = false;
+  let lastErr = '';
+  for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+    try {
+      await oc.post(`/session/${id}/prompt_async`, payload, { timeoutMs: SUBMIT_TIMEOUT_MS });
+      sent = true;
+    } catch (e) {
+      lastErr = (e as Error)?.message ?? String(e);
+      // The server may have stored the message before failing — check
+      // before any retry instead of blindly re-POSTing a duplicate.
+      await refreshActive().catch(() => {});
+      if (findUserMessage(agentStore.get().messages, messageID, body)) {
+        sent = true;
+        break;
+      }
+      if (!isTransportDown(lastErr)) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  if (!sent) {
+    agentStore.set({ error: lastErr || 'The message was not accepted. The agent may be down — retry in a moment.', busy: false, status: 'error', statusInfo: null });
     return false;
   }
-  await refreshActive();
   await loadSessions().catch(() => {});
   return true;
 }
@@ -564,10 +745,11 @@ const SEND_RETRY_FACTOR = 2;
 const SEND_RETRY_JITTER = 0.25;
 const SEND_RETRY_MAX_MS = 30000;
 
-let sendSeq = 0;
-/** Cancel any in-flight submission retry (abort button, superseding send). */
-export function cancelPendingSends() {
-  sendSeq++;
+export async function abortActive() {
+  const s = agentStore.get();
+  if (!s.activeId) return;
+  await oc.post(`/session/${s.activeId}/abort`).catch(() => {});
+  await refreshActive();
 }
 
 const SEND_FATAL = [
@@ -670,14 +852,6 @@ export async function withSendRetries<T>(fn: () => Promise<T>, opts: RetryOption
   const err = (lastErr as Error) ?? new Error('failed');
   (err as { attempts?: number }).attempts = attempts;
   throw err;
-}
-
-export async function abortActive() {
-  const s = agentStore.get();
-  cancelPendingSends(); // stop any backoff waits — the user said stop
-  if (!s.activeId) return;
-  await oc.post(`/session/${s.activeId}/abort`).catch(() => {});
-  await refreshActive();
 }
 
 /** Revert a message (and the file changes that came with it), like opencode. */

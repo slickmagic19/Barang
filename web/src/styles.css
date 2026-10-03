@@ -84,10 +84,9 @@ button { font-family: inherit; }
 .top-split-chev { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid var(--border); padding-left: 7px; padding-right: 7px; }
 .top-split-chev:hover { border-left-color: var(--border); }
 .update-btn { position: relative; }
-.update-dot {
-  position: absolute; top: 5px; right: 7px; width: 7px; height: 7px;
-  border-radius: 50%; background: var(--green); box-shadow: 0 0 0 2px var(--panel);
-}
+.update-bar { height: 5px; border-radius: 3px; background: var(--border); margin: 2px 0 12px; overflow: hidden; }
+.update-fill { height: 100%; border-radius: 3px; background: var(--accent-strong); transition: width .2s; }
+.about-update-row { margin-top: 10px; }
 .update-pop {
   position: fixed; top: 52px; right: 12px; z-index: 55; width: 280px;
   background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 12px;
@@ -703,6 +702,18 @@ kbd {
 }
 .model-mini:hover { border-color: var(--border); color: var(--text); }
 .model-mini option, .model-mini optgroup { background: var(--panel-2); color: var(--text); }
+.effort-mini {
+  flex: 0 0 auto; max-width: 112px;
+  appearance: none; -webkit-appearance: none;
+  background-color: transparent; color: var(--text-faint); border: 1px solid transparent;
+  border-radius: 6px; font-size: 11.5px; padding: 5px 22px 5px 8px; outline: none; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 5px center; background-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: border-color .12s, color .12s;
+}
+.effort-mini:hover { border-color: var(--border); color: var(--text); }
+.effort-mini option { background: var(--panel-2); color: var(--text); }
 .send-row .attach-btn { flex: 0 0 auto; }
 .btn-icon { padding: 6px 10px; }
 .attach-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }

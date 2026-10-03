@@ -95,6 +95,15 @@ const barang = {
     openPath: (path) => invoke('app:open-path', { path }),
     setRestore: (restore) => invoke('app:set-restore', { restore }),
     checkUpdates: () => invoke('app:check-updates'),
+    /** Download the pending update (long invoke) + spawn-into-it. */
+    downloadUpdate: () => invoke('app:download-update'),
+    applyUpdate: (path) => invoke('app:apply-update', { path }),
+    /** Download progress { received, total, path }. Returns unsubscribe. */
+    onUpdateProgress: (cb) => {
+      const h = (_ev, payload) => cb(payload ?? {});
+      ipcRenderer.on('app:update-progress', h);
+      return () => ipcRenderer.removeListener('app:update-progress', h);
+    },
     pickFiles: () => invoke('app:pick-files'),
     saveDialog: (defaultPath) => invoke('app:save-dialog', { defaultPath }),
     openExternal: (url) => invoke('app:open-external', { url }),

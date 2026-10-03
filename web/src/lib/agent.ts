@@ -198,7 +198,7 @@ interface AgentState {
   messages: ChatMessage[];
   todos: AgentTodo[];
   agents: AgentInfo[];
-  providerModels: Array<{ providerID: string; modelID: string; label: string; limit?: number }>;
+  providerModels: Array<{ providerID: string; modelID: string; label: string; limit?: number; variants?: string[] }>;
   model: { providerID: string; modelID: string } | null;
   agent: string;
   busy: boolean;
@@ -528,6 +528,7 @@ export interface BarangSettings {
   modelChosen: boolean; // explicit pick (even Auto) — boot defaults never override
   agent: string | null;
   agentFullAuto: boolean; // auto-approve permission asks (TUI --auto equivalent), default false
+  effort: string | null; // reasoning variant for the active model, null = Default
   freeOnly: boolean;
   showUsage: boolean; // statusbar session cost meter, default true
   showReasoning: boolean; // default false — reasoning rows hidden
@@ -561,6 +562,7 @@ const SETTING_DEFAULTS: BarangSettings = {
   modelChosen: false,
   agent: null,
   agentFullAuto: false,
+  effort: null,
   freeOnly: true,
   showUsage: true,
   showReasoning: false,
@@ -622,6 +624,7 @@ export function readSettings(): BarangSettings {
       modelChosen: p.modelChosen === true || !!(p.model?.providerID && p.model?.modelID),
       agent: typeof p.agent === 'string' ? p.agent : null,
       agentFullAuto: p.agentFullAuto === true,
+      effort: typeof p.effort === 'string' && p.effort ? p.effort.slice(0, 32) : null,
     };
   } catch {
     return { ...SETTING_DEFAULTS };
@@ -669,15 +672,22 @@ export async function loadMeta() {
     const n = Number(lim);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
   };
+  const variantsOf = (m: unknown): string[] | undefined => {
+    if (!m || typeof m !== 'object') return undefined;
+    const v = (m as { variants?: unknown }).variants;
+    if (!v || typeof v !== 'object') return undefined;
+    const keys = (Array.isArray(v) ? v.map(String) : Object.keys(v)).filter(Boolean).slice(0, 12);
+    return keys.length ? keys : undefined;
+  };
   for (const p of raw) {
     const models = p.models;
     if (Array.isArray(models)) {
       for (const m of models) {
         const id = typeof m === 'string' ? m : (m.id ?? '');
-        if (id) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m) });
+        if (id) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m), variants: variantsOf(m) });
       }
     } else if (models && typeof models === 'object') {
-      for (const [id, m] of Object.entries(models)) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m) });
+      for (const [id, m] of Object.entries(models)) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m), variants: variantsOf(m) });
     }
   }
   providerModels.sort((a, b) => a.label.localeCompare(b.label));
@@ -890,6 +900,18 @@ export interface SendSelection {
   agent?: string;
 }
 
+/** Resolve the reasoning variant to send: only when a model is selected
+ *  AND it advertises that variant (a stale pick silently becomes Default).
+ *  Verified live: top-level `variant` lands on the message model. Pure. */
+export function resolveSendVariant(
+  model: { providerID: string; modelID: string } | null,
+  effort: string | null,
+  catalog: Array<{ providerID: string; modelID: string; variants?: string[] }>,
+): string | undefined {
+  if (!model || !effort) return undefined;
+  const entry = (catalog ?? []).find((m) => m.providerID === model.providerID && m.modelID === model.modelID);
+  return entry?.variants?.includes(effort) ? effort : undefined;
+}
 /** Resolve what model/agent override to send. A stored model pick can go
  *  stale (free families rotate, e.g. muse-spark 1.3 -> 1.4) while the pick
  *  persists in settings — sending the dead ID makes the provider reject
@@ -957,6 +979,7 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
     }
   }
   const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
+  const variant = resolveSendVariant(sel.model ?? null, readSettings().effort, s.providerModels);
   // Opencode-style submission: prompt_async returns 204 immediately and the
   // run streams over events — the composer never wedges on a blocking POST,
   // and run-level retries happen server-side (surfaced as 'Agent retrying').
@@ -971,6 +994,7 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
     messageID,
     ...(sel.model ? { model: { providerID: sel.model.providerID, modelID: sel.model.modelID } } : {}),
     ...(sel.agent ? { agent: sel.agent } : {}),
+    ...(variant ? { variant } : {}),
     parts: [
       ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
       ...(body ? [{ type: 'text', text: body }] : []),
@@ -1233,6 +1257,7 @@ export interface SelectableModel {
   modelID: string;
   label: string;
   limit?: number;
+  variants?: string[];
 }
 
 /** Model list honoring the free-only setting (shared by Settings + composer). */

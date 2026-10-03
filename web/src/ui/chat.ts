@@ -5,7 +5,7 @@
 import {
   agentStore, loadSessions, createSession, selectSession, deleteSession,
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
-  refreshActive, readSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
+  refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
   statusTextFor, messageErrorText, todoProgress, classifyAttachFile,
   type ChatMessage, type ChangeEntry,
 } from '../lib/agent';
@@ -379,16 +379,29 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     }
     if (role === 'user' && m.info?.id && activeId) {
       const actions = el('div', { class: 'msg-actions' });
-      const btn = el('button', { class: 'msg-action', title: 'Revert this message and restore files to before it' }) as HTMLButtonElement;
+      const btn = el('button', { class: 'msg-action msg-revert', title: 'Revert this message and restore files to before it' }) as HTMLButtonElement;
       const msgId = String(m.info.id);
       const sessId = activeId;
       btn.append(iconEl('history', 12), el('span', {}, 'Revert'));
+      if (agentStore.get().busy) btn.toggleAttribute('disabled', true);
       btn.onclick = () => {
-        btn.toggleAttribute('disabled', true);
-        void revertMessage(sessId, msgId)
-          .then(() => hooks.toast('Message reverted — files restored. “Unrevert” (clock button above) undoes this.', 'info'))
-          .catch((e) => hooks.toast(`Revert failed: ${(e as Error).message}`, 'error'))
-          .finally(() => btn.toggleAttribute('disabled', false));
+        void (async () => {
+          const ok = await confirmDialog({
+            title: 'Revert this message?',
+            message: 'The message and everything after it will be hidden, and files restored to before it. You can undo with Unrevert (clock button above).',
+            confirmLabel: 'Revert',
+          });
+          if (!ok) return;
+          btn.toggleAttribute('disabled', true);
+          try {
+            await revertMessage(sessId, msgId);
+            hooks.toast('Message reverted — files restored. “Unrevert” (clock button above) undoes this.', 'info');
+          } catch (e) {
+            hooks.toast(`Revert failed: ${(e as Error).message}`, 'error');
+          } finally {
+            btn.toggleAttribute('disabled', false);
+          }
+        })();
       };
       actions.append(btn);
       wrap.append(actions);
@@ -489,9 +502,10 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   const btnAttach = el('button', { class: 'icon-btn attach-btn', title: 'Attach file or image (or paste / drop into the composer)' }) as HTMLButtonElement;
   btnAttach.append(iconEl('clip', 15));
   const modelMini = el('select', { class: 'model-mini', title: 'Model' }) as HTMLSelectElement;
+  const effortMini = el('select', { class: 'effort-mini', title: 'Reasoning effort' }) as HTMLSelectElement;
   const btnSend = el('button', { class: 'btn btn-primary btn-icon', title: 'Send (Enter)' }) as HTMLButtonElement;
   btnSend.append(iconEl('send', 14));
-  sendRow.append(btnAttach, modelMini, btnSend);
+  sendRow.append(btnAttach, modelMini, effortMini, btnSend);
   box.append(input, sendRow);
   composer.append(attachBar, box, suggest);
 
@@ -650,6 +664,37 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     modelMini.title = s.model ? `Model: ${cur}` : 'Model: auto (opencode default)';
   };
   modelMini.onchange = () => applyModelSelection(modelMini.value);
+
+  // Reasoning effort (opencode model variants): options come from the
+  // selected model's advertised variants; Default omits the field.
+  const paintEffortMini = () => {
+    const s = agentStore.get();
+    const entry = s.model
+      ? s.providerModels.find((m) => m.providerID === s.model!.providerID && m.modelID === s.model!.modelID)
+      : undefined;
+    const variants = entry?.variants ?? [];
+    const key = `${s.model ? `${s.model.providerID}/${s.model.modelID}` : 'auto'}|${variants.join(',')}`;
+    if (effortMini.dataset.key !== key) {
+      effortMini.innerHTML = '';
+      effortMini.append(el('option', { value: '' }, 'Default') as HTMLOptionElement);
+      for (const v of variants) {
+        effortMini.append(el('option', { value: v }, v[0].toUpperCase() + v.slice(1)) as HTMLOptionElement);
+      }
+      effortMini.dataset.key = key;
+    }
+    const saved = readSettings().effort;
+    const active = saved && variants.includes(saved) ? saved : '';
+    effortMini.value = active;
+    effortMini.title = variants.length
+      ? `Reasoning effort${active ? `: ${active}` : ' (Default)'} — ${s.model ? `${s.model.providerID}/${s.model.modelID}` : 'auto'}`
+      : 'Reasoning effort: this model advertises no variants';
+  };
+  effortMini.onchange = () => {
+    const settings = readSettings();
+    settings.effort = effortMini.value || null;
+    writeSettings(settings);
+    paintEffortMini();
+  };
 
   const doSend = () => {
     const v = input.value;
@@ -846,6 +891,7 @@ function paintTodos() {
   const paint = () => {
     const s = agentStore.get();
     paintModelMini();
+    paintEffortMini();
     // sessions
     const cur = sessSel.value;
     sessSel.innerHTML = '';

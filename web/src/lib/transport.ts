@@ -69,7 +69,10 @@ export interface BarangBridge {
     openFolder(): Promise<{ root: string }>;
     openPath(path: string): Promise<{ root: string }>;
     setRestore(restore: boolean): Promise<{ restore: boolean }>;
-    checkUpdates(): Promise<{ update: boolean; current: string; version?: string; url?: string; error?: string }>;
+    checkUpdates(): Promise<{ update: boolean; current: string; version?: string; url?: string; error?: string; packaged?: boolean; asset?: { name: string; url: string; size: number } }>;
+    downloadUpdate(): Promise<{ path: string }>;
+    applyUpdate(path: string): Promise<{ ok: boolean }>;
+    onUpdateProgress(cb: (ev: { received: number; total: number; path: string }) => void): () => void;
     pickFiles(): Promise<{ files: Array<{ path: string; name: string; size: number }> }>;
     saveDialog(defaultPath?: string): Promise<{ path: string }>;
     openExternal(url: string): Promise<{ ok: boolean }>;

@@ -17,6 +17,7 @@ import logoUrl from '../assets/barang-logo.png';
 
 export interface SettingsHooks {
   toast(msg: string, kind?: 'info' | 'error'): void;
+  onCheckUpdates?: () => void;
 }
 
 // Build identity stamp (injected by vite.config.ts from git HEAD).
@@ -432,6 +433,11 @@ export function openSettings(hooks: SettingsHooks) {
   aboutHead.append(aboutVer);
   about.append(aboutHead);
   about.append(el('p', { class: 'about-text' }, 'Built by slickmagic19.'));
+  const updateRow = el('div', { class: 'about-update-row' });
+  const btnCheckUpdates = el('button', { class: 'btn btn-sm' }, 'Check for updates') as HTMLButtonElement;
+  btnCheckUpdates.onclick = () => hooks.onCheckUpdates?.();
+  updateRow.append(btnCheckUpdates);
+  about.append(updateRow);
   const credit = el('p', { class: 'about-text' });
   credit.append('Agent engine by ');
   const link = el('a', { href: 'https://opencode.ai', target: '_blank', rel: 'noreferrer' }, 'opencode');

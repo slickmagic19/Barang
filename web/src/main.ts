@@ -4,13 +4,14 @@ import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
 import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
-  questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard } from './lib/agent';
+  questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard, resolveSendVariant } from './lib/agent';
 import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
 import { fileIconEl } from './ui/fileIcons';
 import { openSettings } from './ui/settings';
+import { confirmDialog } from './ui/dialog';
 import logoUrl from './assets/barang-logo.png';
 
 function logoImg(size: number, cls = ''): HTMLImageElement {
@@ -139,18 +140,23 @@ async function boot() {
   btnAgent.append(iconEl('spark', 14), el('span', {}, 'Agent'));
   const btnSettings = el('button', { class: 'top-btn settings-btn', title: 'Settings' }) as HTMLButtonElement;
   btnSettings.append(iconEl('gear', 15));
-  const btnUpdate = el('button', { class: 'top-btn update-btn', title: 'Check for updates' }) as HTMLButtonElement;
+  const btnUpdate = el('button', { class: 'top-btn update-btn hidden', title: 'Check for updates' }) as HTMLButtonElement;
   btnUpdate.append(iconEl('download', 14));
-  const updateDot = el('span', { class: 'update-dot hidden', title: 'Update available' });
-  btnUpdate.append(updateDot);
   topActions.append(openSplit, btnPalette, btnAgent, btnSettings, btnUpdate);
 
-  // Update checker (opencode-style): badge when a newer release exists,
-  // popover with the download link. Silent when offline.
-  let updateInfo: { update: boolean; current: string; version?: string; url?: string } | null = null;
+  // Self-updater: the button exists only while a newer release is known.
+  // Click downloads the portable and restarts into it (dev builds open the
+  // release page instead — nothing to restart into). Silent when offline.
+  type UpdateState = { update: boolean; current: string; version?: string; url?: string; packaged?: boolean; error?: string };
+  let updateInfo: UpdateState | null = null;
+  let updatePhase: 'idle' | 'downloading' | 'ready' | 'error' = 'idle';
+  let updatePath = '';
+  let updateProgress = { received: 0, total: 0 };
+  let updateError = '';
   const updatePop = el('div', { class: 'update-pop hidden' });
   document.body.append(updatePop);
   const closeUpdatePop = () => updatePop.classList.add('hidden');
+  const fmtMB = (n: number) => `${(n / 1048576).toFixed(1)} MB`;
   const openUpdatePop = () => {
     updatePop.innerHTML = '';
     const head = el('div', { class: 'update-pop-head' });
@@ -161,9 +167,30 @@ async function boot() {
     head.append(x);
     updatePop.append(head);
     updatePop.append(el('p', { class: 'update-pop-text' }, `Barang ${updateInfo?.version ?? ''} is available — you have v${updateInfo?.current ?? ''}.`));
-    if (updateInfo?.url) {
-      const link = el('a', { class: 'btn btn-primary btn-sm', href: updateInfo.url, target: '_blank', rel: 'noreferrer' }, 'Download update');
+    if (updateInfo && !updateInfo.packaged && updateInfo.url) {
+      const link = el('a', { class: 'btn btn-primary btn-sm', href: updateInfo.url, target: '_blank', rel: 'noreferrer' }, 'Open release page');
       updatePop.append(link);
+    } else if (updatePhase === 'downloading') {
+      const pct = updateProgress.total > 0 ? Math.floor((updateProgress.received / updateProgress.total) * 100) : 0;
+      updatePop.append(el('p', { class: 'update-pop-text' }, `Downloading… ${pct}%${updateProgress.total > 0 ? ` of ${fmtMB(updateProgress.total)}` : ''}`));
+      const track = el('div', { class: 'update-bar' });
+      const fill = el('div', { class: 'update-fill' });
+      fill.style.width = `${pct}%`;
+      track.append(fill);
+      updatePop.append(track);
+    } else if (updatePhase === 'ready') {
+      const go = el('button', { class: 'btn btn-primary btn-sm' }, `Restart into ${updateInfo?.version ?? ''}`) as HTMLButtonElement;
+      go.onclick = () => void applyUpdateFlow();
+      updatePop.append(go);
+    } else if (updatePhase === 'error') {
+      updatePop.append(el('p', { class: 'update-pop-text' }, `Download failed: ${updateError}`));
+      const retry = el('button', { class: 'btn btn-sm' }, 'Try again') as HTMLButtonElement;
+      retry.onclick = () => void downloadUpdateFlow();
+      updatePop.append(retry);
+    } else {
+      const dl = el('button', { class: 'btn btn-primary btn-sm' }, `Download & restart`) as HTMLButtonElement;
+      dl.onclick = () => void downloadUpdateFlow();
+      updatePop.append(dl);
     }
     updatePop.classList.remove('hidden');
   };
@@ -172,6 +199,45 @@ async function boot() {
       closeUpdatePop();
     }
   });
+  const downloadUpdateFlow = async () => {
+    updatePhase = 'downloading';
+    updateProgress = { received: 0, total: 0 };
+    openUpdatePop();
+    try {
+      const res = await barang().app.downloadUpdate();
+      updatePath = res.path;
+      updatePhase = 'ready';
+    } catch (e) {
+      updatePhase = 'error';
+      updateError = (e as Error).message;
+    }
+    openUpdatePop();
+  };
+  barang().app.onUpdateProgress((ev) => {
+    updateProgress = { received: ev.received ?? 0, total: ev.total ?? 0 };
+    if (updatePhase === 'downloading' && !updatePop.classList.contains('hidden')) openUpdatePop();
+    btnUpdate.title = updateProgress.total > 0
+      ? `Downloading update… ${Math.floor((updateProgress.received / updateProgress.total) * 100)}%`
+      : 'Downloading update…';
+  });
+  const applyUpdateFlow = async () => {
+    const dirty = editorStore.get().tabs.filter((t) => t.dirty).length;
+    const ok = await confirmDialog({
+      title: `Restart into ${updateInfo?.version ?? 'the update'}?`,
+      message: dirty > 0
+        ? `You have ${dirty} unsaved file${dirty > 1 ? 's' : ''} — they will be lost. Save first, or continue anyway.`
+        : `Barang will close and reopen as ${updateInfo?.version ?? 'the new version'}.`,
+      confirmLabel: 'Restart & update',
+      danger: dirty > 0,
+    });
+    if (!ok) return;
+    try {
+      const res = await barang().app.applyUpdate(updatePath);
+      if (!res.ok) throw new Error('restart rejected');
+    } catch (e) {
+      toast(`Update failed: ${(e as Error).message}`, 'error');
+    }
+  };
   const refreshUpdateBadge = async (manual: boolean) => {
     try {
       updateInfo = await barang().app.checkUpdates();
@@ -179,10 +245,16 @@ async function boot() {
       if (manual) toast(`Update check failed: ${(e as Error).message}`, 'error');
       return;
     }
-    updateDot.classList.toggle('hidden', !updateInfo.update);
-    btnUpdate.title = updateInfo.update ? `Update available: ${updateInfo.version}` : 'Check for updates';
+    const show = !!updateInfo.update;
+    btnUpdate.classList.toggle('hidden', !show);
+    btnUpdate.title = updateInfo.update ? `Update available: ${updateInfo.version} — click to install` : 'Check for updates';
+    if (!show) {
+      updatePhase = 'idle';
+      closeUpdatePop();
+    }
     if (manual) {
       if (updateInfo.update) openUpdatePop();
+      else if (updateInfo.error) toast(`Update check failed: ${updateInfo.error}`, 'error');
       else toast(`You're on the latest version (v${updateInfo.current}).`, 'info');
     }
   };
@@ -190,8 +262,9 @@ async function boot() {
     if (updateInfo?.update) openUpdatePop();
     else void refreshUpdateBadge(true);
   };
-  // Boot check in the background — never blocks startup.
+  // Boot check in the background — never blocks startup; re-check hourly.
   void refreshUpdateBadge(false);
+  setInterval(() => void refreshUpdateBadge(false), 3600000);
   const openFolderFlow = async () => {
     try {
       if (!(await closeAllTabs())) return; // user kept unsaved work — abort the switch
@@ -215,7 +288,7 @@ async function boot() {
     }
   };
   btnFolder.onclick = openFolderFlow;
-  btnSettings.onclick = () => openSettings({ toast });
+  btnSettings.onclick = () => openSettings({ toast, onCheckUpdates: () => void refreshUpdateBadge(true) });
   const ocBanner = el('div', { class: 'oc-banner hidden' });
   topbar.append(brand, ocBanner, topActions);
 
@@ -729,6 +802,7 @@ async function boot() {
     packageNameOf,
     candidateImportPaths,
     specResolves,
+    resolveSendVariant,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

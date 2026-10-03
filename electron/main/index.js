@@ -4,6 +4,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from 'electron';
 import path from 'node:path';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -275,7 +276,7 @@ function cmpVersions(a, b) {
 async function checkForUpdates() {
   const now = Date.now();
   if (updateCache && now - updateCache.at < 3600000) return updateCache.info;
-  const info = { update: false, current: app.getVersion() };
+  const info = { update: false, current: app.getVersion(), packaged: app.isPackaged };
   try {
     const res = await fetch('https://api.github.com/slickmagic19/Barang/releases/latest', {
       headers: { 'user-agent': 'barang-updater', accept: 'application/vnd.github+json' },
@@ -286,12 +287,58 @@ async function checkForUpdates() {
     const latest = String(rel.tag_name || '').replace(/^v/, '');
     info.version = String(rel.tag_name || '');
     info.url = rel.html_url || '';
+    const asset = (rel.assets || []).find((a) => /Barang-.*-win\.exe$/i.test(a?.name || ''));
+    if (asset) info.asset = { name: asset.name, url: asset.browser_download_url, size: asset.size || 0 };
     info.update = !!latest && cmpVersions(latest, info.current) > 0;
   } catch (e) {
     info.error = e?.message || String(e);
   }
   updateCache = { at: now, info };
   return info;
+}
+
+let updateDownload = null; // in-flight download promise (single flight)
+
+/** Download the pending update asset to temp with progress events.
+ *  Resolves { ok, path } — reuses a complete earlier download. */
+async function downloadUpdate() {
+  if (updateDownload) return updateDownload;
+  updateDownload = (async () => {
+    const info = await checkForUpdates();
+    if (!info.update || !info.asset?.url) throw new Error('no update available');
+    const dest = path.join(app.getPath('temp'), info.asset.name);
+    const have = await fs.stat(dest).catch(() => null);
+    if (have && info.asset.size && have.size === info.asset.size) return dest;
+    const res = await fetch(info.asset.url, { headers: { 'user-agent': 'barang-updater' } });
+    if (!res.ok || !res.body) throw new Error(`download HTTP ${res.status}`);
+    const total = Number(res.headers.get('content-length') || info.asset.size || 0);
+    const fh = await fs.open(dest, 'w');
+    let received = 0;
+    try {
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await fh.write(value);
+        received += value.length;
+        win?.webContents.send('app:update-progress', { received, total, path: dest });
+      }
+    } finally {
+      await fh.close();
+    }
+    const st = await fs.stat(dest).catch(() => null);
+    if (!st || !st.size) throw new Error('download produced an empty file');
+    if (info.asset.size && st.size !== info.asset.size) {
+      await fs.unlink(dest).catch(() => {});
+      throw new Error(`size mismatch (${st.size}/${info.asset.size}) — try again`);
+    }
+    return dest;
+  })();
+  try {
+    return await updateDownload;
+  } finally {
+    updateDownload = null;
+  }
 }
 
 /** Open a project directly (recent list, welcome screen, palette).
@@ -532,6 +579,29 @@ function registerIpc() {
       return { ok: false, error: e?.message || String(e) };
     }
   });
+  ipcMain.handle('app:download-update', async () => {
+    try {
+      return { ok: true, data: { path: await downloadUpdate() } };
+    } catch (e) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+  ipcMain.handle('app:apply-update', async (_ev, p = {}) => {
+    // Dev builds can't self-update (no packaged exe to replace into).
+    if (!app.isPackaged) return { ok: false, error: 'dev' };
+    const target = String(p.path || '');
+    if (!/Barang-.*-win\.exe$/i.test(path.basename(target))) return { ok: false, error: 'not a Barang update file' };
+    const st = await fs.stat(target).catch(() => null);
+    if (!st || !st.size) return { ok: false, error: 'download missing — fetch it again' };
+    try {
+      const child = spawn(target, [], { detached: true, stdio: 'ignore', windowsHide: true });
+      child.unref?.();
+    } catch (e) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+    setTimeout(() => app.quit(), 800);
+    return { ok: true };
+  });
   ipcMain.handle('app:pick-files', async () => {
     // Composer attachments: images (inline) or any file (@mention).
     const picked = await dialog.showOpenDialog(win ?? undefined, {
@@ -617,6 +687,13 @@ async function runMainSmoke() {
     if (!s.id) throw new Error('no session id');
     await ocCall(`/session/${s.id}`, { method: 'DELETE' });
     return s.id;
+  });
+  await check('update-shape', async () => {
+    const i = await checkForUpdates();
+    if (typeof i.update !== 'boolean' || i.current !== app.getVersion()) {
+      throw new Error('bad update payload');
+    }
+    return `update=${i.update} current=${i.current}`;
   });
   await check('term-echo', async () => {
     // Real PTY roundtrip: spawn the default shell, echo a marker, kill.
@@ -1211,7 +1288,7 @@ async function runUiSmoke() {
   console.log('[smoke-ui] console-errors:', errors.length ? errors.slice(0, 10) : 'none');
   const dom = JSON.parse(probe.startsWith('{') ? probe : '{}');
   let pass = dom.brand === 'Barang' && dom.brandImg === true && dom.hasEditor && dom.hasAgent &&
-    dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true && dom.icons >= 8 && dom.selects === 2 && dom.emoji === 0 &&
+    dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true &&     dom.icons >= 8 && dom.selects === 3 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
     dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true &&
@@ -2137,6 +2214,43 @@ async function runUiSmoke() {
   } catch (e) { costMeter = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] cost-meter: ' + costMeter);
   pass = pass && costMeter === 'ok';
+  // Updater visibility: the topbar button mirrors checkUpdates truthfully.
+  // Effort dropdown: composer select exists with at least Default.
+  let updateVis = 'skip';
+  try {
+    updateVis = await w.webContents.executeJavaScript(`(async () => {
+      const info = await window.barang.app.checkUpdates().catch(() => null);
+      if (!info) return 'no-info';
+      const btn = document.querySelector('.topbar .update-btn');
+      if (!btn) return 'no-btn';
+      for (let i = 0; i < 20; i++) {
+        const shown = !btn.classList.contains('hidden');
+        if (shown === !!info.update) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      const shown = !btn.classList.contains('hidden');
+      if (shown !== !!info.update) return 'mismatch:update=' + info.update;
+      const eff = document.querySelector('.composer .effort-mini');
+      if (!eff) return 'no-effort';
+      if (eff.querySelectorAll('option').length < 1) return 'effort-no-opts';
+      if (![...eff.options].some((o) => o.value === '' && /default/i.test(o.textContent || ''))) return 'effort-no-default';
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.resolveSendVariant !== 'function') return 'no-variant-fn';
+      const bad = [];
+      const cat = [{ providerID: 'opencode', modelID: 'spark', variants: ['low', 'high'] }, { providerID: 'x', modelID: 'y' }];
+      const m = { providerID: 'opencode', modelID: 'spark' };
+      if (u.resolveSendVariant(m, 'low', cat) !== 'low') bad.push('v-hit');
+      if (u.resolveSendVariant(m, 'medium', cat) !== undefined) bad.push('v-miss');
+      if (u.resolveSendVariant(m, null, cat) !== undefined) bad.push('v-null');
+      if (u.resolveSendVariant(null, 'low', cat) !== undefined) bad.push('v-nomodel');
+      if (u.resolveSendVariant({ providerID: 'x', modelID: 'y' }, 'low', cat) !== undefined) bad.push('v-nolist');
+      if (u.resolveSendVariant(m, 'low', []) !== undefined) bad.push('v-emptycat');
+      if (bad.length) return 'unit-FAIL:' + bad.join(';');
+      return 'ok';
+    })()`);
+  } catch (e) { updateVis = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] update-vis: ' + updateVis);
+  pass = pass && updateVis === 'ok';
   // Search-replace E2E (hermetic throwaway dir in the project). The marker
   // is timestamp-unique per run so the harness's own source (which mentions
   // the queries) can never collide with the scanned content.

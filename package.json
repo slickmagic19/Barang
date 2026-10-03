@@ -54,7 +54,7 @@
       "artifactName": "Barang-${version}-win.${ext}"
     },
     "asarUnpack": [
-      "node_modules/@vscode/ripgrep*/**"
+      "**/node_modules/@vscode/ripgrep/node_modules/@vscode/ripgrep-*/bin/*"
     ],
     "directories": {
       "output": "release"

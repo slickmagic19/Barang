@@ -619,8 +619,7 @@ async function runMainSmoke() {
     if (!out.includes('barang-pty-ping-8675309')) throw new Error(`no echo in PTY output (${out.length} chars)`);
     return `echo ok, shell=${term.shellLabel(t.shell)}`;
   });
-  await check('git-status', async () => {
-    // Barang's own folder is a git repo — status must resolve against it.
+  await check('git-status', async () => {    // Barang's own folder is a git repo — status must resolve against it.
     const cwd = root || path.join(app.getPath('userData'), 'scratch');
     const i = await scm.info(cwd);
     if (!i.gitFound) throw new Error('git binary not found');
@@ -635,6 +634,16 @@ async function runMainSmoke() {
     }
     if (!i.branch) throw new Error('no branch resolved');
     return `${i.branch} +${(i.staged ?? []).length} ~${(i.changes ?? []).length}`;
+  });
+  await check('search-speed', async () => {
+    // Project search must complete (ripgrep path when bundled, walker
+    // fallback otherwise) — guards the stdin-hang and exit-1 regressions.
+    const cwd = root || path.join(app.getPath('userData'), 'scratch');
+    const t0 = Date.now();
+    const r = await files.searchReplace(cwd, { q: 'const', dryRun: true });
+    const ms = Date.now() - t0;
+    if (r.totalFiles < 5) throw new Error(`suspiciously few hits (${r.totalFiles})`);
+    return `${r.totalFiles} files in ${ms}ms`;
   });
   await check('git-cycle', async () => {
     // Full lifecycle in a THROWAWAY repo under temp (never user code):

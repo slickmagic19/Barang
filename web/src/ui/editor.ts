@@ -2,7 +2,7 @@
 // shell paints instantly; models are cached per tab and disposed on close.
 import * as monacoLoader from './monaco';
 import { fsApi } from '../lib/api';
-import { readSettings } from '../lib/agent';
+import { agentStore, readSettings } from '../lib/agent';
 import { createStore } from '../lib/util';
 import { confirmDialog } from './dialog';
 
@@ -58,11 +58,17 @@ function hasMonsterLine(content: string): boolean {
   return content.length - prev > 200000;
 }
 
-function langOf(path: string): string {
+/** Monaco language id for a path. tsx/jsx MUST be the *react variants —
+ *  plain typescript/javascript plus default compiler options is exactly the
+ *  "Cannot use JSX unless the '--jsx' flag is provided" (17004) swamp. */
+export function langOf(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? '';
   const map: Record<string, string> = {
-    ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
-    mjs: 'javascript', cjs: 'javascript', json: 'json', html: 'html', css: 'css',
+    ts: 'typescript', mts: 'typescript', cts: 'typescript',
+    tsx: 'typescriptreact',
+    js: 'javascript', mjs: 'javascript', cjs: 'javascript',
+    jsx: 'javascriptreact',
+    json: 'json', html: 'html', css: 'css',
     scss: 'scss', less: 'less', md: 'markdown', py: 'python', rs: 'rust',
     go: 'go', java: 'java', c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp',
     cs: 'csharp', rb: 'ruby', php: 'php', sh: 'shell', yml: 'yaml', yaml: 'yaml',
@@ -71,6 +77,67 @@ function langOf(path: string): string {
   return map[ext] ?? 'plaintext';
 }
 
+/** The TS compiler options applied to Monaco (set in initEditor). Exposed
+ *  for the smoke probe — the app must never run with jsx: None. */
+let appliedTsOptions: Record<string, unknown> | null = null;
+export function getTsDiagOptions(): Record<string, unknown> | null {
+  return appliedTsOptions;
+}
+
+/** TypeScript engine setup: modern JSX + Node-style resolution. Without
+ *  jsx: ReactJSX every .tsx file drowns in 17004s even though vite/esbuild
+ *  compiles it fine. Kept lenient (strict off): without the project's full
+ *  type environment, strict flags working code. */
+function configureTsDiagnostics() {
+  if (!monaco || appliedTsOptions) return;
+  const ts = monaco.languages.typescript;
+  const opts = {
+    ...ts.typescriptDefaults.getCompilerOptions(),
+    jsx: ts.JsxEmit.ReactJSX,
+    allowJs: true,
+    allowNonTsExtensions: true,
+    target: ts.ScriptTarget.ESNext,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeJs,
+    allowSyntheticDefaultImports: true,
+    esModuleInterop: true,
+    skipLibCheck: true,
+  };
+  ts.typescriptDefaults.setCompilerOptions(opts);
+  ts.javascriptDefaults.setCompilerOptions({ ...opts });
+  appliedTsOptions = { ...opts };
+}
+
+// Project type packages surfaced to Monaco (the editor has no node_modules
+// access of its own). @types/react (+ react-dom) is what kills the follow-on
+// "cannot find module / JSX runtime" noise in Vite react-ts projects.
+let typesForRoot = '';
+let typeDisposables: Array<{ dispose(): void }> = [];
+const TYPE_CANDIDATES = [
+  'node_modules/@types/react/index.d.ts',
+  'node_modules/@types/react-dom/index.d.ts',
+];
+
+async function ensureProjectTypes() {
+  if (!monaco) return;
+  const root = agentStore.get().root || '';
+  if (!root || root === typesForRoot) return;
+  typesForRoot = root;
+  for (const d of typeDisposables) {
+    try { d.dispose(); } catch { /* noop */ }
+  }
+  typeDisposables = [];
+  for (const rel of TYPE_CANDIDATES) {
+    try {
+      const f = await fsApi.read(rel);
+      const content = f.content ?? '';
+      if (!content || content.length > 1024 * 1024 || f.binary) continue;
+      typeDisposables.push(
+        monaco.languages.typescript.typescriptDefaults.addExtraLib(content, `file:///node_modules/${rel}`),
+      );
+    } catch { /* package absent — the compiler-option fix still stands */ }
+  }
+}
 /** Apply persisted editor prefs (font size, minimap) to the live editor. */
 export function applyEditorPrefs() {
   if (!editor) return;
@@ -81,6 +148,7 @@ export function applyEditorPrefs() {
 export async function initEditor(container: HTMLElement, h: EditorHooks) {
   hooks = h;
   monaco = await monacoLoader.load();
+  configureTsDiagnostics();
   const prefs = readSettings();
   editorDiv = document.createElement('div');
   editorDiv.className = 'editor-pane';
@@ -165,6 +233,11 @@ export async function openFile(path: string, opts?: { focus?: boolean }) {
       model = monaco.editor.createModel(content, lang, monaco.Uri.parse(`inmemory://barang/${path}`));
       model.onDidChangeContent(() => {});
       models.set(path, model);
+      // First TS model per project: surface the project's own @types/react
+      // so module + JSX-runtime errors resolve like the real tsc would.
+      if (lang === 'typescriptreact' || lang === 'typescript') {
+        void ensureProjectTypes().catch(() => {});
+      }
     } catch (e) {
       hooks?.toast(`Cannot open ${path}: ${(e as Error).message}`, 'error');
       editorStore.set((s) => ({ ...s, tabs: s.tabs.filter((t) => t.path !== path), active: s.active === path ? (s.tabs.find((t) => t.path !== path)?.path ?? null) : s.active }));

@@ -18,7 +18,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
   return img;
 }
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry, deleteFocusedEntry } from './ui/explorer';
-import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor } from './ui/editor';
+import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initTerminal, type TerminalApi } from './ui/terminal';
@@ -717,6 +717,8 @@ async function boot() {
     decideStatus,
     shortenMiddle,
     classifyAttachFile,
+    langOf,
+    getTsDiagOptions,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

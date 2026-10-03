@@ -1730,6 +1730,21 @@ async function runUiSmoke() {
         if (da([], [], []) !== 'no output yet') bad.push('da-empty');
       }
       if (st('stopping', 0) !== 'Agent stopping…') bad.push('status-stopping');
+      // Editor TS setup: tsx/jsx map to *react languages, jsx is never None.
+      if (typeof u.langOf !== 'function' || typeof u.getTsDiagOptions !== 'function') bad.push('no-ts-fns');
+      else {
+        if (u.langOf('src/main.tsx') !== 'typescriptreact') bad.push('lang-tsx');
+        if (u.langOf('src/a.jsx') !== 'javascriptreact') bad.push('lang-jsx');
+        if (u.langOf('src/a.ts') !== 'typescript') bad.push('lang-ts');
+        if (u.langOf('src/a.js') !== 'javascript') bad.push('lang-js');
+        if (u.langOf('x.mts') !== 'typescript') bad.push('lang-mts');
+        const to = u.getTsDiagOptions();
+        if (!to) bad.push('no-ts-opts');
+        else {
+          if (to.jsx === 0 || to.jsx === undefined) bad.push('tsx-no-jsx-flag');
+          if (to.moduleResolution === undefined) bad.push('tsx-no-modres');
+        }
+      }
       // Permission cards: structured kind/target + middle-ellipsis titles.
       const sm = u.shortenMiddle;
       if (typeof sm !== 'function') bad.push('no-shorten-fn');

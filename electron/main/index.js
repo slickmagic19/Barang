@@ -1753,13 +1753,37 @@ async function runUiSmoke() {
           if (to.jsx === 0 || to.jsx === undefined) bad.push('tsx-no-jsx-flag');
           if (to.moduleResolution === undefined) bad.push('tsx-no-modres');
         }
+        // Import map: tsconfig paths + dep-aware 2307 triage.
+        if (typeof u.parseTsconfigPaths !== 'function' || typeof u.matchAlias !== 'function' ||
+          typeof u.packageNameOf !== 'function' || typeof u.candidateImportPaths !== 'function') bad.push('no-importmap-fns');
+        else {
+          const viteCfg = '{\\n// comment\\n"compilerOptions": {\\n"baseUrl": ".",\\n"paths": { "@/*": ["./src/*"], "@utils": ["./src/utils"] },\\n},\\n}';
+          const tp = u.parseTsconfigPaths(viteCfg);
+          if (tp.baseUrl !== '.' || tp.entries.length !== 2) bad.push('tsconfig-parse');
+          if (u.parseTsconfigPaths('not json').entries.length !== 0) bad.push('tsconfig-garbage');
+          const m1 = u.matchAlias('@/components/X', tp.entries);
+          if (!m1 || m1.targets[0] !== './src/*' || m1.rest !== 'components/X') bad.push('alias-star');
+          const m2 = u.matchAlias('@utils', tp.entries);
+          if (!m2 || m2.rest !== '') bad.push('alias-exact');
+          if (u.matchAlias('./rel', tp.entries) !== null || u.matchAlias('@/other', [{ pattern: '@x/*', targets: [] }]) !== null) bad.push('alias-miss');
+          if (u.packageNameOf('@/components/X') !== null) bad.push('pkg-relative-leak');
+          if (u.packageNameOf('react-router-dom/Bogus') !== 'react-router-dom') bad.push('pkg-subpath');
+          if (u.packageNameOf('@scope/pkg/sub') !== '@scope/pkg') bad.push('pkg-scope');
+          if (u.packageNameOf('./rel') !== null) bad.push('pkg-rel');
+          const map = { baseDir: '', aliases: tp.entries, deps: new Set() };
+          const cands = u.candidateImportPaths('src/pages', '@/components/layout/Footer', map);
+          if (!cands.includes('src/components/layout/Footer.tsx')) bad.push('cand-alias:' + cands.slice(0, 3).join(','));
+          const rel = u.candidateImportPaths('src/pages', '../lib/x', map);
+          if (!rel.includes('src/lib/x.ts')) bad.push('cand-rel');
+          if (u.candidateImportPaths('src', 'react', map).length !== 0) bad.push('cand-bare');
+        }
       }
       // Permission cards: structured kind/target + middle-ellipsis titles.
       const sm = u.shortenMiddle;
       if (typeof sm !== 'function') bad.push('no-shorten-fn');
       else {
         if (sm('abcdefghij', 4) !== 'abcdefghij') bad.push('shorten-short');
-        const s40 = sm('C:\\Users\\Achi\\Desktop\\LogoMaker\\lokalistik\\renders-v10\\*', 40);
+        const s40 = sm('C:\\\\Users\\\\Achi\\\\Desktop\\\\LogoMaker\\\\lokalistik\\\\renders-v10\\\\*', 40);
         if (s40.length !== 40 || !s40.includes('…') || !s40.endsWith('*')) bad.push('shorten-mid');
         if (sm('', 40) !== '') bad.push('shorten-empty');
       }

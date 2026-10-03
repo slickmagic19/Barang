@@ -154,6 +154,243 @@ async function ensureProjectTypes() {
     } catch { /* package absent — the compiler-option fix still stands */ }
   }
 }
+
+// --- project import map: teach the marker filter what the real toolchain
+// resolves (tsconfig paths + installed deps), so only genuinely broken
+// imports stay red. Refreshed per project root, alongside the @types load.
+export interface ImportMap {
+  baseDir: string; // root-relative baseUrl (usually '' or '.')
+  aliases: AliasEntry[]; // paths table, e.g. [{ pattern: '@/*', targets: ['./src/*'] }]
+  deps: Set<string>; // installed package names
+}
+
+let importMapForRoot = '';
+let importMap: ImportMap = { baseDir: '', aliases: [], deps: new Set() };
+
+/** Strip JSONC (comments, trailing commas) for tsconfig/package reads. Pure. */
+export function parseJsonc(text: string): unknown {
+  const noComments = String(text ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:"'\\])\/\/.*$/gm, '$1');
+  const noTrailing = noComments.replace(/,\s*([}\]])/g, '$1');
+  return JSON.parse(noTrailing);
+}
+
+/** Pull {baseUrl, entries} from tsconfig text (missing/invalid -> empty). Pure. */
+export interface AliasEntry { pattern: string; targets: string[] }
+export function parseTsconfigPaths(text: string): { baseUrl: string; entries: AliasEntry[] } {
+  try {
+    const j = parseJsonc(text) as { compilerOptions?: { baseUrl?: unknown; paths?: unknown } };
+    const co = j?.compilerOptions ?? {};
+    const baseUrl = typeof co.baseUrl === 'string' ? co.baseUrl : '';
+    const raw = (co.paths && typeof co.paths === 'object' ? co.paths : {}) as Record<string, unknown>;
+    const entries: AliasEntry[] = [];
+    for (const [pattern, v] of Object.entries(raw)) {
+      if (!pattern) continue;
+      const targets = (Array.isArray(v) ? v : [v]).filter((t): t is string => typeof t === 'string' && !!t).slice(0, 5);
+      entries.push({ pattern, targets });
+      if (entries.length >= 20) break;
+    }
+    return { baseUrl, entries };
+  } catch {
+    return { baseUrl: '', entries: [] };
+  }
+}
+
+/** Match a spec against alias entries ('@/*' matches '@/x').
+ *  Returns target heads + remainder. Pure. */
+export function matchAlias(spec: string, entries: AliasEntry[]): { targets: string[]; rest: string } | null {
+  for (const e of entries ?? []) {
+    const p = e.pattern;
+    if (!p) continue;
+    if (p.endsWith('/*')) {
+      const head = p.slice(0, -1); // keep the slash: '@/'
+      if (spec.startsWith(head)) return { targets: e.targets, rest: spec.slice(head.length) };
+    } else if (spec === p) {
+      return { targets: e.targets, rest: '' };
+    }
+  }
+  return null;
+}
+
+/** Bare package name of a non-relative spec ('@scope/pkg/sub' -> '@scope/pkg').
+ *  Alias specs ('@/x') are NOT packages — null. Pure. */
+export function packageNameOf(spec: string): string | null {
+  if (!spec || spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('@/')) return null;
+  const parts = spec.split('/');
+  return spec.startsWith('@') ? (parts.length >= 2 ? `${parts[0]}/${parts[1]}` : spec) : parts[0];
+}
+
+/** File probes (root-relative) for an import: alias expansion first, then
+ *  extension + index variants. Pure — the caller stats them via fs. */
+export function candidateImportPaths(fromDir: string, spec: string, map: ImportMap): string[] {
+  const norm = (p: string) => {
+    const parts = p.replace(/\\/g, '/').split('/');
+    const out: string[] = [];
+    for (const s of parts) {
+      if (!s || s === '.') continue;
+      if (s === '..') {
+        if (out.length && out[out.length - 1] !== '..') out.pop();
+        else out.push(s);
+      } else out.push(s);
+    }
+    return out.join('/');
+  };
+  const base = norm(map.baseDir || '.');
+  const join = (...segs: string[]) => norm(segs.filter(Boolean).join('/').replace(/\/$/, ''));
+  const withVariants = (p: string) => {
+    const out = [p];
+    if (!/\.[a-z0-9]+$/i.test(p.split('/').pop() ?? '')) {
+      out.push(`${p}.ts`, `${p}.tsx`, `${p}.js`, `${p}.jsx`, `${p}.d.ts`, `${p}/index.ts`, `${p}/index.tsx`, `${p}/index.js`);
+    }
+    return out;
+  };
+  const alias = matchAlias(spec, map.aliases);
+  if (alias) {
+    // '@/*' -> ['./src/*']: '@/components/X' -> 'src/components/X'.
+    const out: string[] = [];
+    for (const t of alias.targets.length ? alias.targets : ['./*']) {
+      const head = t.endsWith('/*') ? t.slice(0, -1) : t;
+      out.push(...withVariants(join(base === '.' ? '' : base, head, alias.rest)));
+    }
+    return out.slice(0, 24);
+  }
+  if (spec.startsWith('.')) return withVariants(join(fromDir, spec));
+  if (spec.startsWith('/')) return withVariants(spec.slice(1));
+  return []; // bare package: resolved via deps set, no file probing
+}
+
+async function loadImportMap(): Promise<void> {
+  const root = agentStore.get().root || '';
+  if (!root || root === importMapForRoot) return;
+  importMapForRoot = root;
+  const next: ImportMap = { baseDir: '', aliases: [], deps: new Set() };
+  for (const f of ['tsconfig.app.json', 'tsconfig.json']) {
+    try {
+      const t = await fsApi.read(f);
+      if (t.binary || !t.content) continue;
+      const { baseUrl, entries } = parseTsconfigPaths(t.content);
+      if (!next.aliases.length && entries.length) {
+        next.aliases = entries;
+        next.baseDir = baseUrl;
+        break; // app config wins (Vite layout); root is the fallback
+      }
+    } catch { /* absent */ }
+  }
+  try {
+    const p = await fsApi.read('package.json');
+    if (!p.binary && p.content) {
+      const j = parseJsonc(p.content) as { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown>; peerDependencies?: Record<string, unknown>; optionalDependencies?: Record<string, unknown> };
+      for (const bag of [j.dependencies, j.devDependencies, j.peerDependencies, j.optionalDependencies]) {
+        for (const name of Object.keys(bag ?? {})) next.deps.add(name);
+      }
+    }
+  } catch { /* absent */ }
+  importMap = next;
+}
+
+// --- "Cannot find module" (2307) filter: the worker has no node_modules,
+// so every bare/aliased import the real toolchain resolves would stay red.
+// Re-resolve each one against the project (tsconfig paths + installed deps
+// + relative probing) and hide only the provably-resolvable ones — genuine
+// typos and missing files keep their markers.
+const TS_OWNERS = ['typescript', 'javascript'];
+
+function isMissingModule(m: { code?: unknown; message?: string }): boolean {
+  const code = typeof m.code === 'object' && m.code !== null
+    ? String((m.code as { value?: unknown }).value ?? '')
+    : String(m.code ?? '');
+  return code === '2307' && /cannot find module/i.test(m.message ?? '');
+}
+
+function moduleOf(message: string): string | null {
+  const m = /cannot find module '([^']+)'/i.exec(String(message ?? ''));
+  return m ? m[1] : null;
+}
+
+async function probeExists(rel: string): Promise<boolean> {
+  try {
+    await fsApi.read(rel);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** True when the spec resolves the way the project's toolchain would. */
+async function resolvesLikeToolchain(spec: string, fromDir: string): Promise<boolean> {
+  await loadImportMap();
+  if (!spec) return false;
+  if (spec.startsWith('.') || spec.startsWith('/')) {
+    for (const c of candidateImportPaths(fromDir, spec, importMap)) {
+      if (await probeExists(c)) return true;
+    }
+    return false;
+  }
+  const pkg = packageNameOf(spec);
+  return !!pkg && importMap.deps.has(pkg);
+}
+
+const markerFilter = {
+  timer: null as ReturnType<typeof setTimeout> | null,
+  runId: 0,
+  lastResolved: new Map<string, string>(), // uri+owner -> signature served
+};
+
+function markerSig(markers: Array<{ message?: string; startLineNumber?: number; startColumn?: number; endLineNumber?: number; endColumn?: number; code?: unknown }>): string {
+  return JSON.stringify(markers.map((m) => [
+    m.startLineNumber, m.startColumn, m.endLineNumber, m.endColumn,
+    typeof m.code === 'object' && m.code !== null ? (m.code as { value?: unknown }).value : m.code,
+    m.message,
+  ]));
+}
+
+function scheduleMarkerFilter() {
+  if (!monaco) return;
+  markerFilter.runId++;
+  if (markerFilter.timer) clearTimeout(markerFilter.timer);
+  markerFilter.timer = setTimeout(() => void runMarkerFilter(markerFilter.runId).catch(() => {}), 400);
+}
+
+async function runMarkerFilter(run: number) {
+  if (!monaco) return;
+  await loadImportMap();
+  for (const [path, model] of models) {
+    if (run !== markerFilter.runId || model.isDisposed()) {
+      if (model.isDisposed()) continue;
+      return; // superseded by a newer markers event
+    }
+    const lang = model.getLanguageId();
+    if (lang !== 'typescript' && lang !== 'javascript') continue;
+    const fromDir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+    for (const owner of TS_OWNERS) {
+      if (run !== markerFilter.runId) return;
+      const key = `${model.uri.toString()}|${owner}`;
+      const current = monaco.editor.getModelMarkers({ resource: model.uri, owner });
+      if (markerSig(current) === markerFilter.lastResolved.get(key)) continue;
+      const cands = current.filter(isMissingModule);
+      let kept = current;
+      if (cands.length) {
+        const drop = new Set<typeof cands[number]>();
+        for (const m of cands) {
+          if (run !== markerFilter.runId) return;
+          const spec = moduleOf(m.message ?? '');
+          if (spec && await resolvesLikeToolchain(spec, fromDir)) drop.add(m);
+        }
+        kept = current.filter((m) => !drop.has(m));
+      }
+      monaco.editor.setModelMarkers(model, owner, kept);
+      markerFilter.lastResolved.set(key, markerSig(kept));
+    }
+  }
+}
+
+let markersWired = false;
+function wireMarkerFilter() {
+  if (markersWired || !monaco) return;
+  markersWired = true;
+  monaco.editor.onDidChangeMarkers(() => scheduleMarkerFilter());
+}
 /** Apply persisted editor prefs (font size, minimap) to the live editor. */
 export function applyEditorPrefs() {
   if (!editor) return;
@@ -165,6 +402,7 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
   hooks = h;
   monaco = await monacoLoader.load();
   configureTsDiagnostics();
+  wireMarkerFilter();
   const prefs = readSettings();
   editorDiv = document.createElement('div');
   editorDiv.className = 'editor-pane';

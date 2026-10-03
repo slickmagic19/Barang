@@ -2041,7 +2041,7 @@ async function runUiSmoke() {
   // Cost meter: pure formatting/aggregation + statusbar presence.
   let costMeter = 'skip';
   try {
-    costMeter = await w.webContents.executeJavaScript(`(() => {
+    costMeter = await w.webContents.executeJavaScript(`(async () => {
       const u = window.__barangTestUtils;
       if (!u || !u.fmtTokens || !u.sessionUsage) return 'no-utils';
       const bad = [];
@@ -2058,9 +2058,42 @@ async function runUiSmoke() {
       if (!c || c.tokens !== 200) bad.push('u-cache-excluded');
       const d = u.sessionUsage({ id: 'x', tokens: { input: 10, output: 5 }, cost: 1.5 });
       if (!d || d.label !== '$1.50') bad.push('u-cost-label');
+      const uc = u.usageCard;
+      if (typeof uc !== 'function') bad.push('no-card-fn');
+      else {
+        if (uc(undefined) !== null || uc({ id: 'x' }) !== null) bad.push('card-empty');
+        const k = uc({ id: 'x', title: 'Logo', tokens: { input: 200000, output: 100000, reasoning: 50397, cache: { read: 10, write: 20 } }, cost: 0, time: { updated: Date.now() - 60000 } }, 'opencode/mimo', 42, 1000000);
+        if (!k) bad.push('card-null');
+        else {
+          if (k.tokens !== '350,397') bad.push('card-tokens:' + k.tokens);
+          if (k.cost !== '$0.00') bad.push('card-cost');
+          if (k.pct !== 35) bad.push('card-pct:' + k.pct);
+          if (k.limit !== 1000000) bad.push('card-limit');
+          if (k.input !== '200,000' || k.output !== '100,000' || k.reasoning !== '50,397') bad.push('card-rows');
+          if (k.cache !== '10/20') bad.push('card-cache');
+          if (k.messages !== 42 || k.model !== 'opencode/mimo' || k.title !== 'Logo') bad.push('card-meta');
+          if (k.updated !== '1m ago') bad.push('card-updated:' + k.updated);
+        }
+        const kn = uc({ id: 'x', tokens: { input: 5, output: 5 }, cost: 0 }, 'auto model', 1, null);
+        if (!kn || kn.pct !== null) bad.push('card-nolimit');
+      }
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       const meter = document.querySelector('.status-usage');
       if (!meter) return 'no-meter-el';
+      // Hover card: element exists; shows only when the meter has data.
+      meter.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 150));
+      const card = document.querySelector('.usage-card');
+      if (!card) return 'no-card-el';
+      const meterHidden = meter.classList.contains('hidden');
+      const cardVisible = card.classList.contains('visible');
+      if (!meterHidden && !cardVisible) return 'card-not-shown';
+      if (meterHidden && cardVisible) return 'card-shown-empty';
+      if (cardVisible) {
+        const txt = card.textContent || '';
+        if (!/Cost/.test(txt) || !/Usage/.test(txt) || !/Tokens/.test(txt)) return 'card-rows-missing';
+      }
+      meter.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
       return 'ok';
     })()`);
   } catch (e) { costMeter = 'error: ' + (e.message || e); }

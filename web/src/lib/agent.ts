@@ -3,7 +3,7 @@
 // bridge injects server auth; model auth lives in the user's opencode CLI.
 import { oc } from './api';
 import { barang } from './transport';
-import { createStore, debounce } from './util';
+import { createStore, debounce, timeAgo } from './util';
 
 export interface AgentInfo {
   name: string;
@@ -70,6 +70,55 @@ export function sessionUsage(s?: SessionInfo | null): SessionUsage | null {
   const title = `Session usage — in ${f(input)} · out ${f(output)} · reasoning ${f(reasoning)} · cache ${f(cacheRead)}/${f(cacheWrite)} · $${cost.toFixed(4)}`;
   return { tokens, cost, label, title };
 }
+
+export interface UsageCard {
+  title: string; // session title
+  model: string; // provider/model label
+  cost: string; // $0.00
+  pct: number | null; // context used 0..100, null when limit unknown
+  limit: number | null; // context window tokens
+  tokens: string; // formatted total, e.g. 350,397
+  input: string;
+  output: string;
+  reasoning: string;
+  cache: string; // R/W
+  messages: number;
+  updated: string; // human age or '—'
+}
+
+/** Structured data for the usage hover card (Cost / Usage / Tokens +
+ *  breakdown). Null = nothing to show. Pure. */
+export function usageCard(
+  s?: SessionInfo | null,
+  modelLabel = 'auto model',
+  messageCount = 0,
+  contextLimit: number | null = null,
+): UsageCard | null {
+  const base = sessionUsage(s);
+  if (!base) return null;
+  const t = (s as SessionInfo)?.tokens ?? {};
+  const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const f = (n: unknown) => num(n).toLocaleString('en-US');
+  const limit = typeof contextLimit === 'number' && contextLimit > 0 ? Math.floor(contextLimit) : null;
+  const pct = limit ? Math.min(100, Math.max(0, (base.tokens / limit) * 100)) : null;
+  const upd = Number((s as SessionInfo)?.time?.updated ?? 0);
+  return {
+    title: String((s as SessionInfo)?.title || 'Untitled session'),
+    model: modelLabel,
+    cost: `$${base.cost.toFixed(2)}`,
+    pct: pct === null ? null : Math.round(pct * 10) / 10,
+    limit,
+    tokens: f(base.tokens),
+    input: f(t.input),
+    output: f(t.output),
+    reasoning: f(t.reasoning),
+    cache: `${f(t.cache?.read)}/${f(t.cache?.write)}`,
+    messages: Math.max(0, Math.floor(messageCount)),
+    updated: upd > 0 ? timeAgo(upd) : '—',
+  };
+}
+
+
 export interface MsgPart {
   type?: string;
   text?: string;
@@ -149,7 +198,7 @@ interface AgentState {
   messages: ChatMessage[];
   todos: AgentTodo[];
   agents: AgentInfo[];
-  providerModels: Array<{ providerID: string; modelID: string; label: string }>;
+  providerModels: Array<{ providerID: string; modelID: string; label: string; limit?: number }>;
   model: { providerID: string; modelID: string } | null;
   agent: string;
   busy: boolean;
@@ -614,15 +663,21 @@ export async function loadMeta() {
     (providersRes as { providers?: ProviderInfo[] }).providers ??
     (providersRes as { all?: ProviderInfo[] }).all ?? [];
   const providerModels: AgentState['providerModels'] = [];
+  const limitOf = (m: unknown): number | undefined => {
+    if (!m || typeof m !== 'object') return undefined;
+    const lim = (m as { limit?: { context?: unknown } }).limit?.context;
+    const n = Number(lim);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+  };
   for (const p of raw) {
     const models = p.models;
     if (Array.isArray(models)) {
       for (const m of models) {
         const id = typeof m === 'string' ? m : (m.id ?? '');
-        if (id) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}` });
+        if (id) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m) });
       }
     } else if (models && typeof models === 'object') {
-      for (const id of Object.keys(models)) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}` });
+      for (const [id, m] of Object.entries(models)) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m) });
     }
   }
   providerModels.sort((a, b) => a.label.localeCompare(b.label));
@@ -1177,6 +1232,7 @@ export interface SelectableModel {
   providerID: string;
   modelID: string;
   label: string;
+  limit?: number;
 }
 
 /** Model list honoring the free-only setting (shared by Settings + composer). */

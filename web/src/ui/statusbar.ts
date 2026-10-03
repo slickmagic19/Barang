@@ -1,5 +1,5 @@
 // Bottom status bar: project, opencode link state, session state, cursor.
-import { agentStore, readSettings, sessionUsage } from '../lib/agent';
+import { agentStore, readSettings, sessionUsage, usageCard } from '../lib/agent';
 import { editorStore } from './editor';
 import type { GitRepoInfo } from './scm';
 import { el } from '../lib/util';
@@ -36,9 +36,70 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   termEl.onclick = () => hooks.onToggleTerminal?.();
   const sessEl = el('span', { class: 'status-item' });
   const modelEl = el('span', { class: 'status-item' });
-  const usageEl = el('span', { class: 'status-item status-usage hidden', title: 'Session usage' });
+  const usageEl = el('span', { class: 'status-item status-usage hidden' });
   const usageLabel = el('span', {}, '');
   usageEl.append(iconEl('spark', 12), usageLabel);
+  // Rich hover card (Cost / Usage / Tokens + breakdown). Pointer-events
+  // none so moving the mouse never flickers it; rebuilt on every hover.
+  const usageCardEl = el('div', { class: 'usage-card' });
+  document.body.append(usageCardEl);
+  const hideUsageCard = () => usageCardEl.classList.remove('visible');
+  usageEl.addEventListener('mouseenter', () => {
+    const st = agentStore.get();
+    const sess = st.sessions.find((s) => s.id === st.activeId) ?? null;
+    const modelLabel = st.model ? `${st.model.providerID}/${st.model.modelID}` : 'auto model';
+    const limit = st.model
+      ? (st.providerModels.find((m) => m.providerID === st.model!.providerID && m.modelID === st.model!.modelID)?.limit ?? null)
+      : null;
+    const card = usageCard(sess, modelLabel, st.messages.length, limit);
+    if (!card) {
+      hideUsageCard();
+      return;
+    }
+    usageCardEl.innerHTML = '';
+    const head = el('div', { class: 'usage-head' });
+    head.append(el('div', { class: 'usage-title' }, card.title), el('div', { class: 'usage-model' }, card.model));
+    usageCardEl.append(head);
+    const hero = (label: string, value: string, bar?: number | null) => {
+      const row = el('div', { class: 'usage-row usage-hero' });
+      row.append(el('span', { class: 'usage-label' }, label), el('span', { class: 'usage-value' }, value));
+      if (typeof bar === 'number') {
+        const track = el('div', { class: 'usage-bar' });
+        const fill = el('div', { class: 'usage-fill' });
+        fill.style.width = `${Math.min(100, Math.max(0, bar))}%`;
+        track.append(fill);
+        const wrap = el('div', {});
+        wrap.append(row, track);
+        return wrap;
+      }
+      return row;
+    };
+    usageCardEl.append(hero('Cost', card.cost));
+    usageCardEl.append(hero('Usage', card.pct === null ? '—' : `${card.pct}%`, card.pct));
+    usageCardEl.append(hero('Tokens', card.tokens));
+    const sep = el('div', { class: 'usage-sep' });
+    usageCardEl.append(sep);
+    const kv = (label: string, value: string) => {
+      const row = el('div', { class: 'usage-row' });
+      row.append(el('span', { class: 'usage-label' }, label), el('span', { class: 'usage-value usage-dim' }, value));
+      return row;
+    };
+    usageCardEl.append(kv('Input', card.input));
+    usageCardEl.append(kv('Output', card.output));
+    usageCardEl.append(kv('Reasoning', card.reasoning));
+    usageCardEl.append(kv('Cache R/W', card.cache));
+    usageCardEl.append(kv('Messages', String(card.messages)));
+    usageCardEl.append(kv('Context limit', card.limit === null ? 'unknown' : card.limit.toLocaleString('en-US')));
+    usageCardEl.append(kv('Updated', card.updated));
+    // Anchor above the meter, right-aligned to it; clamp to viewport.
+    const r = usageEl.getBoundingClientRect();
+    usageCardEl.classList.add('visible');
+    const cw = usageCardEl.offsetWidth;
+    const ch = usageCardEl.offsetHeight;
+    usageCardEl.style.left = `${Math.max(8, Math.min(window.innerWidth - cw - 8, r.right - cw))}px`;
+    usageCardEl.style.top = `${Math.max(8, r.top - ch - 10)}px`;
+  });
+  usageEl.addEventListener('mouseleave', hideUsageCard);
   const dirtyEl = el('span', { class: 'status-item' });
   const posEl = el('span', { class: 'status-item' }, 'Ln 1, Col 1');
   left.append(rootEl, gitEl, ocEl);
@@ -58,7 +119,10 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
     usageEl.classList.toggle('hidden', !use);
     if (use) {
       usageLabel.textContent = use.label;
-      usageEl.title = use.title;
+      // No native title: the custom hover card owns the tooltip.
+      usageEl.removeAttribute('title');
+    } else {
+      hideUsageCard();
     }
     // Git branch (VSCode left-side indicator): hidden outside repos.
     gitEl.classList.toggle('hidden', !git);

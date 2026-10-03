@@ -4,7 +4,7 @@ import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
 import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
-  questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile } from './lib/agent';
+  questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard } from './lib/agent';
 import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -717,6 +717,7 @@ async function boot() {
     decideStatus,
     shortenMiddle,
     classifyAttachFile,
+    usageCard,
     langOf,
     getTsDiagOptions,
     registeredLanguageIds,

@@ -193,9 +193,15 @@ function ensureStartMenuShortcut() {
         try {
           const shipped = path.join(process.resourcesPath, 'icon.ico');
           const vault = path.join(app.getPath('userData'), 'barang-icon.ico');
-          const need = !(await fs.stat(vault).catch(() => null));
-          if (need) await fs.copyFile(shipped, vault);
-          iconPath = vault;
+          // Always refresh: a rebrand (new shipped icon) must replace the
+          // vaulted copy, not linger behind a copy-once shortcut icon.
+          await fs.copyFile(shipped, vault).catch(() => null);
+          try {
+            await fs.stat(vault);
+            iconPath = vault;
+          } catch {
+            /* fall back to the exe's embedded icon */
+          }
         } catch {
           /* fall back to the exe's embedded icon */
         }

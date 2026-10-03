@@ -342,7 +342,7 @@ export function shouldAutoCreateSession(root: string, opencodeOk: boolean, sessi
 }
 
 export async function createSession(title?: string): Promise<string> {
-  const created = await oc.post<SessionInfo>('/session', title ? { title } : {});
+  const { value: created } = await withSendRetries(() => oc.post<SessionInfo>('/session', title ? { title } : {}));
   await loadSessions();
   agentStore.set({ activeId: created.id, messages: [], permissions: [], busy: false, error: null });
   await refreshActive();
@@ -444,32 +444,237 @@ export interface OutgoingFile {
   url: string; // data: URL for images
 }
 
-export async function sendMessage(text: string, files: OutgoingFile[] = []) {
+const SENDABLE_IMAGE = /^image\/(png|jpe?g|gif|webp|bmp)$/i;
+const SENDABLE_DATAURL = /^data:image\/(png|jpe?g|gif|webp|bmp);base64,[A-Za-z0-9+/]+=*$/;
+const MAX_SEND_FILES = 8;
+const MAX_SEND_FILE_CHARS = 12_000_000; // ~8MB attach cap (base64 inflates 4/3)
+
+/** Drop malformed attachments before POST. A part with an empty/unknown
+ *  mime or a non-data URL sails through our server proxy and dies at the
+ *  model provider as "request contains invalid parameters" — a fatal,
+ *  non-retryable 400. Pure. */
+export function sanitizeOutgoingFiles(files: OutgoingFile[]): OutgoingFile[] {
+  const out: OutgoingFile[] = [];
+  for (const f of files ?? []) {
+    if (out.length >= MAX_SEND_FILES) break;
+    const mime = String(f?.mime ?? '').toLowerCase();
+    const filename = String(f?.filename ?? '').slice(0, 200);
+    const url = String(f?.url ?? '');
+    if (!SENDABLE_IMAGE.test(mime) || !filename) continue;
+    if (url.length > MAX_SEND_FILE_CHARS || !SENDABLE_DATAURL.test(url)) continue;
+    out.push({ mime, filename, url });
+  }
+  return out;
+}
+
+export interface SendSelection {
+  model?: { providerID: string; modelID: string };
+  agent?: string;
+}
+
+/** Resolve what model/agent override to send. A stored model pick can go
+ *  stale (free families rotate, e.g. muse-spark 1.3 -> 1.4) while the pick
+ *  persists in settings — sending the dead ID makes the provider reject
+ *  the request as invalid parameters. Falls back to the free chain, then
+ *  auto. An unknown agent name is dropped the same way (server default).
+ *  Empty catalog (meta not loaded yet) passes the request through. Pure. */
+export function resolveSendModel(
+  model: { providerID: string; modelID: string } | null,
+  catalog: Array<{ providerID: string; modelID: string }>,
+  agentNames: string[],
+  agent: string,
+): SendSelection {
+  const sel: SendSelection = {};
+  if (!catalog.length) {
+    if (model) sel.model = model;
+  } else if (model && catalog.some((m) => m.providerID === model.providerID && m.modelID === model.modelID)) {
+    sel.model = model;
+  } else {
+    const d = pickDefaultModel(catalog);
+    if (d) sel.model = d; // else auto: omit, opencode decides
+  }
+  if (agent && (agentNames.length === 0 || agentNames.includes(agent))) sel.agent = agent;
+  return sel;
+}
+
+export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): Promise<boolean> {
   const s = agentStore.get();
   const body = text.trim();
-  if (!body && !files.length) return;
+  const files = sanitizeOutgoingFiles(rawFiles);
+  if (!body && !files.length) {
+    // Everything attached was malformed — say so instead of sending a
+    // part-less request the provider would reject as invalid parameters.
+    if (rawFiles.length) agentStore.set({ error: 'Attachment unreadable (only PNG, JPG, GIF, WebP, BMP up to 8 MB). Re-attach and try again.', busy: false, status: 'error' });
+    return false;
+  }
   let id = s.activeId;
-  if (!id) id = await createSession(body.slice(0, 48) || 'Image');
+  if (!id) {
+    try {
+      id = await createSession(body.slice(0, 48) || 'Image');
+    } catch {
+      return false; // createSession surfaces its own state; composer restores
+    }
+  }
+  // One flight per composer (send is disabled while busy): a new send or an
+  // abort supersedes any pending retry loop from an older attempt.
+  const my = ++sendSeq;
+  const sid = agentStore.get().activeId;
+  const isMine = () => my === sendSeq && agentStore.get().activeId === sid;
+  const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
   agentStore.set({ busy: true, status: 'busy', error: null });
   try {
-    await oc.post(`/session/${id}/message`, {
-      ...(s.model ? { model: { providerID: s.model.providerID, modelID: s.model.modelID } } : {}),
-      ...(s.agent ? { agent: s.agent } : {}),
-      parts: [
-        ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
-        ...(body ? [{ type: 'text', text: body }] : []),
-      ],
-    });
+    await withSendRetries(
+      () => oc.post(`/session/${id}/message`, {
+        ...(sel.model ? { model: { providerID: sel.model.providerID, modelID: sel.model.modelID } } : {}),
+        ...(sel.agent ? { agent: sel.agent } : {}),
+        parts: [
+          ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
+          ...(body ? [{ type: 'text', text: body }] : []),
+        ],
+      }),
+      {
+        isMine,
+        onAttempt: (n, max) => {
+          if (isMine()) agentStore.set({ status: `retry ${n}/${max}` });
+        },
+      },
+    );
   } catch (e) {
+    if (!isMine()) return false; // superseded/aborted — the owner handles state
     agentStore.set({ error: (e as Error).message, busy: false, status: 'error' });
-    return;
+    return false;
   }
   await refreshActive();
   await loadSessions().catch(() => {});
+  return true;
+}
+
+/**
+ * Upstream-style submission retry (mirrors opencode session/retry.ts:
+ * 5 retries, 2s initial, x2 backoff, 0.25 jitter, 30s cap). Only
+ * transient failures retry (5xx/429/network/overload); fatal ones —
+ * including provider 400s like "invalid parameters" — fail fast, because
+ * each re-POST would append another duplicate user message. The
+ * isMine gate lets abort (or a newer send) cancel pending waits instead
+ * of lingering, and suppresses stale error states.
+ */
+export const SEND_MAX_RETRIES = 5;
+const SEND_RETRY_INITIAL_MS = 2000;
+const SEND_RETRY_FACTOR = 2;
+const SEND_RETRY_JITTER = 0.25;
+const SEND_RETRY_MAX_MS = 30000;
+
+let sendSeq = 0;
+/** Cancel any in-flight submission retry (abort button, superseding send). */
+export function cancelPendingSends() {
+  sendSeq++;
+}
+
+const SEND_FATAL = [
+  /\b(400|401|402|403|404|405|409|410|412|413|418|422|428)\b/, // deterministic client errors — resending changes nothing
+  /invalid (parameter|request|argument|model|key|token)|validation (error|failed)|bad request|malformed|not (a )?valid|unsupported|not (supported|allowed)/i,
+  /unauthorized|forbidden|access denied|invalid (api[-_ ]?key|token|auth)|authentication (failed|error)|permission denied/i,
+  /not found|no such|unknown (model|agent|provider|session|file)|does not exist|model .* (retired|removed|deprecated|not available)/i,
+  /insufficient (quota|funds|credits)|quota exceeded|billing|payment required|account (suspended|disabled)/i,
+  /context (too long|length|exceeded)|too many tokens|token limit|message too (long|large)|maximum context/i,
+  /\babort\w*|\bcancel\w*|superseded/i,
+];
+
+const SEND_RETRYABLE = [
+  /\b(408|425|429|500|502|503|504|524)\b/,
+  /rate limit|rate-limit|rate_limit|too many requests|overloaded|service unavailable|service_unavailable|internal error|internal_error|internal server error|server error|bad gateway|gateway timeout|temporar\w* unavailable/i,
+  /terminated|fetch failed|failed to fetch|network[-_\s]?error|connection error|connection refused|connection lost|connection reset|socket|hang up|reset before headers|getaddrinfo|enotfound|econnrefused|econnreset|etimedout/i,
+  /timeout|timed out|time out|deadline exceeded/i,
+  /try (?:your request )?again|please retry|resource exhausted/i,
+  /not running yet|load failed/i, // our transport: server restarting / unreachable
+];
+
+/** True when a submission error is worth another attempt. Pure.
+ *  Fatal (deterministic: 4xx, invalid params, auth, unknown model, quota
+ *  exhaustion, context overflow) is checked FIRST — retrying those only
+ *  stacks duplicate user messages, one per attempt. */
+export function isRetryableSendError(message: string): boolean {
+  const msg = String(message ?? '');
+  if (!msg.trim()) return false;
+  if (SEND_FATAL.some((re) => re.test(msg))) return false;
+  return SEND_RETRYABLE.some((re) => re.test(msg));
+}
+
+/** Backoff for retry N (1-based): initial * 2^(N-1) ± 25%, capped. Pure. */
+export function retryDelayMs(attempt: number, initialMs = SEND_RETRY_INITIAL_MS, maxMs = SEND_RETRY_MAX_MS): number {
+  const exp = Math.min(initialMs * 2 ** Math.max(0, attempt - 1), maxMs);
+  const jitter = exp * SEND_RETRY_JITTER * (Math.random() * 2 - 1);
+  return Math.max(0, Math.round(exp + jitter));
+}
+
+export interface RetryOptions {
+  maxRetries?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  isMine?: () => boolean;
+  sleep?: (ms: number) => Promise<void>;
+  onAttempt?: (retry: number, maxRetries: number) => void;
+}
+
+/** Thrown (with .attempts + .code) when a newer send/abort supersedes. */
+export function isSupersededError(e: unknown): boolean {
+  return !!e && typeof e === 'object' && (e as { code?: string }).code === 'SUPERSEDED';
+}
+
+/**
+ * Run fn with upstream-style retries. Resolves { value, attempts }; throws
+ * the last error (with .attempts) when retries run out, or a SUPERSEDED
+ * error when isMine() flips mid-flight.
+ */
+export async function withSendRetries<T>(fn: () => Promise<T>, opts: RetryOptions = {}): Promise<{ value: T; attempts: number }> {
+  const maxRetries = opts.maxRetries ?? SEND_MAX_RETRIES;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const superseded = (attempts: number): Error => {
+    const e = new Error('superseded') as Error & { code?: string; attempts?: number };
+    e.code = 'SUPERSEDED';
+    e.attempts = attempts;
+    return e;
+  };
+  let attempts = 0;
+  let lastErr: unknown = null;
+  for (let retry = 0; ; retry++) {
+    if (opts.isMine && !opts.isMine()) throw superseded(attempts);
+    attempts++;
+    try {
+      const value = await fn();
+      return { value, attempts };
+    } catch (e) {
+      lastErr = e;
+      if (isSupersededError(e)) throw e;
+      if (!isRetryableSendError((e as Error)?.message ?? String(e))) {
+        (e as { attempts?: number }).attempts = attempts;
+        throw e;
+      }
+      if (retry >= maxRetries) break;
+      opts.onAttempt?.(retry + 1, maxRetries);
+      const d = retryDelayMs(retry + 1, opts.initialDelayMs, opts.maxDelayMs);
+      const end = Date.now() + d;
+      let aborted = false;
+      for (;;) {
+        if (opts.isMine && !opts.isMine()) {
+          aborted = true;
+          break;
+        }
+        const left = end - Date.now();
+        if (left <= 0) break;
+        await sleep(Math.min(500, left));
+      }
+      if (aborted) throw superseded(attempts);
+    }
+  }
+  const err = (lastErr as Error) ?? new Error('failed');
+  (err as { attempts?: number }).attempts = attempts;
+  throw err;
 }
 
 export async function abortActive() {
   const s = agentStore.get();
+  cancelPendingSends(); // stop any backoff waits — the user said stop
   if (!s.activeId) return;
   await oc.post(`/session/${s.activeId}/abort`).catch(() => {});
   await refreshActive();

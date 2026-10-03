@@ -1546,6 +1546,47 @@ async function runUiSmoke() {
         { providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-flash' },
         { providerID: 'openrouter', modelID: 'meta/muse-spark-1.3' },
       ])) !== 'openrouter/meta/muse-spark-1.3') bad.push('model-or-spark');
+      // Send retry classification: fatal first (no duplicate re-POSTs).
+      const t = u.isRetryableSendError;
+      if (typeof t !== 'function') bad.push('no-retry-fn');
+      else {
+        if (t('Error from provider (Console): The request contains invalid parameters. Check the request body.') !== false) bad.push('retry-invalidparams');
+        if (t('request failed with status 500: internal error') !== true) bad.push('retry-500');
+        if (t('429 too many requests, rate limit exceeded') !== true) bad.push('retry-429');
+        if (t('service unavailable, overloaded, try again later') !== true) bad.push('retry-overload');
+        if (t('fetch failed: connection refused') !== true) bad.push('retry-conn');
+        if (t('401 unauthorized: invalid api key') !== false) bad.push('retry-auth');
+        if (t('unknown model opencode/muse-spark-1.2-old') !== false) bad.push('retry-model');
+        if (t('') !== false) bad.push('retry-empty');
+        let n = 0;
+        const r = await u.withSendRetries(async () => { n++; if (n < 3) throw new Error('500 internal error'); return 'ok'; }, { sleep: () => Promise.resolve(), initialDelayMs: 1, maxDelayMs: 1 });
+        if (r.value !== 'ok' || r.attempts !== 3) bad.push('retry-loop');
+        let m = 0;
+        try {
+          await u.withSendRetries(async () => { m++; throw new Error('invalid parameters in request body'); }, { sleep: () => Promise.resolve() });
+          bad.push('retry-fatal-throws');
+        } catch (e) { if (m !== 1 || e.attempts !== 1) bad.push('retry-fatal-once'); }
+      }
+      // Attachment sanitizer: malformed parts must never reach the provider.
+      const san = u.sanitizeOutgoingFiles;
+      if (typeof san !== 'function') bad.push('no-san-fn');
+      else {
+        const good = { mime: 'image/png', filename: 'a.png', url: 'data:image/png;base64,iVBORw0KGgo=' };
+        if (san([good]).length !== 1) bad.push('san-keep');
+        if (san([{ mime: '', filename: 'a.png', url: 'data:;base64,xx' }]).length !== 0) bad.push('san-mime');
+        if (san([{ mime: 'image/png', filename: '', url: good.url }]).length !== 0) bad.push('san-name');
+        if (san([{ mime: 'image/png', filename: 'a.png', url: 'not-a-data-url' }]).length !== 0) bad.push('san-url');
+      }
+      // Stale model/agent overrides resolve before POST (no dead IDs sent).
+      const rm = u.resolveSendModel;
+      if (typeof rm !== 'function') bad.push('no-rm-fn');
+      else {
+        const cat = [{ providerID: 'opencode', modelID: 'mimo-v2.6-flash-free' }];
+        if ((rm({ providerID: 'opencode', modelID: 'muse-spark-1.3-old' }, cat, ['build'], 'build').model || {}).modelID !== 'mimo-v2.6-flash-free') bad.push('sendmodel-fallback');
+        if (rm(null, cat, ['build'], 'build').agent !== 'build') bad.push('sendmodel-agent');
+        if (rm(null, cat, ['build'], 'ghost').agent !== undefined) bad.push('sendmodel-ghost-agent');
+        if (rm({ providerID: 'opencode', modelID: 'mimo-v2.6-flash-free' }, [], [], 'build').agent !== 'build') bad.push('sendmodel-passthru');
+      }
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       // Self-heal leftovers from an interrupted run (a stale 2000-file dir
       // would blow the cap budget and hide this probe's own files).

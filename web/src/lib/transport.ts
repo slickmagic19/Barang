@@ -16,13 +16,16 @@ export interface FsBridge {
     engine: string;
     truncated?: boolean;
   }>;
-  searchReplace(args: { q: string; replacement?: string; regex?: boolean; caseSensitive?: boolean; path?: string; dryRun?: boolean }): Promise<{
+  searchReplace(args: { q: string; replacement?: string; regex?: boolean; wholeWord?: boolean; caseSensitive?: boolean; path?: string; include?: string[]; exclude?: string[]; onlyFiles?: string[]; dryRun?: boolean }): Promise<{
     files: Array<{ path: string; matches: number }>;
     totalMatches: number;
     totalFiles: number;
     scannedFiles: number;
     skipped: Array<{ path: string; reason: string }>;
     skippedCount: number;
+    details: Array<{ path: string; line: number; text: string; cols: number[] }>; // cols = [start, len] pairs
+    detailTruncated: boolean;
+    candidateTruncated: boolean;
   }>;
 }
 

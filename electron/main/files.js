@@ -132,19 +132,53 @@ export async function find(root, { query = '', limit = 50 } = {}) {
 let rgAvailable = null;
 function hasRg() {
   if (rgAvailable !== null) return Promise.resolve(rgAvailable);
+  return rgBin().then((b) => {
+    rgAvailable = !!b;
+    return rgAvailable;
+  });
+}
+
+/**
+ * ripgrep resolution: the bundled binary first (works on fresh PCs with no
+ * system rg), then the system one. The bundled path is rewritten out of the
+ * asar (packed binaries can't execute in place). Direct binary spawn, no
+ * shell needed either way once resolved... except the legacy PATH shim on
+ * Windows, which still needs a shell.
+ */
+let _rgBin = null;
+async function rgBin() {
+  if (_rgBin) return _rgBin;
+  try {
+    const mod = await import('@vscode/ripgrep');
+    let p = mod.rgPath || mod.default?.rgPath || null;
+    if (p && p.includes('app.asar') && !p.includes('app.asar.unpacked')) {
+      p = p.replace('app.asar', 'app.asar.unpacked');
+    }
+    if (p) {
+      await fs.access(p);
+      _rgBin = { cmd: p, shell: false };
+      return _rgBin;
+    }
+  } catch {
+    /* not installed — fall through to the system probe */
+  }
+  _rgBin = { cmd: isWin ? 'rg.exe' : 'rg', shell: isWin, system: true };
   return new Promise((resolve) => {
-    execFile(isWin ? 'rg.exe' : 'rg', ['--version'], { shell: isWin }, (err) => {
-      rgAvailable = !err;
-      resolve(rgAvailable);
+    execFile(_rgBin.cmd, ['--version'], { shell: _rgBin.shell }, (err) => {
+      if (err) _rgBin = null;
+      resolve(_rgBin);
     });
   });
 }
 
 async function rgSearch(root, query, relDir, limit) {
+  const { cmd, shell } = (await rgBin()) ?? {};
+  if (!cmd) return { results: [], engine: 'ripgrep', truncated: true };
   return new Promise((resolve) => {
-    const args = ['--json', '--max-count', '5', '--max-columns', '200', '-i', '--hidden', '--glob', '!.git', query];
+      const args = ['--json', '--max-count', '5', '--max-columns', '200', '-i', '--hidden', '--glob', '!.git', query];
     if (relDir) args.push(relDir);
-    execFile(isWin ? 'rg.exe' : 'rg', args, { cwd: root, shell: isWin, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+    else args.push('.'); // no path arg = stdin wait (hang!) — always scope explicitly
+    execFile(cmd, args, { cwd: root, shell, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
       const out = [];
       for (const line of String(stdout || '').split('\n')) {
         if (out.length >= limit) break;
@@ -153,7 +187,7 @@ async function rgSearch(root, query, relDir, limit) {
           const ev = JSON.parse(line);
           if (ev.type === 'match') {
             out.push({
-              path: ev.data.path.text.split(path.sep).join('/'),
+              path: cleanRgPath(ev.data.path.text),
               line: ev.data.line_number,
               text: ev.data.lines.text.trim().slice(0, 240),
             });
@@ -225,13 +259,21 @@ const REPLACE_SKIP_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|zip|exe|dll|bin|mp4|mov|
 const REPLACE_MAX_FILE = 1024 * 1024; // 1MB (same as reads)
 const REPLACE_LIST_CAP = 200; // listed files (counts stay exact)
 
-/** Candidate file list: ripgrep --files (respects .gitignore) or the walker. */
+/** ripgrep prints ./-prefixed paths when scoped to '.' — strip for clean
+ *  display and exact prefix matching (include/onlyFiles). */
+function cleanRgPath(l) {
+  return l.split(path.sep).join('/').replace(/^\.\//, '');
+}
+const RG_SKIP_GLOBS = ['!.git', '!node_modules', '!.hg', '!.svn', '!dist', '!build', '!out', '!.next', '!__pycache__', '!.venv', '!target', '!bin', '!obj', '!.idea', '!.vscode', '!release'];
+const rgSkipArgs = () => RG_SKIP_GLOBS.flatMap((g) => ['--glob', g]);
 function listReplaceCandidates(root, relDir) {
-  return new Promise((resolve) => {
-    execFile(
-      isWin ? 'rg.exe' : 'rg',
-      relDir ? ['--files', '--hidden', '--glob', '!.git', relDir] : ['--files', '--hidden', '--glob', '!.git'],
-      { cwd: root, shell: isWin, maxBuffer: 32 * 1024 * 1024 },
+  return rgBin().then(({ cmd, shell } = {}) => {
+    if (!cmd) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      execFile(
+        cmd,
+        ['--files', '--hidden', ...rgSkipArgs(), ...(relDir ? [relDir] : ['.'])],
+        { cwd: root, shell, maxBuffer: 32 * 1024 * 1024 },
       (err, stdout) => {
         if (err || !stdout) return resolve(null);
         resolve(
@@ -239,10 +281,48 @@ function listReplaceCandidates(root, relDir) {
             .split('\n')
             .map((l) => l.trim())
             .filter(Boolean)
-            .map((l) => l.split(path.sep).join('/')),
+            .map(cleanRgPath),
         );
       },
-    );
+      );
+    });
+  });
+}
+
+/**
+ * Fast pre-filter: files CONTAINING a match (ripgrep -l, C-speed, honors
+ * .gitignore). The Node loop below then only stats/reads these instead of
+ * every file in the repo. Null = rg missing/failed → full-walk fallback.
+ */
+function rgFilesWithMatches(root, { pattern, literal, caseSensitive, wholeWord, relDir }) {
+  return rgBin().then(({ cmd, shell } = {}) => {
+    if (!cmd) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const args = ['-l', '--hidden', ...rgSkipArgs()];
+      args.push(caseSensitive ? '-s' : '-i');
+      if (literal) args.push('-F');
+      if (wholeWord) args.push('-w');
+    args.push('-e', pattern);
+    // No bare path = stdin wait (hang!) — the project root is the scope.
+    args.push(relDir || '.');
+      execFile(cmd, args, { cwd: root, shell, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) {
+          // cmd's "not recognized" also exits 1 on Windows — only a CLEAN
+          // exit-1 (rg ran, zero hits) means empty; everything else falls back.
+          const se = String(stderr || '');
+          if (/not recognized|not found|ENOENT|spawning/i.test(se)) return resolve(null);
+          if (typeof err.code === 'number' && err.code === 1) return resolve([]);
+          return resolve(null);
+        }
+        resolve(
+          String(stdout || '')
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .map(cleanRgPath),
+        );
+      });
+    });
   });
 }
 
@@ -251,33 +331,67 @@ function listReplaceCandidates(root, relDir) {
  * dialog); apply writes. Literal by default, regex opt-in ($1 groups work
  * in regex mode, literal otherwise). No undo — the confirm dialog says so.
  */
-export async function searchReplace(root, { q = '', replacement = '', regex = false, caseSensitive = true, path: relDir = '', dryRun = true } = {}) {
+export async function searchReplace(
+  root,
+  {
+    q = '', replacement = '', regex = false, wholeWord = false, caseSensitive = true,
+    path: relDir = '', include = [], exclude = [], onlyFiles = null, dryRun = true,
+  } = {},
+) {
   const query = String(q ?? '');
   if (!query) throw new Error('Empty search text');
   const flags = 'g' + (caseSensitive ? '' : 'i');
+  const core = regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let re;
   try {
-    re = regex
-      ? new RegExp(query, flags)
-      : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+    re = new RegExp(wholeWord ? `\\b(?:${core})\\b` : core, flags);
   } catch {
     throw new Error(`Invalid regular expression: ${query}`);
   }
   const repl = String(replacement ?? '');
   // Regex mode honors $1 groups (VSCode parity); literal mode never expands $.
   const replacer = regex ? repl : () => repl;
-  let candidates = await listReplaceCandidates(root, relDir);
-  if (!candidates) {
-    candidates = [];
-    for await (const rel of walk(root, relDir || '', false, 20000)) candidates.push(rel);
+  const normList = (v) => [].concat(v ?? []).map((s) => String(s)).filter(Boolean);
+  const includes = normList(include).map((p) => p.replace(/\/+$/, ''));
+  const excludes = normList(exclude);
+  const only = onlyFiles ? new Set(normList(onlyFiles)) : null;
+  // Fast path first: only files that actually match (rg -l). The Node loop
+  // below then stats/reads dozens of files instead of tens of thousands.
+  // Falls back to the full listing when rg is missing or errors.
+  let candidates = null;
+  if (await hasRg()) {
+    candidates = await rgFilesWithMatches(root, {
+      pattern: query, literal: !regex, caseSensitive, wholeWord, relDir,
+    });
   }
+  if (!candidates) {
+    const all = await listReplaceCandidates(root, relDir);
+    candidates = all ?? [];
+    if (!all) {
+      for await (const rel of walk(root, relDir || '', false, 20000)) candidates.push(rel);
+    }
+  }
+  let candidateTruncated = false;
+  if (candidates.length > 30000) {
+    candidates = candidates.slice(0, 30000);
+    candidateTruncated = true;
+  }
+  const inScope = (rel) => {
+    if (only && !only.has(rel)) return false;
+    if (includes.length && !includes.some((p) => rel === p || rel.startsWith(p + '/'))) return false;
+    if (excludes.some((x) => rel.includes(x))) return false;
+    return true;
+  };
   const files = [];
   const skipped = [];
   let skippedCount = 0;
   let totalMatches = 0;
   let totalFiles = 0;
   let scannedFiles = 0;
+  const details = [];
+  let detailTruncated = false;
   for (const rel of candidates) {
+    if (!inScope(rel)) continue;
     if (REPLACE_SKIP_EXT.test(rel)) {
       skippedCount++;
       if (skipped.length < 50) skipped.push({ path: rel, reason: 'binary type' });
@@ -308,18 +422,46 @@ export async function searchReplace(root, { q = '', replacement = '', regex = fa
       if (skipped.length < 50) skipped.push({ path: rel, reason: 'binary' });
       continue;
     }
-    re.lastIndex = 0;
-    const matches = (text.match(re) || []).length;
+    // Line-based matching (rg semantics — patterns never span lines):
+    // consistent counts plus [start, len] offset pairs for highlighting.
+    const lines = text.split('\n');
+    let matches = 0;
+    const fileDetails = [];
+    for (let i = 0; i < lines.length; i++) {
+      re.lastIndex = 0;
+      let m;
+      let lineMatches = 0;
+      const cols = [];
+      while ((m = re.exec(lines[i])) !== null) {
+        lineMatches++;
+        if (cols.length < 40) cols.push(m.index, m[0].length);
+        if (lineMatches > 200) break;
+        if (m.index === re.lastIndex) re.lastIndex++; // zero-length guard
+      }
+      if (lineMatches) {
+        matches += lineMatches;
+        if (details.length < 500) {
+          fileDetails.push({ path: rel, line: i + 1, text: lines[i].trim().slice(0, 240), cols });
+        } else {
+          detailTruncated = true;
+        }
+      }
+    }
     if (!matches) continue;
     totalMatches += matches;
     totalFiles++;
+    for (const d of fileDetails) details.push(d);
     if (!dryRun) {
-      re.lastIndex = 0;
-      await writeFile(root, rel, text.replace(re, replacer));
+      const next = [];
+      for (const ln of lines) {
+        re.lastIndex = 0;
+        next.push(ln.replace(re, replacer));
+      }
+      await writeFile(root, rel, next.join('\n'));
     }
     if (files.length < REPLACE_LIST_CAP) files.push({ path: rel, matches });
   }
-  return { files, totalMatches, totalFiles, scannedFiles, skipped, skippedCount };
+  return { files, totalMatches, totalFiles, scannedFiles, skipped, skippedCount, details, detailTruncated, candidateTruncated };
 }
 
 export async function renamePath(root, from, to) {

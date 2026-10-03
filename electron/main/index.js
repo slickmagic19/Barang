@@ -1495,6 +1495,15 @@ async function runUiSmoke() {
       if (auto('proj', false, 0, false) !== false) bad.push('auto-offline');
       if (auto('proj', true, 2, false) !== false) bad.push('auto-has');
       if (auto('proj', true, 0, true) !== false) bad.push('auto-busy');
+      if (typeof u.highlightLine !== 'function') bad.push('no-hl-fn');
+      else {
+        const h1 = u.highlightLine('foo bar foo', [0, 3, 8, 3]);
+        if ((h1.match(/<mark>/g) || []).length !== 2 || !h1.includes('bar')) bad.push('hl-count');
+        const h2 = u.highlightLine('<b>x</b>', []);
+        if (!h2.includes('&lt;b&gt;') || h2.includes('<mark>')) bad.push('hl-escape');
+        const h3 = u.highlightLine('aaaa', [0, 2, 1, 2]);
+        if ((h3.match(/<mark>/g) || []).length !== 1) bad.push('hl-overlap');
+      }
       const pm = u.pickDefaultModel;
       const lbl = (m) => (m ? m.providerID + '/' + m.modelID : null);
       const pool = [
@@ -1785,8 +1794,7 @@ async function runUiSmoke() {
       if (u.fmtTokens(1500) !== '1.5K') bad.push('f1.5K');
       if (u.fmtTokens(652219) !== '652K') bad.push('f652K');
       if (u.fmtTokens(12035577) !== '12.0M') bad.push('f12M');
-      if (u.sessionUsage(undefined) !== null) bad.push('u-undef');
-      if (u.sessionUsage(null) !== null) bad.push('u-null');
+      if (u.sessionUsage(undefined) !== null) bad.push('u-undef');      if (u.sessionUsage(null) !== null) bad.push('u-null');
       if (u.sessionUsage({ id: 'x' }) !== null) bad.push('u-empty');
       const t = u.sessionUsage({ id: 'x', tokens: { input: 1000, output: 500, reasoning: 0 }, cost: 0 });
       if (!t || t.tokens !== 1500 || t.label !== '1.5K') bad.push('u-basic');
@@ -1842,6 +1850,117 @@ async function runUiSmoke() {
   } catch (e) { replaceE2e = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] replace-e2e: ' + replaceE2e);
   pass = pass && replaceE2e === 'ok';
+  // Search view E2E (scoped throwaway dir): open view, query, include /
+  // exclude scope, highlight, per-file replace, global replace, cleanup.
+  let searchUi = 'skip';
+  try {
+    searchUi = await w.webContents.executeJavaScript(`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const dir = 'searchview-probe';
+      const M = 'svq' + Date.now().toString(36);
+      // NOTE: R must NOT contain M (else rescans re-match replaced text).
+      const R = 'rep' + Date.now().toString(36) + 'zz';
+      const AQ = (s) => document.querySelector(s);
+      const AQA = (s) => [...document.querySelectorAll(s)];
+      try { await window.barang.fs.remove(dir); } catch (e) {}
+      await window.barang.fs.write(dir + '/a.txt', M + ' one\\n' + M + ' two\\n');
+      await window.barang.fs.write(dir + '/sub/b.txt', M + '\\n' + M + '\\n' + M + '\\n');
+      const vb = AQ('[title="Search (Ctrl+Shift+F)"]');
+      if (!vb) return 'no-view-btn';
+      vb.click();
+      await sleep(600);
+      if (AQ('#view-search')?.classList.contains('hidden')) return 'view-did-not-open';
+      const inputs = AQA('#view-search .search-input');
+      if (inputs.length < 4) return 'inputs:' + inputs.length;
+      const q = inputs[0];
+      q.value = M;
+      q.dispatchEvent(new Event('input', { bubbles: true }));
+      const headText = async () => {
+        for (let i = 0; i < 25; i++) {
+          await sleep(300);
+          const t = AQ('#view-search .search-count')?.textContent ?? '';
+          if (/5 results? in 2 files/.test(t)) return t;
+        }
+        return AQ('#view-search .search-count')?.textContent ?? 'none';
+      };
+      let head = await headText();
+      if (!/5 results? in 2 files/.test(head)) return 'no-results:' + head;
+      const rows = AQA('#view-search .search-match').length;
+      if (rows < 5) return 'rows:' + rows;
+      if (!AQA('#view-search .search-preview mark').length) return 'no-highlight';
+      // include scope (subdir only) then exclude scope (top file only)
+      inputs[2].value = dir + '/sub';
+      inputs[2].dispatchEvent(new Event('input', { bubbles: true }));
+      let h2 = '';
+      for (let i = 0; i < 20; i++) {
+        await sleep(300);
+        h2 = AQ('#view-search .search-count')?.textContent ?? '';
+        if (/3 results? in 1 file/.test(h2)) break;
+      }
+      if (!/3 results? in 1 file/.test(h2)) return 'include-scope:' + h2;
+      inputs[2].value = '';
+      inputs[2].dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[3].value = 'sub';
+      inputs[3].dispatchEvent(new Event('input', { bubbles: true }));
+      let h3 = '';
+      for (let i = 0; i < 20; i++) {
+        await sleep(300);
+        h3 = AQ('#view-search .search-count')?.textContent ?? '';
+        if (/2 results? in 1 file/.test(h3)) break;
+      }
+      if (!/2 results? in 1 file/.test(h3)) return 'exclude-scope:' + h3;
+      inputs[3].value = '';
+      inputs[3].dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(1500);
+      // replacement + per-file replace on a.txt
+      inputs[1].value = R;
+      const secA = AQA('#view-search .search-file').find((s) => (s.querySelector('.search-file-name')?.textContent || '').includes('a.txt'));
+      if (!secA) return 'no-file-sec';
+      const repBtn = secA.querySelector('[title^="Replace all in"]');
+      if (!repBtn) return 'no-rep-btn';
+      repBtn.click();
+      let modalSeen = false;
+      for (let i = 0; i < 25 && !modalSeen; i++) {
+        await sleep(400);
+        modalSeen = !!AQ('.confirm-modal');
+      }
+      if (!modalSeen) return 'no-confirm';
+      AQ('.confirm-modal .btn-danger')?.click();
+      let h4 = '';
+      for (let i = 0; i < 40; i++) {
+        await sleep(300);
+        h4 = AQ('#view-search .search-count')?.textContent ?? '';
+        if (/3 results? in 1 file/.test(h4)) break;
+      }
+      if (!/3 results? in 1 file/.test(h4)) return 'per-file-replace:' + h4;
+      const fa = await window.barang.fs.read(dir + '/a.txt');
+      if (fa.content !== R + ' one\\n' + R + ' two\\n') return 'per-file-content';
+      // global replace all for the rest
+      const allBtn = AQ('#view-search .search-results-head .btn');
+      if (!allBtn) return 'no-all-btn';
+      allBtn.click();
+      let modalSeen2 = false;
+      for (let i = 0; i < 25 && !modalSeen2; i++) {
+        await sleep(400);
+        modalSeen2 = !!AQ('.confirm-modal');
+      }
+      if (!modalSeen2) return 'no-confirm-2';
+      AQ('.confirm-modal .btn-danger')?.click();
+      let h5 = '';
+      for (let i = 0; i < 40; i++) {
+        await sleep(300);
+        h5 = AQ('#view-search .search-count')?.textContent ?? '';
+        if (/0 results? in 0 files/.test(h5)) break;
+      }
+      if (!/0 results? in 0 files/.test(h5)) return 'global-replace:' + h5;
+      const fb = await window.barang.fs.read(dir + '/sub/b.txt');
+      if (fb.content !== R + '\\n' + R + '\\n' + R + '\\n') return 'global-content';
+      try { await window.barang.fs.remove(dir); } catch (e) {}
+      return 'ok';
+    })()`);
+  } catch (e) { searchUi = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] search-ui: ' + searchUi);
+  pass = pass && searchUi === 'ok';
   console.log(`[smoke-ui] ${pass ? 'PASS' : 'FAIL'}`);
   stopServer();
   // Drain stdout/file pipes before exiting — GUI-subsystem exits otherwise

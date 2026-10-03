@@ -15,6 +15,8 @@ export interface ExplorerHooks {
   onCollapseSidebar(): void;
   /** SCM worktree status letter for a project-relative path (badge). */
   gitStatusOf?(path: string): string | null;
+  /** Open the Search view scoped to a folder (dir ctx menu). */
+  onSearchInFolder?(path: string): void;
   toast(msg: string, kind?: 'info' | 'error'): void;
 }
 
@@ -271,6 +273,9 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
       label: 'Copy Path', icon: 'file',
       run: () => void copyText(e.path).then((ok) => hooks.toast(ok ? 'Path copied.' : 'Copy failed.', ok ? 'info' : 'error')),
     },
+    ...(isDir && hooks.onSearchInFolder
+      ? [{ label: 'Search in Folder', icon: 'search' as const, run: () => hooks.onSearchInFolder!(e.path) }]
+      : []),
   ]);
 
   // VSCode-style in-place flows: the prompt appears where the action is —

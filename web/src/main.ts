@@ -17,11 +17,12 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
   return img;
 }
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry, deleteFocusedEntry } from './ui/explorer';
-import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore } from './ui/editor';
+import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initTerminal, type TerminalApi } from './ui/terminal';
 import { initScm, decoration, type ScmApi } from './ui/scm';
+import { initSearchView, highlightLine, type SearchApi } from './ui/search';
 import { initBolt, substituteVars, buildUrl, parseUrlParams, prettyBody, highlightJson, headerValueSuggestions, COMMON_HEADER_NAMES, type BoltApi } from './ui/bolt';
 import { initStatusbar } from './ui/statusbar';
 import { showContextMenu } from './ui/menu';
@@ -494,11 +495,13 @@ async function boot() {
     },
     toast,
     gitStatusOf: (p: string) => decoration(p, false),
+    onSearchInFolder: (p: string) => {
+      setSideView('search');
+      searchApi?.setScope(p === '.' ? '' : p);
+    },
   };
 
-  // Sidebar views: Explorer | Source Control (VSCode activity switch).
-  // Sidebar views as tabs: Explorer | Source Control (with change-count badge).
-  // Sidebar views: Explorer | Source Control | Bolt (API client).
+  // Sidebar views: Explorer | Source Control | Bolt | Search.
   const viewBar = el('div', { class: 'side-viewbar' });
   const btnViewExplorer = el('button', { class: 'icon-btn side-view-btn active', title: 'Explorer (Ctrl+Shift+E)' }) as HTMLButtonElement;
   btnViewExplorer.append(iconEl('folder', 15));
@@ -508,32 +511,40 @@ async function boot() {
   btnViewScm.append(scmBadge);
   const btnViewApi = el('button', { class: 'icon-btn side-view-btn', title: 'Bolt — API client' }) as HTMLButtonElement;
   btnViewApi.append(iconEl('bolt', 15));
-  viewBar.append(btnViewExplorer, btnViewScm, btnViewApi);
+  const btnViewSearch = el('button', { class: 'icon-btn side-view-btn', title: 'Search (Ctrl+Shift+F)' }) as HTMLButtonElement;
+  btnViewSearch.append(iconEl('search', 15));
+  viewBar.append(btnViewExplorer, btnViewScm, btnViewApi, btnViewSearch);
   const explorerHost = el('div', { class: 'side-view', id: 'view-explorer' });
   const scmHost = el('div', { class: 'side-view hidden', id: 'view-scm' });
   const apiHost = el('div', { class: 'side-view hidden', id: 'view-api' });
-  type SideView = 'explorer' | 'scm' | 'api';
+  const searchHost = el('div', { class: 'side-view hidden', id: 'view-search' });
+  type SideView = 'explorer' | 'scm' | 'api' | 'search';
+  let searchApi: SearchApi | null = null;
   const setSideView = (v: SideView) => {
     explorerHost.classList.toggle('hidden', v !== 'explorer');
     scmHost.classList.toggle('hidden', v !== 'scm');
     apiHost.classList.toggle('hidden', v !== 'api');
+    searchHost.classList.toggle('hidden', v !== 'search');
     btnViewExplorer.classList.toggle('active', v === 'explorer');
     btnViewScm.classList.toggle('active', v === 'scm');
     btnViewApi.classList.toggle('active', v === 'api');
+    btnViewSearch.classList.toggle('active', v === 'search');
     try {
       localStorage.setItem('barang:side-view', v);
     } catch { /* private mode */ }
     if (v === 'scm') void scmApi.refresh();
+    if (v === 'search') searchApi?.focus();
   };
   btnViewExplorer.onclick = () => setSideView('explorer');
   btnViewScm.onclick = () => setSideView('scm');
   btnViewApi.onclick = () => setSideView('api');
+  btnViewSearch.onclick = () => setSideView('search');
   const buildSideViews = () => {
     // Hosts persist across switches (view state lives on them) — clear their
     // painted content so re-init never stacks duplicate headers/trees.
     explorerHost.innerHTML = '';
     sidebar.innerHTML = '';
-    sidebar.append(railBtn, viewBar, explorerHost, scmHost, apiHost);
+    sidebar.append(railBtn, viewBar, explorerHost, scmHost, apiHost, searchHost);
   };
   buildSideViews();
 
@@ -555,8 +566,18 @@ async function boot() {
   });
   try {
     const v = localStorage.getItem('barang:side-view');
-    if (v === 'scm' || v === 'api') setSideView(v);
+    if (v === 'scm' || v === 'api' || v === 'search') setSideView(v as SideView);
   } catch { /* fresh default */ }
+
+  // Sidebar Search view (project find + replace).
+  searchApi = initSearchView(searchHost, {
+    toast,
+    revealInEditor: (p, line) => void revealInEditor(p, line),
+    refreshExplorer: () => {
+      refreshExplorer();
+      explorer.repaint();
+    },
+  });
 
   // Bolt API client (sidebar collections + center request tabs). Tab-strip
   // repaints flow through the editorStore subscription (every bolt mutation
@@ -672,6 +693,7 @@ async function boot() {
     COMMON_HEADER_NAMES,
     fmtTokens,
     sessionUsage,
+    highlightLine,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
@@ -766,7 +788,7 @@ async function boot() {
       palette.isOpen() ? palette.close() : palette.open('> ');
     } else if (mod && e.key.toLowerCase() === 'f' && e.shiftKey) {
       e.preventDefault();
-      palette.isOpen() ? palette.close() : palette.open('# ');
+      setSideView('search');
     } else if (mod && e.key.toLowerCase() === 's' && !termFocus) {
       e.preventDefault();
       if (e.shiftKey) {

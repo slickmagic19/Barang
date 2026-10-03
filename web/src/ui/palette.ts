@@ -2,10 +2,10 @@
 // Prefix inside palette: "> " commands, "# " text search (+ replace bar), otherwise file search.
 import { fsApi } from '../lib/api';
 import { el, debounce } from '../lib/util';
+import { confirmAndApplyReplace } from '../lib/replaceFlow';
 import { iconEl, type IconName } from './icons';
 import { fileIconEl } from './fileIcons';
-import { revealInEditor, editorStore, checkExternalChanges } from './editor';
-import { confirmDialog } from './dialog';
+import { revealInEditor } from './editor';
 
 export interface PaletteHooks {
   newSession(): void;
@@ -15,7 +15,7 @@ export interface PaletteHooks {
   terminalNew(): void;
   terminalClear(): void;
   terminalKill(): void;
-  showView(v: 'explorer' | 'scm' | 'api'): void;
+  showView(v: 'explorer' | 'scm' | 'api' | 'search'): void;
   boltNew(): void;
   refreshExplorer(): void;
   openRecent(path: string): void;
@@ -29,6 +29,7 @@ const COMMANDS = [
   { id: 'view.explorer', label: 'View: Show Explorer' },
   { id: 'view.scm', label: 'View: Source Control' },
   { id: 'view.bolt', label: 'View: Bolt API client' },
+  { id: 'view.search', label: 'View: Search' },
   { id: 'terminal.toggle', label: 'Terminal: Toggle panel' },
   { id: 'terminal.new', label: 'Terminal: New terminal' },
   { id: 'terminal.clear', label: 'Terminal: Clear' },
@@ -40,7 +41,7 @@ const COMMANDS = [
   { id: 'help.shortcuts', label: 'Help: Keyboard shortcuts' },
 ];
 
-const SHORTCUTS = `Ctrl+P — quick open · Ctrl+Shift+P — commands · Ctrl+Shift+F — search in files
+const SHORTCUTS = `Ctrl+P — quick open · Ctrl+Shift+P — commands · Ctrl+Shift+F — search view
 Enter — send agent message · Shift+Enter — newline · Ctrl+S — save file · Ctrl+Shift+S — save all
 Ctrl+N — new untitled tab · Ctrl+W — close tab · Ctrl+B — explorer rail · Ctrl+J — agent panel
 Ctrl+\` — terminal · Ctrl+Shift+\` — new terminal · Ctrl+Shift+G — source control · Ctrl+Shift+E — explorer · Ctrl+F — find in terminal
@@ -113,37 +114,12 @@ export function initPalette(hooks: PaletteHooks) {
       hooks.toast('Type something to find after # first.', 'info');
       return;
     }
-    const replacement = replaceInput.value;
-    let dry;
-    try {
-      dry = await fsApi.searchReplace({ q, replacement, regex: replaceRegex, caseSensitive: replaceCase, path: '', dryRun: true });
-    } catch (e) {
-      hooks.toast(`Replace failed: ${(e as Error).message}`, 'error');
-      return;
-    }
-    if (!dry.totalFiles) {
-      hooks.toast('No matches found.', 'info');
-      return;
-    }
-    const dirtyHit = editorStore.get().tabs.filter((t) => t.dirty && dry.files.some((f) => f.path === (t.file ?? t.path))).length;
-    const extra = dry.totalFiles > dry.files.length ? ` (showing first ${dry.files.length})` : '';
-    const skipped = dry.skippedCount ? ` Skipped ${dry.skippedCount} binary/large file(s).` : '';
-    const ok = await confirmDialog({
-      title: 'Replace all?',
-      message: `Replace ${dry.totalMatches} match(es) in ${dry.totalFiles} file(s)${extra} with "${replacement.slice(0, 80)}"?${skipped} This cannot be undone.${dirtyHit ? ` ${dirtyHit} open unsaved tab(s) keep their edits — review them after.` : ''}`,
-      confirmLabel: `Replace ${dry.totalMatches}`,
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      const done = await fsApi.searchReplace({ q, replacement, regex: replaceRegex, caseSensitive: replaceCase, path: '', dryRun: false });
-      close();
-      hooks.toast(`Replaced ${done.totalMatches} match(es) in ${done.totalFiles} file(s).`, 'info');
-      hooks.refreshExplorer();
-      await checkExternalChanges().catch(() => {});
-    } catch (e) {
-      hooks.toast(`Replace failed: ${(e as Error).message}`, 'error');
-    }
+    const r = await confirmAndApplyReplace(
+      hooks,
+      { q, replacement: replaceInput.value, regex: replaceRegex, wholeWord: false, caseSensitive: replaceCase },
+      () => close(),
+    );
+    void r;
   }
 
   let mode: 'files' | 'commands' | 'search' = 'files';
@@ -254,6 +230,7 @@ export function initPalette(hooks: PaletteHooks) {
     else if (id === 'view.explorer') hooks.showView('explorer');
     else if (id === 'view.scm') hooks.showView('scm');
     else if (id === 'view.bolt') hooks.showView('api');
+    else if (id === 'view.search') hooks.showView('search');
     else if (id === 'bolt.new') hooks.boltNew();
     else if (id === 'file.saveAll') void hooks.saveAll();
     else if (id === 'file.openRecent') open('~ ');

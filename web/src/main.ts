@@ -522,8 +522,8 @@ async function boot() {
           { label: 'Close Others', icon: 'x', run: () => void closeOtherTabs(p, group) },
           { label: 'Close Saved', icon: 'check', run: () => closeSavedTabs(group) },
           { label: 'Close All', icon: 'x', run: () => void closeAllTabs() },
-          { label: splitOpen ? 'Open in Other Group' : 'Split Right', icon: 'splitV', run: () => void openInOtherGroup(p) },
           ...(isBolt ? [] : [
+            { label: splitOpen ? 'Open in Other Group' : 'Split Right', icon: 'splitV' as const, run: () => void openInOtherGroup(p) },
             { sep: true as const },
             {
               label: 'Copy Path', icon: 'file' as const,
@@ -1007,7 +1007,7 @@ async function boot() {
       toggleSplit();
     } else if (mod && (e.key === '1' || e.key === '2') && !e.shiftKey) {
       e.preventDefault();
-      focusGroup(e.key === '2' ? 2 : 1);
+      void focusGroup(e.key === '2' ? 2 : 1);
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && !isTypingTarget()) {
       e.preventDefault();
       deleteFocusedEntry();

@@ -857,37 +857,38 @@ export function closeSavedTabs(group?: EditorGroup) {
   dropTabs(editorStore.get().tabs.filter((t) => (t.group || 1) === g && !t.dirty));
 }
 
-/** Toggle the second editor group. Opening mirrors the current file right
- *  (shared model, instant) when group 2 has nothing to show. */
-export function toggleSplit(): boolean {
+/** Open the second group. Mirrors the current file into a REAL group-2 tab
+ *  (a bare model with no tab looks glitched and can't be closed). Diffs,
+ *  bolt tabs and untitled scratches are not mirrorable — those open empty. */
+export async function openSplit(): Promise<boolean> {
   const s = editorStore.get();
-  if (s.split) {
-    closeSplitGroup();
-    return false;
-  }
+  if (s.split) return true;
   if (!ensureSplitEditor()) {
     hooks?.toast('Split unavailable.', 'error');
     return false;
   }
-  const show = s.active && !s.active2 ? s.active : s.active2;
-  editorStore.set({ split: true, focus: 2, active2: show ?? null });
-  if (show) {
-    const pair = diffModels.get(`2:${show}`);
-    const tab = editorStore.get().tabs.find((t) => t.path === show && (t.group || 1) === 2);
-    if (tab?.diff && pair && diffEditor) {
-      diffEditor.setModel({ original: pair.original, modified: pair.modified });
-      showDiff(2);
-    } else {
-      showNormal(2);
-      editor2?.setModel(models.get(show) ?? null);
-    }
-  } else {
+  editorStore.set({ split: true, focus: 1 });
+  let show: string | null = s.active2;
+  if (!show) {
+    const cur = s.tabs.find((t) => t.path === s.active && (t.group || 1) === 1);
+    show = cur && !cur.diff && !cur.untitled && !cur.path.startsWith('bolt:') ? cur.path : null;
+  }
+  if (show) await openFile(show, { group: 2, focus: false });
+  else {
     showNormal(2);
     editor2?.setModel(null);
   }
+  // Splitting keeps focus left (VSCode); the mirror is just revealed.
+  editorStore.set({ focus: 1 });
   hooks?.onTabs();
-  editor2?.focus();
+  editor?.focus();
   return true;
+}
+
+/** Toggle the second editor group. */
+export function toggleSplit(): void {
+  if (editorStore.get().split) closeSplitGroup();
+  else void openSplit();
 }
 
 /** Close group 2, moving its tabs into group 1 (VSCode semantics). */
@@ -908,24 +909,30 @@ export function closeSplitGroup() {
 }
 
 /** Focus a group (Ctrl+1 / Ctrl+2), opening the split when targeting 2. */
-export function focusGroup(group: EditorGroup) {
-  const s = editorStore.get();
-  if (group === 2 && !s.split) {
-    if (!toggleSplit()) return;
+export async function focusGroup(group: EditorGroup) {
+  if (group === 2 && !editorStore.get().split) {
+    if (!(await openSplit())) return;
   } else {
     editorStore.set({ focus: group });
   }
   editorFor(group)?.focus();
 }
 
-/** Open a path in the group that isn't showing it (tab ctx menu). The tab's
- *  own group decides — not the focused one (they differ right after a
- *  split opens, when focus has already moved right). */
+/** Open a path in the group that isn't showing it (tab ctx menu). Diff tabs
+ *  reopen through the diff pipeline (a plain openFile would try to read
+ *  `diff:…` off disk); bolt tabs stay put — Bolt renders center-wide. */
 export async function openInOtherGroup(path: string) {
   const s = editorStore.get();
   const tab = s.tabs.find((t) => t.path === path);
-  const here = ((tab?.group || 1) as EditorGroup);
+  if (!tab || tab.path.startsWith('bolt:')) return;
+  const here = ((tab.group || 1) as EditorGroup);
   const other = (here === 2 ? 1 : 2) as EditorGroup;
+  if (tab.diff && tab.file) {
+    const pair = diffModels.get(`${here}:${path}`);
+    if (!pair) return;
+    await openDiffTab(tab.file, pair.original.getValue(), pair.modified.getValue(), tab.diffKind ?? 'session', other);
+    return;
+  }
   await openFile(path, { group: other });
 }
 

@@ -2373,6 +2373,8 @@ async function runUiSmoke() {
         const snap = u.editorSplitState ? JSON.stringify(u.editorSplitState()) : 'no-snap-fn';
         return 'no-split-open state=' + snap;
       }
+      // Split open mirrors the file into a real right tab (not a bare model).
+      if (visibleStrips()[1].querySelectorAll('.tab').length < 1) return 'no-mirror-tab';
       const tab = [...document.querySelectorAll('.center .tabs .tab')].find((b) => !(b.dataset.path || '').startsWith('bolt:') && !b.classList.contains('is-diff'));
       if (!tab) return 'no-tab';
       tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 220, clientY: 220 }));

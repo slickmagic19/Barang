@@ -21,7 +21,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry,
 deleteFocusedEntry, pathOf } from './ui/explorer';
 import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab, showImageTab, getEditorDisplayFlags } from './ui/editor';
-import { initChat } from './ui/chat';
+import { initChat, filePartView } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
 import { pomoNext, formatClock, normalizePomoSettings, POMO_DEFAULTS } from './lib/pomodoro';
@@ -875,6 +875,7 @@ async function boot() {
     formatClock,
     normalizePomoSettings,
     pomoDotsFilled,
+    filePartView,
     openPreview,
     openFile,
     closeTab,

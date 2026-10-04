@@ -166,6 +166,22 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
     return;
   }
 
+  // File attachments: images inline (opencode-style), others as chips.
+  if (lower === 'file') {
+    const view = filePartView(part);
+    if (view?.kind === 'image') {
+      const img = el('img', { class: 'msg-img', src: view.url, alt: view.name }) as HTMLImageElement;
+      img.loading = 'lazy';
+      host.append(img);
+      if (view.name && view.name !== 'file') host.append(el('div', { class: 'msg-img-cap' }, view.name));
+    } else {
+      const chip = el('div', { class: 'msg-file' });
+      chip.append(iconEl('file', 13), el('span', {}, view?.name ?? 'file'));
+      host.append(chip);
+    }
+    return;
+  }
+
   // Tool calls, step markers, file edits, unknown schemas: structured card.
   const state = String(part.state ?? part.status ?? '');
   const titleRaw = String(part.title ?? part.tool ?? part.name ?? humanize(type));
@@ -215,7 +231,26 @@ function isActivityPart(p: { type?: unknown }): boolean {
   if (!t || t === 'text') return false; // prose always stays
   if (t.includes('reason') || t.includes('think')) return false; // own toggle
   if (t.includes('permission')) return false; // approval history stays
+  if (t === 'file') return false; // attachments render inline (own branch)
   return true; // step-start/finish, tool calls, edits…
+}
+
+/** Classify a file part for inline rendering: images show as thumbnails
+ *  (opencode-style), anything else as a file chip. Pure (smoke-probed). */
+export function filePartView(part: Record<string, unknown>):
+  | { kind: 'image'; url: string; name: string }
+  | { kind: 'file'; name: string }
+  | null {
+  if (!part || typeof part !== 'object') return null;
+  if (String(part.type ?? '').toLowerCase() !== 'file') return null;
+  const name = String(part.filename ?? (part as { name?: unknown }).name ?? 'file');
+  const mime = String(part.mime ?? '');
+  const url = String(part.url ?? '');
+  const isImg = mime.toLowerCase().startsWith('image/') &&
+    (/^data:image\/[a-z+]+;base64,/.test(url) || /^https?:\/\//i.test(url));
+  if (isImg) return { kind: 'image', url, name };
+  if (name) return { kind: 'file', name };
+  return null;
 }
 
 function diffStatus(d: ChangeEntry): { label: string; cls: string; icon: 'plus' | 'trash' | 'pencil' } {
@@ -470,6 +505,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   todosSec.append(todosToggle, todosList);
   todosToggle.onclick = () => {
     const id = agentStore.get().activeId ?? '';
+    todosTouched.add(id); // explicit user choice beats the auto rules below
     if (todosCollapsed.has(id)) todosCollapsed.delete(id);
     else todosCollapsed.add(id);
     paintTodos();
@@ -491,6 +527,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   changesSec.append(changesHead, changesList);
   changesToggle.onclick = () => {
     const id = agentStore.get().activeId ?? '';
+    changesTouched.add(id); // explicit user choice beats the auto rules below
     if (changesCollapsed.has(id)) changesCollapsed.delete(id);
     else changesCollapsed.add(id);
     paintChanges();
@@ -969,6 +1006,9 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
 
 // Sessions the user collapsed in Todos (new sessions default open).
 const todosCollapsed = new Set<string>();
+// Sessions the user explicitly toggled (auto-collapse only fires before that).
+const todosTouched = new Set<string>();
+const changesTouched = new Set<string>();
 
 function paintTodos() {
   const s = agentStore.get();
@@ -977,7 +1017,10 @@ function paintTodos() {
   if (!todos.length) return;
   const { label } = todoProgress(todos);
   todosTitle.textContent = label;
-  const collapsed = todosCollapsed.has(s.activeId ?? '');
+  const id = s.activeId ?? '';
+  // Fully-done checklists start collapsed (one line, not a wall of checks).
+  const allDone = todos.every((t) => String(t.status ?? '').toLowerCase() === 'completed');
+  const collapsed = todosCollapsed.has(id) || (!todosTouched.has(id) && allDone);
   todosSec.classList.toggle('collapsed', collapsed);
   todosList.classList.toggle('hidden', collapsed);
   todosList.innerHTML = '';
@@ -1012,7 +1055,9 @@ function paintTodos() {
       dcOut = changes;
     }
     changesSec.classList.toggle('hidden', changes.length === 0);
-    const collapsed = changesCollapsed.has(s.activeId ?? '');
+    // Big change sets start collapsed (header + count stay visible).
+    const collapsed = changesCollapsed.has(s.activeId ?? '') ||
+      (!changesTouched.has(s.activeId ?? '') && changes.length > 8);
     changesSec.classList.toggle('collapsed', collapsed);
     changesList.classList.toggle('hidden', collapsed);
     if (!changes.length) {

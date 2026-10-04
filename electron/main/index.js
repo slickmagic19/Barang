@@ -1803,6 +1803,21 @@ async function runUiSmoke() {
         if (u.normalizePomoSettings(null).focusMin !== 25) bad.push('pomo-defaults');
         if (u.pomoDotsFilled(0, 4) !== 0 || u.pomoDotsFilled(2, 4) !== 2 || u.pomoDotsFilled(4, 4) !== 4 || u.pomoDotsFilled(5, 4) !== 1) bad.push('pomo-dots');
       }
+      // Chat file parts: images render inline, others chip, junk ignored.
+      const fp = u.filePartView;
+      if (typeof fp !== 'function') bad.push('no-filepart-fn');
+      else {
+        const img = fp({ type: 'file', mime: 'image/png', filename: 'a.png', url: 'data:image/png;base64,iVBORw0=' });
+        if (!img || img.kind !== 'image' || !img.url.startsWith('data:image/')) bad.push('fp-image');
+        const http = fp({ type: 'file', mime: 'image/jpeg', filename: 'b.jpg', url: 'https://x/y.jpg' });
+        if (!http || http.kind !== 'image') bad.push('fp-http');
+        const doc = fp({ type: 'file', mime: 'application/pdf', filename: 'd.pdf', url: 'data:application/pdf;base64,xx' });
+        if (!doc || doc.kind !== 'file' || doc.name !== 'd.pdf') bad.push('fp-chip');
+        if (fp({ type: 'file', mime: 'text/plain', filename: '', url: '' }) !== null) bad.push('fp-nameless');
+        if (fp({ type: 'text', text: 'hi' }) !== null || fp(null) !== null) bad.push('fp-nofile');
+        if (fp({ type: 'file', mime: 'image/png', filename: 'evil.png', url: 'file:///etc/passwd' }) !== null &&
+          fp({ type: 'file', mime: 'image/png', filename: 'evil.png', url: 'file:///etc/passwd' }).kind === 'image') bad.push('fp-fileurl');
+      }
       // Agent todos: header counts + checklist rendering data.
       const tp = u.todoProgress;
       if (typeof tp !== 'function') bad.push('no-todo-fn');

@@ -87,6 +87,8 @@ export function openSettings(hooks: SettingsHooks) {
   body.append(fontRow);
   const minimapBox = checkRow('Minimap');
   const wrapBox = checkRow('Word wrap');
+  const bracketBox = checkRow('Bracket pair colorization');
+  const stickyBox = checkRow('Sticky scroll');
 
   // --- Sessions ---
   section('Sessions');
@@ -276,6 +278,8 @@ export function openSettings(hooks: SettingsHooks) {
     activityBox.checked = st0.showActivity;
     minimapBox.checked = st0.minimap;
     wrapBox.checked = st0.wordWrap;
+    bracketBox.checked = st0.bracketColors;
+    stickyBox.checked = st0.stickyScroll;
     confirmBox.checked = st0.confirmDelete;
     fontSel.value = String(st0.fontSize);
     notifEnabledBox.checked = st0.notifEnabled;
@@ -337,6 +341,14 @@ export function openSettings(hooks: SettingsHooks) {
   };
   wrapBox.onchange = () => {
     commit((s) => { s.wordWrap = wrapBox.checked; });
+    applyEditorPrefs();
+  };
+  bracketBox.onchange = () => {
+    commit((s) => { s.bracketColors = bracketBox.checked; });
+    applyEditorPrefs();
+  };
+  stickyBox.onchange = () => {
+    commit((s) => { s.stickyScroll = stickyBox.checked; });
     applyEditorPrefs();
   };
   fontSel.onchange = () => {

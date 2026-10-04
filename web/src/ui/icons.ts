@@ -6,7 +6,7 @@ export type IconName =
   | 'refresh' | 'trash' | 'plus' | 'x' | 'chevL' | 'chevR' | 'chevD'
   | 'send' | 'stop' | 'shield' | 'spark' | 'search' | 'prompt'
   | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip' | 'download'
-  | 'splitV' | 'maximize' | 'branch' | 'minus' | 'upload' | 'sync' | 'discard' | 'meatball' | 'bolt' | 'help' | 'timer';
+  | 'splitV' | 'maximize' | 'branch' | 'minus' | 'upload' | 'sync' | 'discard' | 'meatball' | 'bolt' | 'help' | 'timer' | 'eye';
 
 const S = (inner: string) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
@@ -52,6 +52,7 @@ export const ICONS: Record<IconName, string> = {
   bolt: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 2.5L4.5 13.5H11l-1.5 8L18.5 10H12z"/></svg>`,
   help: S('<circle cx="12" cy="12" r="8.5"/><path d="M9.5 9.3a2.6 2.6 0 0 1 5 .9c0 1.8-2.4 2.1-2.4 3.8"/><path d="M12 17.5h.01"/>'),
   timer: S('<circle cx="12" cy="13.5" r="7"/><path d="M12 10v3.5l2.5 2"/><path d="M9.5 2.5h5"/><path d="M12 2.5V6"/>'),
+  eye: S('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>'),
 };
 
 /** Span wrapper sized for flex layouts (icons align to text baseline). */

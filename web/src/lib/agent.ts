@@ -537,6 +537,8 @@ export interface BarangSettings {
   fontSize: number; // editor font size, default 13
   minimap: boolean; // editor minimap, default false
   wordWrap: boolean; // editor word wrap, default true
+  bracketColors: boolean; // editor bracket pair colorization, default true
+  stickyScroll: boolean; // editor sticky scroll, default true
   termShell: string; // terminal shell path, '' = auto (PowerShell/$SHELL)
   termFont: number; // terminal font size, default 12 (VSCode)
   termScrollback: number; // terminal scrollback lines, default 1000
@@ -571,6 +573,8 @@ const SETTING_DEFAULTS: BarangSettings = {
   fontSize: 13,
   minimap: false,
   wordWrap: true,
+  bracketColors: true,
+  stickyScroll: true,
   termShell: '',
   termFont: 12,
   termScrollback: 1000,
@@ -604,6 +608,8 @@ export function readSettings(): BarangSettings {
       fontSize: Number.isFinite(p.fontSize) ? Math.max(11, Math.min(20, p.fontSize)) : SETTING_DEFAULTS.fontSize,
       minimap: p.minimap === true,
       wordWrap: p.wordWrap !== false,
+      bracketColors: p.bracketColors !== false,
+      stickyScroll: p.stickyScroll !== false,
       termShell: typeof p.termShell === 'string' ? p.termShell.slice(0, 500) : '',
       termFont: Number.isFinite(p.termFont) ? Math.max(10, Math.min(24, p.termFont)) : SETTING_DEFAULTS.termFont,
       termScrollback: [1000, 5000, 10000].includes(p.termScrollback) ? p.termScrollback : SETTING_DEFAULTS.termScrollback,

@@ -20,7 +20,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
 }
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry,
 deleteFocusedEntry, pathOf } from './ui/explorer';
-import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState } from './ui/editor';
+import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab, showImageTab, getEditorDisplayFlags } from './ui/editor';
 import { initChat } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
@@ -483,6 +483,8 @@ async function boot() {
     if (!t) return;
     if (t.path.startsWith('bolt:')) boltApi?.activate(t.path.slice(5));
     else if (t.diff) showDiffTab(t.path, group);
+    else if (t.preview && t.file) showPreviewTab(t.path, group);
+    else if (t.image) showImageTab(t.path, group);
     else void openFile(t.path, { group });
   };
 
@@ -524,6 +526,9 @@ async function boot() {
           { label: 'Close All', icon: 'x', run: () => void closeAllTabs() },
           ...(isBolt ? [] : [
             { label: splitOpen ? 'Open in Other Group' : 'Split Right', icon: 'splitV' as const, run: () => void openInOtherGroup(p) },
+            ...((!t.diff && !t.image && !t.preview && t.file && /\.md$/i.test(t.file)) ? [
+              { label: 'Open Preview', icon: 'eye' as const, run: () => void openPreview(t.file!) },
+            ] : []),
             { sep: true as const },
             {
               label: 'Copy Path', icon: 'file' as const,
@@ -554,17 +559,15 @@ async function boot() {
     // editor area while active, whatever the split state.
     editorCols.classList.toggle('hidden', ts.length === 0 || activeIsBolt);
     boltHost.classList.toggle('hidden', !activeIsBolt);
-    if (activeIsBolt || !ts.length) {
-      splitCol.classList.add('hidden');
-      return;
-    }
-    // A stray bolt view never traps the editor behind it.
+    // Strips ALWAYS repaint — even behind the bolt overlay or a closed
+    // split. Skipping leaves stale tab buttons that outlive their tabs.
     paintStrip(tabs, 1, !split || focus === 1);
     if (split) {
       splitCol.classList.remove('hidden');
       paintStrip(tabs2, 2, focus === 2);
     } else {
       splitCol.classList.add('hidden');
+      paintStrip(tabs2, 2, false); // clear: no stale buttons in the closed group
     }
     // Split toggle lives at the end of the primary strip.
     const spacer = el('span', { class: 'tabs-spacer' });
@@ -872,6 +875,10 @@ async function boot() {
     formatClock,
     normalizePomoSettings,
     pomoDotsFilled,
+    openPreview,
+    openFile,
+    closeTab,
+    getEditorDisplayFlags,
     resolveSendVariant,
     loadCommands,
     parseSlashCommand,

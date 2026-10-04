@@ -2442,6 +2442,44 @@ async function runUiSmoke() {
   } catch (e) { pomoUi = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] pomodoro: ' + pomoUi);
   pass = pass && pomoUi === 'ok';
+  // Preview tabs: markdown renders h1, images render data URL, both close.
+  let previewTabs = 'skip';
+  try {
+    previewTabs = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.openPreview !== 'function' || typeof u.openFile !== 'function') return 'no-preview-fns';
+      const f = u.getEditorDisplayFlags ? u.getEditorDisplayFlags() : null;
+      if (!f || f.brackets !== true || f.sticky !== true) return 'flags-off';
+      await u.openPreview('README.md');
+      await new Promise((r) => setTimeout(r, 900));
+      const prev = document.querySelector('.md-preview');
+      if (!prev || !prev.querySelector('h1')) return 'no-preview-h1';
+      await u.openFile('Barang_logo.png');
+      await new Promise((r) => setTimeout(r, 900));
+      const img = document.querySelector('.img-preview');
+      if (!img || (img.src || '').indexOf('data:image/') !== 0) return 'no-image';
+      if (typeof u.closeTab !== 'function') return 'no-close-fn';
+      const pre = u.editorSplitState ? JSON.stringify(u.editorSplitState()) : 'no-snap';
+      const tabDump = [...document.querySelectorAll('.center .tabs .tab')].map((b) => b.dataset.path + '@' + (b.closest('.split-col') ? 'split' : 'main')).join(',');
+      await u.closeTab('preview:README.md');
+      await new Promise((r) => setTimeout(r, 400));
+      await u.closeTab('Barang_logo.png');
+      await new Promise((r) => setTimeout(r, 400));
+      const post = u.editorSplitState ? JSON.stringify(u.editorSplitState()) : 'no-snap';
+      const stripDump = [...document.querySelectorAll('.center .tabs')].map((s) => {
+        const hid = !!s.closest('.hidden');
+        const act = s.querySelector('.tab.active');
+        return 'hidden=' + hid + ' active=' + (act ? act.dataset.path : 'none') + ' tabs=[' + [...s.querySelectorAll('.tab')].map((x) => x.dataset.path).join('+') + ']';
+      }).join(' // ');
+      const colsHidden = !!document.querySelector('.editor-cols.hidden');
+      const boltHidden = !!document.querySelector('#bolt-host.hidden');
+      const left = [...document.querySelectorAll('.tab')].filter((b) => ['preview:README.md', 'Barang_logo.png'].indexOf(b.dataset.path) >= 0);
+      if (left.length) return 'tabs-linger:' + left.length + ' colsHidden=' + colsHidden + ' boltHidden=' + boltHidden + ' strips={' + stripDump + '}';
+      return 'ok';
+    })()`);
+  } catch (e) { previewTabs = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] preview-tabs: ' + previewTabs);
+  pass = pass && previewTabs === 'ok';
   // Search-replace E2E (hermetic throwaway dir in the project). The marker
   // is timestamp-unique per run so the harness's own source (which mentions
   // the queries) can never collide with the scanned content.

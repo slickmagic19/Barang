@@ -3,7 +3,7 @@
 import * as monacoLoader from './monaco';
 import { fsApi } from '../lib/api';
 import { agentStore, readSettings } from '../lib/agent';
-import { createStore } from '../lib/util';
+import { createStore, md } from '../lib/util';
 import { confirmDialog } from './dialog';
 
 export interface Tab {
@@ -15,6 +15,8 @@ export interface Tab {
   mtime?: number;
   diff?: { before: string; after: string }; // present on session-diff review tabs
   diffKind?: 'git' | 'session'; // diff provenance (git tabs get range-staging)
+  preview?: boolean; // markdown preview (renders the file's live model)
+  image?: boolean; // image preview (no Monaco model at all)
   group: 1 | 2; // editor group (VSCode-style split)
 }
 
@@ -45,6 +47,8 @@ let editorDiv2: HTMLElement | null = null;
 let diffDiv: HTMLElement | null = null;
 let host1: HTMLElement | null = null;
 let host2: HTMLElement | null = null;
+let customDiv1: HTMLElement | null = null;
+let customDiv2: HTMLElement | null = null;
 const models = new Map<string, import('monaco-editor').editor.ITextModel>();
 const diffModels = new Map<string, { original: import('monaco-editor').editor.ITextModel; modified: import('monaco-editor').editor.ITextModel }>();
 let suppressDirty = false;
@@ -418,12 +422,25 @@ function wireMarkerFilter() {
   markersWired = true;
   monaco.editor.onDidChangeMarkers(() => scheduleMarkerFilter());
 }
-/** Apply persisted editor prefs (font size, minimap) to both editors. */
+/** Apply persisted editor prefs (font size, minimap, brackets, sticky) to both editors. */
 export function applyEditorPrefs() {
   const s = readSettings();
-  const opts = { fontSize: s.fontSize, minimap: { enabled: s.minimap }, wordWrap: s.wordWrap ? 'on' as const : 'off' as const };
+  appliedEditorFlags = { brackets: s.bracketColors, sticky: s.stickyScroll };
+  const opts = {
+    fontSize: s.fontSize,
+    minimap: { enabled: s.minimap },
+    wordWrap: s.wordWrap ? 'on' as const : 'off' as const,
+    bracketPairColorization: { enabled: s.bracketColors },
+    stickyScroll: { enabled: s.stickyScroll, maxLineCount: 5 },
+  };
   editor?.updateOptions(opts);
   editor2?.updateOptions(opts);
+}
+
+/** Display flags currently applied (smoke probe). */
+let appliedEditorFlags = { brackets: true, sticky: true };
+export function getEditorDisplayFlags(): { brackets: boolean; sticky: boolean } {
+  return { ...appliedEditorFlags };
 }
 
 export async function initEditor(container: HTMLElement, h: EditorHooks) {
@@ -440,6 +457,7 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
   container.append(editorDiv, diffDiv);
   editor = monaco.editor.create(editorDiv, baseEditorOptions(prefs));
   wireCodeEditor(editor, 1);
+  applyEditorPrefs();
   monaco.editor.defineTheme('barang-dark', {
     base: 'vs-dark',
     inherit: true,
@@ -458,17 +476,19 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
   monaco.editor.setTheme('barang-dark');
 }
 
-type EditorPrefs = { fontSize: number; minimap: boolean; wordWrap: boolean };
+type EditorPrefs = { fontSize: number; minimap: boolean; wordWrap: boolean; bracketColors: boolean; stickyScroll: boolean };
 
-function baseEditorOptions(prefs: EditorPrefs): import('monaco-editor').editor.IStandaloneEditorConstructionOptions {
+function baseEditorOptions(p: EditorPrefs): import('monaco-editor').editor.IStandaloneEditorConstructionOptions {
   return {
     theme: 'barang-dark',
     automaticLayout: true,
     fontFamily: "'JetBrains Mono','Cascadia Code',Consolas,monospace",
-    fontSize: prefs.fontSize,
+    fontSize: p.fontSize,
     lineHeight: 1.55,
-    minimap: { enabled: prefs.minimap },
-    wordWrap: prefs.wordWrap ? 'on' : 'off',
+    minimap: { enabled: p.minimap },
+    wordWrap: p.wordWrap ? 'on' : 'off',
+    bracketPairColorization: { enabled: p.bracketColors },
+    stickyScroll: { enabled: p.stickyScroll, maxLineCount: 5 },
     // Slim overlay-style scrollbars (the 14px default dominates the edge).
     scrollbar: { vertical: 'auto', horizontal: 'auto', verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
     scrollBeyondLastLine: false,
@@ -493,6 +513,7 @@ function wireCodeEditor(ed: import('monaco-editor').editor.IStandaloneCodeEditor
       ...s,
       tabs: s.tabs.map((t) => (models.get(t.path) === model ? { ...t, dirty: true } : t)),
     }));
+    schedulePreviewRefresh(model);
     hooks?.onTabs();
   });
   ed.onDidChangeCursorPosition((e) => hooks?.onCursor({ line: e.position.lineNumber, col: e.position.column }));
@@ -515,6 +536,7 @@ export function ensureSplitEditor(): boolean {
   host2.append(editorDiv2);
   editor2 = monaco.editor.create(editorDiv2, baseEditorOptions(prefs));
   wireCodeEditor(editor2, 2);
+  applyEditorPrefs();
   const active = editorStore.get().active2;
   if (active) editor2.setModel(models.get(active) ?? null);
   return true;
@@ -573,6 +595,26 @@ export async function openFile(path: string, opts?: { focus?: boolean; group?: E
     try {
       const file = await fsApi.read(path);
       if (file.binary) {
+        if (IMAGE_EXT.test(path)) {
+          // Images open in a preview tab instead of erroring. Drop the code
+          // tab stub created above so one file never owns two tabs.
+          editorStore.set((s) => ({
+            ...s,
+            tabs: s.tabs.filter((t) => !(t.path === path && (t.group || 1) === group && !t.image)),
+          }));
+          let imgTab = editorStore.get().tabs.find((t) => t.path === path && (t.group || 1) === group && t.image);
+          if (!imgTab) {
+            const fresh: Tab = { path, file: path, dirty: false, image: true, group };
+            editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
+            imgTab = fresh;
+          }
+          setGroupActive(group, path);
+          await renderImage(imgTab);
+          showCustom(group);
+          hooks?.onTabs();
+          if (wantFocus) ed.focus();
+          return;
+        }
         hooks?.toast(`${path} is binary — preview not supported`, 'error');
         editorStore.set((s) => {
           const rest = s.tabs.filter((t) => !(t.path === path && (t.group || 1) === group));
@@ -634,6 +676,7 @@ export async function openFile(path: string, opts?: { focus?: boolean; group?: E
  *  alone — groups are independent like VSCode). */
 function showNormal(group: EditorGroup) {
   diffDiv?.classList.add('hidden');
+  hideCustom(group);
   (group === 2 ? editorDiv2 : editorDiv)?.classList.remove('hidden');
 }
 
@@ -643,8 +686,179 @@ function showDiff(group: EditorGroup) {
   const host = group === 2 ? host2 : host1;
   if (host && diffDiv && diffDiv.parentElement !== host) host.append(diffDiv);
   (group === 2 ? editorDiv2 : editorDiv)?.classList.add('hidden');
+  hideCustom(group);
   diffDiv?.classList.remove('hidden');
   if (diffEditor) requestAnimationFrame(() => diffEditor!.layout());
+}
+
+/** Custom-content pane per group (markdown preview / image). Created lazily
+ *  so plain code editing never pays for it. */
+function customDivFor(group: EditorGroup): HTMLElement | null {
+  const host = group === 2 ? host2 : host1;
+  if (!host) return null;
+  let div = group === 2 ? customDiv2 : customDiv1;
+  if (!div) {
+    div = document.createElement('div');
+    div.className = 'custom-pane hidden';
+    host.append(div);
+    if (group === 2) customDiv2 = div;
+    else customDiv1 = div;
+  }
+  return div;
+}
+
+/** Show a group's custom pane (hides its code + diff panes). */
+function showCustom(group: EditorGroup) {
+  diffDiv?.classList.add('hidden');
+  (group === 2 ? editorDiv2 : editorDiv)?.classList.add('hidden');
+  customDivFor(group)?.classList.remove('hidden');
+}
+
+function hideCustom(group: EditorGroup) {
+  (group === 2 ? customDiv2 : customDiv1)?.classList.add('hidden');
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+/** Render a markdown preview tab (live model text preferred). */
+async function renderPreview(tab: Tab) {
+  const div = customDivFor(tab.group || 1);
+  if (!div || !tab.file) return;
+  const live = models.get(tab.file)?.getValue();
+  if (live !== undefined) {
+    div.innerHTML = `<div class="md-preview">${md(live)}</div>`;
+    return;
+  }
+  try {
+    const f = await fsApi.read(tab.file);
+    if (f.binary) {
+      div.innerHTML = '';
+      div.append(el_text('Binary file — preview not supported.'));
+      return;
+    }
+    div.innerHTML = `<div class="md-preview">${md(f.content ?? '')}</div>`;
+  } catch (e) {
+    div.innerHTML = '';
+    div.append(el_text(`Cannot preview: ${(e as Error).message}`));
+  }
+}
+
+function el_text(t: string): HTMLElement {
+  const d = document.createElement('div');
+  d.className = 'custom-empty';
+  d.textContent = t;
+  return d;
+}
+
+/** Render an image tab (base64 via the desktop backend, which needs an
+ *  absolute path while tree paths are root-relative). */
+async function renderImage(tab: Tab) {
+  const div = customDivFor(tab.group || 1);
+  if (!div || !tab.file) return;
+  const root = agentStore.get().root || '';
+  const sep = root.includes('\\') ? '\\' : '/';
+  const abs = root.replace(/[/\\]+$/, '') + sep + tab.file.replace(/^\.\//, '').split('/').join(sep);
+  try {
+    const r = await fsApi.readExternal(abs);
+    div.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'img-preview-wrap';
+    const img = document.createElement('img');
+    img.className = 'img-preview';
+    img.alt = r.name;
+    img.src = `data:${r.mime};base64,${r.base64}`;
+    wrap.append(img);
+    div.append(wrap);
+  } catch (e) {
+    div.innerHTML = '';
+    div.append(el_text(`Cannot preview image: ${(e as Error).message}`));
+  }
+}
+
+/** Open (or reveal) a markdown preview tab. */
+export async function openPreview(file: string, group?: EditorGroup) {
+  if (!editor || !monaco) return;
+  const g = group ?? focusedGroup();
+  if (g === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
+    return openPreview(file, 1);
+  }
+  const path = `preview:${file}`;
+  const base = file.split('/').pop() ?? file;
+  let tab = editorStore.get().tabs.find((t) => t.path === path && (t.group || 1) === g);
+  if (!tab) {
+    const fresh: Tab = { path, file, title: `Preview ${base}`, preview: true, dirty: false, group: g };
+    editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
+    tab = fresh;
+  }
+  setGroupActive(g, path);
+  await renderPreview(tab);
+  showCustom(g);
+  hooks?.onTabs();
+}
+
+/** Activate an already-open preview tab. */
+export function showPreviewTab(path: string, group?: EditorGroup) {
+  const s = editorStore.get();
+  const tab = s.tabs.find((t) => t.path === path && (group === undefined || (t.group || 1) === group));
+  if (!tab?.file) return;
+  const g = (tab.group || 1) as EditorGroup;
+  setGroupActive(g, path);
+  void renderPreview(tab);
+  showCustom(g);
+  hooks?.onTabs();
+}
+
+/** Open an image file in a preview tab (no Monaco model involved). */
+export async function openImageTab(file: string, group?: EditorGroup) {
+  if (!editor || !monaco) return;
+  const g = group ?? focusedGroup();
+  if (g === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
+    return openImageTab(file, 1);
+  }
+  let tab = editorStore.get().tabs.find((t) => t.path === file && (t.group || 1) === g && t.image);
+  if (!tab) {
+    const fresh: Tab = { path: file, file, dirty: false, image: true, group: g };
+    editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
+    tab = fresh;
+  }
+  setGroupActive(g, file);
+  await renderImage(tab);
+  showCustom(g);
+  hooks?.onTabs();
+}
+
+/** Activate an already-open image tab. */
+export function showImageTab(path: string, group?: EditorGroup) {
+  const s = editorStore.get();
+  const tab = s.tabs.find((t) => t.path === path && t.image && (group === undefined || (t.group || 1) === group));
+  if (!tab) return;
+  const g = (tab.group || 1) as EditorGroup;
+  setGroupActive(g, path);
+  void renderImage(tab);
+  showCustom(g);
+  hooks?.onTabs();
+}
+
+// Live preview: re-render visible previews of an edited model (debounced).
+const previewTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function schedulePreviewRefresh(model: import('monaco-editor').editor.ITextModel) {
+  let path: string | null = null;
+  for (const [p, m] of models) {
+    if (m === model) {
+      path = p;
+      break;
+    }
+  }
+  if (!path) return;
+  const s = editorStore.get();
+  const vis = s.tabs.find((t) => t.preview && t.file === path && groupActive(s, t.group || 1) === t.path);
+  if (!vis) return;
+  if (previewTimers.get(path)) clearTimeout(previewTimers.get(path)!);
+  previewTimers.set(path, setTimeout(() => {
+    previewTimers.delete(path!);
+    const cur = editorStore.get().tabs.find((t) => t.preview && t.file === path && groupActive(editorStore.get(), t.group || 1) === t.path);
+    if (cur) void renderPreview(cur);
+  }, 500));
 }
 
 function ensureDiffEditor() {
@@ -811,7 +1025,13 @@ function paintGroupModel(group: EditorGroup) {
   const pair = path ? diffModels.get(`${group}:${path}`) : undefined;
   const ed = editorFor(group);
   if (!ed) return;
-  if (tab?.diff && pair && diffEditor) {
+  if (tab?.preview && tab.file) {
+    void renderPreview(tab);
+    showCustom(group);
+  } else if (tab?.image && tab.file) {
+    void renderImage(tab);
+    showCustom(group);
+  } else if (tab?.diff && pair && diffEditor) {
     diffEditor.setModel({ original: pair.original, modified: pair.modified });
     showDiff(group);
   } else {
@@ -940,7 +1160,7 @@ export async function openInOtherGroup(path: string) {
 export async function closePathAndChildren(prefix: string): Promise<boolean> {
   const hit = editorStore.get().tabs
     .filter((t) => {
-      const p = t.path;
+      const p = t.preview && t.file ? t.file : t.path;
       return p === prefix || p.startsWith(prefix + '/') || p === `diff:${prefix}` || p.startsWith(`diff:${prefix}/`);
     });
   if (!hit.length) return true;

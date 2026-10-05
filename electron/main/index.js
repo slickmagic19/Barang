@@ -1763,6 +1763,24 @@ async function runUiSmoke() {
           if (!mq || mq.items.length !== 2 || mq.question !== 'Q1?' || mq.items[1].options.length !== 1) bad.push('perm-multi');
           if (qf(null) !== null || qf({}) !== null) bad.push('perm-multi-garbage');
         }
+        // Ghost-busting: tombstoned dead waits never come back; repeats flag.
+        if (typeof u.isRepeatAsk !== 'function' || typeof u.pruneQuestions !== 'function') bad.push('no-ghost-fns');
+        else {
+          const last = { sessionID: 's', text: 'Red or Blue?', at: 1000000 };
+          if (u.isRepeatAsk(null, 's', 'Red or Blue?', 1000000) !== false) bad.push('rep-null');
+          if (u.isRepeatAsk(last, 'other', 'Red or Blue?', 1000000) !== false) bad.push('rep-session');
+          if (u.isRepeatAsk(last, 's', '  red   OR blue? ', 1000000) !== true) bad.push('rep-hit');
+          if (u.isRepeatAsk(last, 's', 'Red or Blue?', 1000000 + 11 * 60 * 1000) !== false) bad.push('rep-stale');
+          if (u.isRepeatAsk(last, 's', 'Different?', 1000000) !== false) bad.push('rep-text');
+          const qa = { key: 's:q1', sessionID: 's', questionID: 'q1', header: '', question: 'Q?', options: [], items: [] };
+          const qb = { key: 's:q2', sessionID: 's', questionID: 'q2', header: '', question: 'Q2?', options: [], items: [] };
+          const pr = u.pruneQuestions([qa, qb], [qb], new Set(['s:q2']));
+          if (pr.length !== 0) bad.push('prune-tomb');
+          const pr2 = u.pruneQuestions([qa], [qa, qb], new Set());
+          if (pr2.length !== 2 || pr2[1].key !== 's:q2') bad.push('prune-merge');
+          const pr3 = u.pruneQuestions([qa, qb], [qa], new Set());
+          if (pr3.length !== 1 || pr3[0].key !== 's:q1') bad.push('prune-gone');
+        }
         const pa = u.parseAgentEvent;
         if (typeof pa !== 'function') bad.push('no-parse-fn');
         else {
@@ -2385,6 +2403,8 @@ async function runUiSmoke() {
   console.log('[smoke-ui] slash-cmd: ' + slashCmd);
   pass = pass && slashCmd === 'ok';
   // Composer history: Up/Down walks submitted lines (seeded, then cleaned).
+  // Residue-proof: older entries may precede the seeds, so the probe
+  // asserts transitions (up-ends-stable, down-returns) not positions.
   let histWalk = 'skip';
   try {
     histWalk = await w.webContents.executeJavaScript(`(async () => {
@@ -2395,29 +2415,47 @@ async function runUiSmoke() {
       try { saved = localStorage.getItem(KEY); } catch {}
       const input = document.querySelector('.composer-input');
       if (!input) return 'no-composer';
-      input.focus();
-      input.value = '';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      u.pushComposerHist('/compact');
-      u.pushComposerHist('hello world');
-      const press = (key) => input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      press('ArrowUp'); await sleep(150);
-      if (input.value !== 'hello world') return 'walk-1:' + input.value;
-      press('ArrowUp'); await sleep(150);
-      if (input.value !== '/compact') return 'walk-2:' + input.value;
-      press('ArrowUp'); await sleep(150);
-      if (input.value !== '/compact') return 'walk-top:' + input.value;
-      press('ArrowDown'); await sleep(150);
-      if (input.value !== 'hello world') return 'walk-3:' + input.value;
-      press('ArrowDown'); await sleep(150);
-      if (input.value !== '') return 'walk-draft:' + JSON.stringify(input.value);
       try {
-        if (saved === null) localStorage.removeItem(KEY);
-        else localStorage.setItem(KEY, saved);
-      } catch {}
-      input.value = '';
-      return 'ok';
+        input.focus();
+        input.value = '';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        u.pushComposerHist('/compact');
+        u.pushComposerHist('hello world');
+        const press = (key) => input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+        press('ArrowUp'); await sleep(150);
+        if (input.value !== 'hello world') return 'walk-1:' + input.value;
+        press('ArrowUp'); await sleep(150);
+        const v2 = input.value;
+        if (v2 !== '/compact') return 'walk-2:' + v2;
+        let top = v2, guard = 0;
+        while (guard++ < 12) {
+          press('ArrowUp'); await sleep(120);
+          if (input.value === top) break;
+          top = input.value;
+        }
+        if (input.value !== top) return 'walk-unstable';
+        // Down to the newest seed and past it into the draft: residue copies
+        // may repeat, so run to a STABLE empty draft instead of first sight.
+        let sawHello = false, v = top, guard2 = 0;
+        while (guard2++ < 16) {
+          press('ArrowDown'); await sleep(120);
+          v = input.value;
+          if (v === 'hello world') sawHello = true;
+          if (v === '' && sawHello) break;
+        }
+        if (!sawHello) return 'walk-back:' + JSON.stringify(v);
+        if (v !== '') return 'walk-nodraft:' + JSON.stringify(v);
+        press('ArrowDown'); await sleep(120);
+        if (input.value !== '') return 'walk-draft:' + JSON.stringify(input.value);
+        return 'ok';
+      } finally {
+        try {
+          if (saved === null) localStorage.removeItem(KEY);
+          else localStorage.setItem(KEY, saved);
+        } catch {}
+        input.value = '';
+      }
     })()`);
   } catch (e) { histWalk = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] hist-walk: ' + histWalk);

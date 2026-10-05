@@ -253,6 +253,48 @@ export function filePartView(part: Record<string, unknown>):
   return null;
 }
 
+/** History cursor math (opencode-style): idx -1 = current draft at the
+ *  bottom, 0..len-1 = entries oldest-first. Pure (smoke-probed). */
+export function stepHistory(len: number, idx: number, dir: 'up' | 'down'): number {
+  if (len <= 0) return -1;
+  if (dir === 'up') return idx <= 0 ? (idx === 0 ? 0 : len - 1) : idx - 1;
+  return idx < 0 ? -1 : idx + 1 >= len ? -1 : idx + 1;
+}
+
+const HIST_KEY = 'barang:composer-history-v1';
+const HIST_MAX = 100;
+
+function loadHist(): string[] {
+  try {
+    const raw = localStorage.getItem(HIST_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string' && x).slice(-HIST_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Composer history (opencode-style ↑↓): every submitted prompt/command,
+// newest last, persisted across restarts. Navigation state is per composer
+// (single composer instance in the app).
+let histList: string[] = loadHist();
+let histIdx = -1;
+let histDraft = '';
+
+/** Record a submitted composer line (test seam: smoke drives the real fn). */
+export function pushComposerHist(text: string) {
+  const t = String(text ?? '').trim();
+  if (!t) return;
+  if (histList[histList.length - 1] !== t) {
+    histList.push(t);
+    if (histList.length > HIST_MAX) histList = histList.slice(-HIST_MAX);
+    try {
+      localStorage.setItem(HIST_KEY, JSON.stringify(histList));
+    } catch { /* private mode */ }
+  }
+  histIdx = -1;
+}
+
 function diffStatus(d: ChangeEntry): { label: string; cls: string; icon: 'plus' | 'trash' | 'pencil' } {
   if (d.status === 'added') return { label: 'Added', cls: 'is-added', icon: 'plus' };
   if (d.status === 'deleted') return { label: 'Deleted', cls: 'is-deleted', icon: 'trash' };
@@ -844,6 +886,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     if (slash) {
       const local = LOCAL_COMMANDS[slash.name];
       if (local) {
+        pushComposerHist(v.trim());
         input.value = '';
         autoGrow();
         suggest.classList.add('hidden');
@@ -855,6 +898,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
         hooks.toast(`Unknown command: /${slash.name}`, 'error');
         return; // keep the text so it can be fixed
       }
+      pushComposerHist(v.trim());
       input.value = '';
       autoGrow();
       suggest.classList.add('hidden');
@@ -866,6 +910,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     paintAttach();
     input.value = '';
     autoGrow();
+    pushComposerHist(v);
     void sendMessage(v, files);
   };
   btnSend.onclick = () => void doSend();
@@ -876,6 +921,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   };
   input.addEventListener('input', () => {
     autoGrow();
+    histIdx = -1; // typing abandons history navigation
     void updateSuggest();
   });
 
@@ -969,6 +1015,20 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       else if (e.key === 'ArrowUp') suggestIdx = Math.max(suggestIdx - 1, 0);
       else if (suggestItems[suggestIdx]) insertSuggest(suggestItems[suggestIdx]);
       suggest.querySelectorAll('.suggest-item').forEach((n, i) => n.classList.toggle('active', i === suggestIdx));
+      return;
+    }
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey) {
+      // opencode-style history (suggest already handled above): Up recalls
+      // older, Down moves back toward the draft. Recalled text stays out of
+      // the suggest popup so arrows keep walking history.
+      e.preventDefault();
+      const dir = e.key === 'ArrowUp' ? 'up' : 'down';
+      if (dir === 'up' && histIdx === -1) histDraft = input.value;
+      histIdx = stepHistory(histList.length, histIdx, dir as 'up' | 'down');
+      input.value = histIdx === -1 ? histDraft : (histList[histIdx] ?? '');
+      autoGrow();
+      suggest.classList.add('hidden');
+      input.selectionStart = input.selectionEnd = input.value.length;
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey) {

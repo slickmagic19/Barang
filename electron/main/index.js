@@ -2275,6 +2275,14 @@ async function runUiSmoke() {
         const kn = uc({ id: 'x', tokens: { input: 5, output: 5 }, cost: 0 }, 'auto model', 1, null);
         if (!kn || kn.pct !== null) bad.push('card-nolimit');
       }
+      // Composer history: cursor math + live Up/Down walk (seeded, cleaned).
+      const sh = u.stepHistory;
+      if (typeof sh !== 'function' || typeof u.pushComposerHist !== 'function') bad.push('no-hist-fns');
+      else {
+        if (sh(0, -1, 'up') !== -1) bad.push('hist-empty');
+        if (sh(3, -1, 'up') !== 2 || sh(3, 2, 'up') !== 1 || sh(3, 0, 'up') !== 0) bad.push('hist-up');
+        if (sh(3, -1, 'down') !== -1 || sh(3, 1, 'down') !== 2 || sh(3, 2, 'down') !== -1) bad.push('hist-down');
+      }
       if (bad.length) return 'unit-FAIL:' + bad.join(';');
       const meter = document.querySelector('.status-usage');
       if (!meter) return 'no-meter-el';
@@ -2376,6 +2384,44 @@ async function runUiSmoke() {
   } catch (e) { slashCmd = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] slash-cmd: ' + slashCmd);
   pass = pass && slashCmd === 'ok';
+  // Composer history: Up/Down walks submitted lines (seeded, then cleaned).
+  let histWalk = 'skip';
+  try {
+    histWalk = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.pushComposerHist !== 'function') return 'no-push-fn';
+      const KEY = 'barang:composer-history-v1';
+      let saved = null;
+      try { saved = localStorage.getItem(KEY); } catch {}
+      const input = document.querySelector('.composer-input');
+      if (!input) return 'no-composer';
+      input.focus();
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      u.pushComposerHist('/compact');
+      u.pushComposerHist('hello world');
+      const press = (key) => input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      press('ArrowUp'); await sleep(150);
+      if (input.value !== 'hello world') return 'walk-1:' + input.value;
+      press('ArrowUp'); await sleep(150);
+      if (input.value !== '/compact') return 'walk-2:' + input.value;
+      press('ArrowUp'); await sleep(150);
+      if (input.value !== '/compact') return 'walk-top:' + input.value;
+      press('ArrowDown'); await sleep(150);
+      if (input.value !== 'hello world') return 'walk-3:' + input.value;
+      press('ArrowDown'); await sleep(150);
+      if (input.value !== '') return 'walk-draft:' + JSON.stringify(input.value);
+      try {
+        if (saved === null) localStorage.removeItem(KEY);
+        else localStorage.setItem(KEY, saved);
+      } catch {}
+      input.value = '';
+      return 'ok';
+    })()`);
+  } catch (e) { histWalk = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] hist-walk: ' + histWalk);
+  pass = pass && histWalk === 'ok';
   // Search hits land highlighted in the open file (all matches + current).
   let searchHl = 'skip';
   try {

@@ -21,7 +21,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry,
 deleteFocusedEntry, pathOf } from './ui/explorer';
 import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab, showImageTab, getEditorDisplayFlags } from './ui/editor';
-import { initChat, filePartView } from './ui/chat';
+import { initChat, filePartView, stepHistory, pushComposerHist } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
 import { pomoNext, formatClock, normalizePomoSettings, POMO_DEFAULTS } from './lib/pomodoro';
@@ -315,6 +315,7 @@ async function boot() {
         <div><kbd>Ctrl+Shift+P</kbd><span>commands</span></div>
         <div><kbd>Ctrl+Shift+F</kbd><span>search in files</span></div>
         <div><kbd>Enter</kbd><span>send to agent</span></div>
+        <div><kbd>↑↓</kbd><span>input history</span></div>
         <div><kbd>Ctrl+S</kbd><span>save file</span></div>
         <div><kbd>Ctrl+N</kbd><span>new untitled tab</span></div>
         <div><kbd>Ctrl+W</kbd><span>close tab</span></div>
@@ -878,6 +879,8 @@ async function boot() {
     normalizePomoSettings,
     pomoDotsFilled,
     filePartView,
+    stepHistory,
+    pushComposerHist,
     openPreview,
     openFile,
     closeTab,

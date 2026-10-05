@@ -50,7 +50,7 @@ const COMMANDS = [
 ];
 
 const SHORTCUTS = `Ctrl+P — quick open · Ctrl+Shift+P — commands · Ctrl+Shift+F — search view
-Enter — send agent message · Shift+Enter — newline · Ctrl+S — save file · Ctrl+Shift+S — save all
+Enter — send agent message · Shift+Enter — newline · ↑↓ — input history · Ctrl+S — save file · Ctrl+Shift+S — save all
 Ctrl+N — new untitled tab · Ctrl+W — close tab · Ctrl+B — explorer rail · Ctrl+J — agent panel
 Ctrl+\\ — split editor · Ctrl+1/Ctrl+2 — focus group
 Ctrl+\` — terminal · Ctrl+Shift+\` — new terminal · Ctrl+Shift+G — source control · Ctrl+Shift+E — explorer · Ctrl+F — find in terminal

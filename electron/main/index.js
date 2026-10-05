@@ -2387,6 +2387,11 @@ async function runUiSmoke() {
       if (u.getSearchDecorCount() < 2) return 'no-decor';
       const tab = document.querySelector('.tab[data-path="search-hl-probe.txt"]');
       if (!tab) return 'no-tab';
+      // Switching tabs drops the highlights.
+      await u.openFile('package.json');
+      await new Promise((r) => setTimeout(r, 400));
+      if (u.getSearchDecorCount() !== 0) return 'decor-survives-switch';
+      if (typeof u.closeTab === 'function') await u.closeTab('package.json');
       await u.revealSearchMatch('search-hl-probe.txt', 1, 'zzz-no-match', { regex: false, caseSensitive: true });
       await new Promise((r) => setTimeout(r, 400));
       if (u.getSearchDecorCount() !== 0) return 'decor-not-cleared';

@@ -633,6 +633,9 @@ function editorFor(group: EditorGroup): import('monaco-editor').editor.IStandalo
 }
 
 function setGroupActive(group: EditorGroup, path: string | null) {
+  // Any tab switch drops search-match highlights (they belong to the jump
+  // that created them; the next revealSearchMatch re-applies fresh).
+  clearSearchDecorations();
   editorStore.set(group === 2 ? { active2: path, focus: 2 } : { active: path, focus: 1 });
 }
 

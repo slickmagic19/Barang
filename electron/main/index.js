@@ -278,7 +278,7 @@ async function checkForUpdates() {
   if (updateCache && now - updateCache.at < 3600000) return updateCache.info;
   const info = { update: false, current: app.getVersion(), packaged: app.isPackaged };
   try {
-    const res = await fetch('https://api.github.com/slickmagic19/Barang/releases/latest', {
+    const res = await fetch('https://api.github.com/repos/slickmagic19/Barang/releases/latest', {
       headers: { 'user-agent': 'barang-updater', accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(15000),
     });
@@ -716,6 +716,9 @@ async function runMainSmoke() {
     if (typeof i.update !== 'boolean' || i.current !== app.getVersion()) {
       throw new Error('bad update payload');
     }
+    // A 4xx here means OUR endpoint is wrong (offline/DNS/timeout passes
+    // vacuously — the sandbox may have no network).
+    if (i.error && /HTTP 4/.test(i.error)) throw new Error('update endpoint broken: ' + i.error);
     return `update=${i.update} current=${i.current}`;
   });
   await check('term-echo', async () => {

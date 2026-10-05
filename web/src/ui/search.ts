@@ -11,6 +11,7 @@ import { confirmAndApplyReplace } from '../lib/replaceFlow';
 export interface SearchHooks {
   toast(msg: string, kind?: 'info' | 'error'): void;
   revealInEditor(path: string, line?: number): void;
+  revealSearchMatch(path: string, line: number | undefined, query: string, flags: { regex: boolean; caseSensitive: boolean }): void;
   refreshExplorer(): void;
 }
 
@@ -288,7 +289,7 @@ export function initSearchView(host: HTMLElement, hooks: SearchHooks) {
       const nm = el('button', { class: 'search-file-name' }) as HTMLButtonElement;
       nm.append(fileIconEl(f.path.split('/').pop() ?? f.path, 14), el('span', {}, f.path));
       nm.title = `${f.path} — click to open`;
-      nm.onclick = () => hooks.revealInEditor(f.path, byFile.get(f.path)?.[0]?.line);
+      nm.onclick = () => hooks.revealSearchMatch(f.path, byFile.get(f.path)?.[0]?.line, queryInput.value, { regex, caseSensitive });
       const cnt = el('span', { class: 'scm-count' }, String(f.matches));
       const tools = el('div', { class: 'scm-sec-tools' });
       const bRep = el('button', { class: 'icon-btn', title: `Replace all in ${f.path} (confirms first)` }) as HTMLButtonElement;
@@ -324,7 +325,7 @@ export function initSearchView(host: HTMLElement, hooks: SearchHooks) {
           prev.innerHTML = highlightLine(d.text, d.cols ?? []);
           row.append(prev);
           row.title = `${f.path}:${d.line} — click to open`;
-          row.onclick = () => hooks.revealInEditor(f.path, d.line);
+          row.onclick = () => hooks.revealSearchMatch(f.path, d.line, queryInput.value, { regex, caseSensitive });
           sec.append(row);
         }
       }

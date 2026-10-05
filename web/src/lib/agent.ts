@@ -166,6 +166,7 @@ export interface PendingQuestion {
   header: string;
   question: string;
   options: Array<{ label: string; description?: string }>;
+  items: Array<{ header: string; question: string; options: Array<{ label: string; description?: string }> }>;
   messageID?: string;
   callID?: string;
 }
@@ -344,19 +345,29 @@ export function questionFromEvent(props: unknown): PendingQuestion | null {
   if (!id || !sessionID || !qs.length) return null;
   const first = (qs[0] && typeof qs[0] === 'object' ? qs[0] : {}) as Record<string, unknown>;
   const tool = (p.tool && typeof p.tool === 'object' ? p.tool : null) as Record<string, unknown> | null;
-  const options = Array.isArray(first.options)
-    ? (first.options as unknown[]).filter((o) => o && typeof o === 'object').map((o) => {
-      const oo = o as Record<string, unknown>;
-      return { label: String(oo.label ?? ''), description: typeof oo.description === 'string' ? oo.description : undefined };
-    }).filter((o) => o.label)
-    : [];
+  const optOf = (q: unknown) => {
+    const qq = (q && typeof q === 'object' ? q : {}) as Record<string, unknown>;
+    const header = typeof qq.header === 'string' ? qq.header.slice(0, 120) : '';
+    const question = typeof qq.question === 'string' ? qq.question.slice(0, 500) : '';
+    const options = Array.isArray(qq.options)
+      ? (qq.options as unknown[]).filter((o) => o && typeof o === 'object').map((o) => {
+        const oo = o as Record<string, unknown>;
+        return { label: String(oo.label ?? ''), description: typeof oo.description === 'string' ? oo.description : undefined };
+      }).filter((o) => o.label)
+      : [];
+    return { header, question, options };
+  };
+  const items = qs.map(optOf).filter((q) => q.question).map((q) => ({ ...q, options: q.options.slice(0, 8) }));
+  if (!items.length) return null;
+  const options = items[0].options;
   return {
     key: `${sessionID}:${id}`,
     sessionID,
     questionID: id,
-    header: typeof first.header === 'string' ? first.header.slice(0, 120) : '',
-    question: typeof first.question === 'string' ? first.question.slice(0, 500) : `${qs.length} question(s)`,
-    options: options.slice(0, 8),
+    header: items[0].header,
+    question: items[0].question,
+    options,
+    items,
     messageID: tool && typeof tool.messageID === 'string' ? tool.messageID : undefined,
     callID: tool && typeof tool.callID === 'string' ? tool.callID : undefined,
   };

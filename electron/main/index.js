@@ -1749,6 +1749,17 @@ async function runUiSmoke() {
         const c2 = pf(upd);
         if (!c2 || c2.key !== 's2:p2' || !c2.title.includes('edit')) bad.push('perm-updated');
         if (pf(null) !== null || pf({}) !== null || pf({ id: 'x' }) !== null) bad.push('perm-garbage');
+        // Multi-question requests keep every question (answerable 1-by-1).
+        const qf = u.questionFromEvent;
+        if (typeof qf !== 'function') bad.push('no-qevt-fn');
+        else {
+          const mq = qf({ id: 'qq', sessionID: 'ss', questions: [
+            { header: 'H1', question: 'Q1?', options: [{ label: 'A' }, { label: 'B', description: 'second' }] },
+            { header: 'H2', question: 'Q2?', options: [{ label: 'C' }] },
+          ], tool: {} });
+          if (!mq || mq.items.length !== 2 || mq.question !== 'Q1?' || mq.items[1].options.length !== 1) bad.push('perm-multi');
+          if (qf(null) !== null || qf({}) !== null) bad.push('perm-multi-garbage');
+        }
         const pa = u.parseAgentEvent;
         if (typeof pa !== 'function') bad.push('no-parse-fn');
         else {
@@ -2362,6 +2373,30 @@ async function runUiSmoke() {
   } catch (e) { slashCmd = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] slash-cmd: ' + slashCmd);
   pass = pass && slashCmd === 'ok';
+  // Search hits land highlighted in the open file (all matches + current).
+  let searchHl = 'skip';
+  try {
+    searchHl = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.revealSearchMatch !== 'function' || typeof u.getSearchDecorCount !== 'function') return 'no-hl-fns';
+      try {
+        await window.barang.fs.write('search-hl-probe.txt', 'alpha line\\nneedle here needle\\nomega line\\n');
+      } catch (e) { return 'write-fail'; }
+      await u.revealSearchMatch('search-hl-probe.txt', 2, 'needle', { regex: false, caseSensitive: true });
+      await new Promise((r) => setTimeout(r, 900));
+      if (u.getSearchDecorCount() < 2) return 'no-decor';
+      const tab = document.querySelector('.tab[data-path="search-hl-probe.txt"]');
+      if (!tab) return 'no-tab';
+      await u.revealSearchMatch('search-hl-probe.txt', 1, 'zzz-no-match', { regex: false, caseSensitive: true });
+      await new Promise((r) => setTimeout(r, 400));
+      if (u.getSearchDecorCount() !== 0) return 'decor-not-cleared';
+      try { await window.barang.fs.remove('search-hl-probe.txt'); } catch {}
+      if (typeof u.closeTab === 'function') await u.closeTab('search-hl-probe.txt');
+      return 'ok';
+    })()`);
+  } catch (e) { searchHl = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] search-hl: ' + searchHl);
+  pass = pass && searchHl === 'ok';
   // Split editor: toggle, per-group strips, open-in-other, auto-collapse.
   let splitEd = 'skip';
   try {

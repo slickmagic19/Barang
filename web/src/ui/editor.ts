@@ -443,6 +443,69 @@ export function getEditorDisplayFlags(): { brackets: boolean; sticky: boolean } 
   return { ...appliedEditorFlags };
 }
 
+// Search-match decorations (one id list per editor instance).
+const searchDecorIds = new Map<import('monaco-editor').editor.IStandaloneCodeEditor, string[]>();
+
+/** Clear search-match decorations on both editors. */
+export function clearSearchDecorations() {
+  if (!monaco) {
+    searchDecorIds.clear();
+    return;
+  }
+  for (const [ed, ids] of searchDecorIds) {
+    try {
+      ed.deltaDecorations(ids, []);
+    } catch { /* model disposed mid-flight */ }
+  }
+  searchDecorIds.clear();
+}
+
+/** Open a file at a search hit and highlight the query — every match dim,
+ *  the hit's match strong (find-widget landing). Bad regex still reveals
+ *  the line, just without highlights. */
+export async function revealSearchMatch(
+  path: string,
+  line?: number,
+  query?: string,
+  flags?: { regex?: boolean; caseSensitive?: boolean },
+) {
+  clearSearchDecorations();
+  await openFile(path);
+  if (!monaco) return;
+  const g = focusedGroup();
+  const ed = editorFor(g);
+  const model = ed?.getModel();
+  if (!ed || !model) return;
+  const lineCount = model.getLineCount();
+  const ln = line == null ? 1 : Math.max(1, Math.min(lineCount, Math.floor(line) || 1));
+  ed.revealLineInCenter(ln);
+  ed.setPosition({ lineNumber: ln, column: 1 });
+  const q = String(query ?? '');
+  if (!q) return;
+  let matches: import('monaco-editor').Range[] = [];
+  try {
+    matches = model.findMatches(q, false, !!flags?.regex, !!flags?.caseSensitive, null, false, 500)
+      .map((m) => m.range);
+  } catch { /* bad regex — line reveal still stands */ }
+  if (!matches.length) return;
+  const target = matches.find((r) => r.startLineNumber === ln) ?? matches[0];
+  ed.revealRangeInCenter(target);
+  ed.setPosition({ lineNumber: target.startLineNumber, column: target.startColumn });
+  const ruler = { color: '#e0af6859', position: monaco.editor.OverviewRulerLane.Right };
+  const ids = ed.deltaDecorations([], [
+    ...matches.map((range) => ({ range, options: { inlineClassName: 'search-match', overviewRuler: ruler } })),
+    { range: target, options: { inlineClassName: 'search-match-current' } },
+  ]);
+  searchDecorIds.set(ed, ids);
+}
+
+/** Decorations currently held (smoke probe). */
+export function getSearchDecorCount(): number {
+  let n = 0;
+  for (const ids of searchDecorIds.values()) n += ids.length;
+  return n;
+}
+
 export async function initEditor(container: HTMLElement, h: EditorHooks) {
   hooks = h;
   monaco = await monacoLoader.load();

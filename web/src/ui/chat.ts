@@ -1141,27 +1141,68 @@ function paintTodos() {
     paintChanges();
     // agent todos (server-owned checklist)
     paintTodos();
-    // agent question-tool waits: 1.18 serve has no HTTP reply route, so the
-    // card is read-only — options shown, recovery via Stop + chat answer.
+    // Agent question-tool waits: 1.18 serve has no answer route, so picking
+    // an option stops the stuck run and sends the choice as a new message.
     quests.innerHTML = '';
     for (const q of s.questions) {
       const card = el('div', { class: 'quest-card' });
-      const title = el('div', { class: 'quest-title' }, q.header || 'The agent has a question');
+      const title = el('div', { class: 'quest-title' }, q.items.length > 1 ? `The agent has ${q.items.length} questions` : (q.header || 'The agent has a question'));
       title.prepend(iconEl('help', 14));
       card.append(title);
-      card.append(el('div', { class: 'quest-q' }, q.question));
-      if (q.options.length) {
-        const opts = el('div', { class: 'quest-opts' });
-        for (const o of q.options) {
-          const row = el('div', { class: 'quest-opt' });
-          row.append(el('span', { class: 'quest-opt-label' }, o.label));
-          if (o.description) row.append(el('span', { class: 'quest-opt-desc' }, o.description));
-          opts.append(row);
+      const picks = new Map<number, string>();
+      q.items.forEach((item, qi) => {
+        if (q.items.length > 1) card.append(el('div', { class: 'quest-q' }, item.question));
+        else card.append(el('div', { class: 'quest-q' }, item.question || q.question));
+        if (item.options.length) {
+          const opts = el('div', { class: 'quest-opts' });
+          item.options.forEach((o) => {
+            const lab = el('label', { class: 'quest-opt' }) as HTMLLabelElement;
+            const radio = el('input', { type: 'radio', name: `quest-${q.questionID}-${qi}` }) as HTMLInputElement;
+            radio.value = o.label;
+            radio.onchange = () => {
+              if (radio.checked) picks.set(qi, o.label);
+            };
+            lab.append(radio, el('span', { class: 'quest-opt-label' }, o.label));
+            if (o.description) lab.append(el('span', { class: 'quest-opt-desc' }, o.description));
+            opts.append(lab);
+          });
+          card.append(opts);
         }
-        card.append(opts);
-      }
-      card.append(el('div', { class: 'quest-note' }, 'Barang cannot answer this yet — Stop the run, then reply with your choice in chat.'));
+      });
+      const hasOptions = q.items.some((item) => item.options.length > 0);
+      card.append(el('div', { class: 'quest-note' }, hasOptions
+        ? 'Pick an option, then Send answer — this stops the run and replies with your choice.'
+        : 'This question has no options — Stop the run, then reply in chat.'));
       const row = el('div', { class: 'perm-row' });
+      if (hasOptions) {
+        const bSend = el('button', { class: 'btn btn-primary btn-sm' }, 'Send answer') as HTMLButtonElement;
+        bSend.onclick = () => {
+          bSend.toggleAttribute('disabled', true);
+          void (async () => {
+            try {
+              const lines = q.items.map((item, qi) => {
+                const pick = picks.get(qi);
+                const what = item.question || q.question;
+                return pick ? `For your question "${what}": ${pick}.` : `For your question "${what}": (no option picked).`;
+              });
+              if (![...picks.values()].length) {
+                hooks.toast('Pick an option first.', 'error');
+                return;
+              }
+              if (agentStore.get().busy) await abortActive();
+              if (agentStore.get().busy) {
+                hooks.toast('Stop did not take — answer in chat once the run ends.', 'error');
+                return;
+              }
+              const ok = await sendMessage(lines.join('\n'));
+              if (!ok) hooks.toast('Could not send the answer — try again from the composer.', 'error');
+            } finally {
+              bSend.toggleAttribute('disabled', false);
+            }
+          })();
+        };
+        row.append(bSend);
+      }
       const bStop = el('button', { class: 'btn btn-danger btn-sm' }, 'Stop the run');
       bStop.onclick = () => void abortActive();
       row.append(bStop);

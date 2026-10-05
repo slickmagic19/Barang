@@ -2392,6 +2392,17 @@ async function runUiSmoke() {
       await new Promise((r) => setTimeout(r, 400));
       if (u.getSearchDecorCount() !== 0) return 'decor-survives-switch';
       if (typeof u.closeTab === 'function') await u.closeTab('package.json');
+      // Clearing the query drops the highlights (the reported bug).
+      await u.revealSearchMatch('search-hl-probe.txt', 2, 'needle', { regex: false, caseSensitive: true });
+      await new Promise((r) => setTimeout(r, 600));
+      if (u.getSearchDecorCount() < 2) return 'no-decor-again';
+      const q = document.querySelector('#view-search .search-input[placeholder^="Search files"]');
+      if (!q) return 'no-search-input';
+      q.focus();
+      q.value = '';
+      q.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 1000));
+      if (u.getSearchDecorCount() !== 0) return 'decor-survives-clear';
       await u.revealSearchMatch('search-hl-probe.txt', 1, 'zzz-no-match', { regex: false, caseSensitive: true });
       await new Promise((r) => setTimeout(r, 400));
       if (u.getSearchDecorCount() !== 0) return 'decor-not-cleared';

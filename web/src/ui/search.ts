@@ -13,6 +13,7 @@ export interface SearchHooks {
   revealInEditor(path: string, line?: number): void;
   revealSearchMatch(path: string, line: number | undefined, query: string, flags: { regex: boolean; caseSensitive: boolean }): void;
   refreshExplorer(): void;
+  clearHighlights(): void;
 }
 
 interface SearchDetail { path: string; line: number; text: string; cols: number[] }
@@ -179,6 +180,9 @@ export function initSearchView(host: HTMLElement, hooks: SearchHooks) {
   });
 
   async function runSearch(immediate: boolean): Promise<void> {
+    // A new (or cleared) query orphans any jump highlights from the last
+    // one — drop them before the fresh results land.
+    hooks.clearHighlights();
     const q = queryInput.value.trim();
     if (!q) {
       st = null;

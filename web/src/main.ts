@@ -20,7 +20,7 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
 }
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry,
 deleteFocusedEntry, pathOf } from './ui/explorer';
-import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, revealSearchMatch, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab, showImageTab, getEditorDisplayFlags } from './ui/editor';
+import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab, showImageTab, getEditorDisplayFlags } from './ui/editor';
 import { initChat, filePartView } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
@@ -705,6 +705,7 @@ async function boot() {
     toast,
     revealInEditor: (p, line) => void revealInEditor(p, line),
     revealSearchMatch: (p, line, q, flags) => void revealSearchMatch(p, line, q, flags),
+    clearHighlights: () => clearSearchDecorations(),
     refreshExplorer: () => {
       refreshExplorer();
       explorer.repaint();

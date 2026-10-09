@@ -114,8 +114,7 @@ const barang = {
     /** Custom notification sound picker (vaulted to userData). */
     pickSound: () => invoke('app:pick-sound'),
     /** Menu + root-change events. cb(kind, payload). */
-    onMenu: (cb) => {
-      const handlers = {
+    onMenu: (cb) => {      const handlers = {
         'menu:toggle-agent': () => cb('toggle-agent'),
         'menu:palette': (_ev, prefill) => cb('palette', prefill),
         'menu:new-session': () => cb('new-session'),
@@ -127,6 +126,12 @@ const barang = {
       return () => {
         for (const [ch, h] of Object.entries(handlers)) ipcRenderer.removeListener(ch, h);
       };
+    },
+    /** Project file changes (agent/external). cb({ root }). */
+    onFsChanged: (cb) => {
+      const h = (_ev, payload) => cb(payload ?? {});
+      ipcRenderer.on('app:fs-changed', h);
+      return () => ipcRenderer.removeListener('app:fs-changed', h);
     },
   },
 };

@@ -81,6 +81,7 @@ export interface BarangBridge {
     clearAttention(): Promise<{ ok: boolean }>;
     pickSound(): Promise<{ ok: boolean; id: string; name: string; fileUrl: string }>;
     onMenu(cb: (kind: 'toggle-agent' | 'palette' | 'new-session' | 'root-changed' | 'opencode:ready' | 'opencode:error', payload?: unknown) => void): () => void;
+    onFsChanged(cb: (ev: { root: string }) => void): () => void;
   };
 }
 

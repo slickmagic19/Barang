@@ -5,6 +5,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, she
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { watch as fsWatch } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -108,6 +109,41 @@ function broadcast(channel, payload) {
     } catch {
       /* noop */
     }
+  }
+}
+
+let rootWatcher = null; // fs watcher for the open project (live explorer)
+let watchTimer = null;
+
+/** Watch the open project for agent/external file changes and nudge the UI.
+ *  Single debounced ping per burst (npm installs settle into one refresh).
+ *  No-op without a project; re-armed on every project switch. */
+function watchProject(dir) {
+  try {
+    rootWatcher?.close();
+  } catch { /* noop */ }
+  rootWatcher = null;
+  if (watchTimer) {
+    clearTimeout(watchTimer);
+    watchTimer = null;
+  }
+  if (!dir) return;
+  try {
+    rootWatcher = fsWatch(dir, { recursive: true }, () => {
+      if (watchTimer) clearTimeout(watchTimer);
+      watchTimer = setTimeout(() => {
+        watchTimer = null;
+        broadcast('app:fs-changed', { root: dir });
+      }, 800);
+    });
+    rootWatcher.on('error', () => {
+      try {
+        rootWatcher?.close();
+      } catch { /* noop */ }
+      rootWatcher = null;
+    });
+  } catch (e) {
+    bootLog('watch-failed', e?.message || String(e));
   }
 }
 
@@ -354,6 +390,7 @@ async function openPath(dir) {
   if (!stat.isDirectory()) throw new Error('Not a folder: ' + dir);
   root = dir;
   await touchRecent(root);
+  watchProject(root);
   broadcast('app:root-changed', { root });
   restartServer(root, { onLog: (line) => console.log(line.trimEnd()) }).then(
     () => broadcast('opencode:ready', { root }),
@@ -2460,6 +2497,33 @@ async function runUiSmoke() {
   } catch (e) { histWalk = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] hist-walk: ' + histWalk);
   pass = pass && histWalk === 'ok';
+  // Live file tree: backend writes must appear with no manual refresh.
+  let fileWatch = 'skip';
+  try {
+    fileWatch = await w.webContents.executeJavaScript(`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const seen = () => [...document.querySelectorAll('.tree-label')].some((b) => (b.textContent || '').includes('filewatch-probe.txt'));
+      try { await window.barang.fs.remove('filewatch-probe.txt'); } catch {}
+      await sleep(1200);
+      try { await window.barang.fs.write('filewatch-probe.txt', 'watch-me'); } catch (e) { return 'write-fail'; }
+      let ok = false;
+      for (let i = 0; i < 16 && !ok; i++) {
+        await sleep(500);
+        ok = seen();
+      }
+      if (!ok) return 'no-auto-refresh';
+      try { await window.barang.fs.remove('filewatch-probe.txt'); } catch {}
+      let gone = false;
+      for (let i = 0; i < 16 && !gone; i++) {
+        await sleep(500);
+        gone = !seen();
+      }
+      if (!gone) return 'no-auto-remove';
+      return 'ok';
+    })()`);
+  } catch (e) { fileWatch = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] file-watch: ' + fileWatch);
+  pass = pass && fileWatch === 'ok';
   // Search hits land highlighted in the open file (all matches + current).
   let searchHl = 'skip';
   try {
@@ -2827,6 +2891,7 @@ if (!gotLock && !SMOKE && !SMOKE_UI) {
     await loadState();
     bootLog('state-loaded', `root=${root}`);
     registerIpc();
+    watchProject(root);
     if (SMOKE || SMOKE_UI) {
       // Smoke harnesses need the server up first (probes assert against it).
       try {

@@ -431,9 +431,12 @@ function renderSkeletons(host: HTMLElement, n = 12) {
 }
 
 async function paint(host: HTMLElement, hooks: ExplorerHooks) {
-  // Never nuke an inline prompt the user is actively typing in — the next
-  // refresh trigger will repaint once it is submitted or dismissed.
-  if (host.querySelector('.tree-prompt-input:focus')) return;
+  // Never nuke an inline prompt the user is actively typing in — checked
+  // both before the fetch AND after (a prompt opened mid-render used to be
+  // wiped by the pending replaceChildren). Skipped repaints heal: every
+  // submit path refreshes+repaints on success, and later triggers cover
+  // dismissals.
+  if (host.querySelector('.tree-prompt-input')) return;
   if (!document.contains(host)) return; // detached by a project switch
   const my = ++paintSeq;
   // First paint shows skeletons instantly; refreshes render off-DOM and swap
@@ -442,6 +445,7 @@ async function paint(host: HTMLElement, hooks: ExplorerHooks) {
   const staging = document.createElement('div');
   const ok = await renderTree(staging, hooks, '.', 0, my);
   if (!ok || my !== paintSeq || !document.contains(host)) return;
+  if (host.querySelector('.tree-prompt-input')) return;
   host.replaceChildren(...staging.childNodes);
 }
 

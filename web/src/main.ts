@@ -4,7 +4,8 @@ import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
 import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
-  questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard, resolveSendVariant, loadCommands, parseSlashCommand } from './lib/agent';
+  questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
+resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions } from './lib/agent';
 import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -759,6 +760,27 @@ async function boot() {
     },
   });
   connectEvents();
+  // Live file tree: the desktop watcher pings on agent/external writes so
+  // new files appear without tab-switching or manual refresh. Debounced in
+  // main (bursts) and here (paint); paint() itself never nukes an open
+  // rename/create prompt, and SCM trails behind.
+  let fsTimer: ReturnType<typeof setTimeout> | null = null;
+  let scmTimer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    barang().app.onFsChanged(() => {
+      if (fsTimer) clearTimeout(fsTimer);
+      fsTimer = setTimeout(() => {
+        fsTimer = null;
+        refreshExplorer();
+        explorer.repaint();
+      }, 800);
+      if (scmTimer) clearTimeout(scmTimer);
+      scmTimer = setTimeout(() => {
+        scmTimer = null;
+        void scmApi.refresh();
+      }, 2500);
+    });
+  } catch { /* bridge missing (browser tab) — manual refresh still works */ }
   // First-run UX: with a project open and the agent online but zero
   // sessions, boot straight into a fresh session — never strand the user
   // on an empty skeletal panel waiting for them to find the + button.
@@ -890,6 +912,8 @@ async function boot() {
     resolveSendVariant,
     loadCommands,
     parseSlashCommand,
+    isRepeatAsk,
+    pruneQuestions,
     pathOf,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).

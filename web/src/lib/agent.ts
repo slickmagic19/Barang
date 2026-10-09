@@ -169,6 +169,7 @@ export interface PendingQuestion {
   items: Array<{ header: string; question: string; options: Array<{ label: string; description?: string }> }>;
   messageID?: string;
   callID?: string;
+  repeated?: boolean; // same text asked again after an answer — flag, don't hide
 }
 
 export interface RunStatusInfo {
@@ -373,14 +374,68 @@ export function questionFromEvent(props: unknown): PendingQuestion | null {
   };
 }
 
-/** Track a newly asked question (dedupe by id). */
+/** Track a newly asked question (dedupe by id). Flags repeats: the same
+ *  text asked again after an answer means the previous answer didn't
+ *  register — the card says so instead of looping silently. */
 export function upsertQuestion(props: unknown): PendingQuestion | null {
   const card = questionFromEvent(props);
   if (!card) return null;
+  if (answeredKeys.has(card.key)) return null; // dead wait re-emitted — stay buried
   const cur = agentStore.get().questions;
   if (cur.some((q) => q.key === card.key)) return cur.find((q) => q.key === card.key) ?? null;
+  card.repeated = isRepeatAsk(lastAnswered, card.sessionID, card.question, Date.now());
   agentStore.set({ questions: [...cur, card] });
   return card;
+}
+
+/** Last answered question (repeat detection). Module-private by default. */
+interface AnsweredMark {
+  sessionID: string;
+  text: string;
+  at: number;
+}
+
+let lastAnswered: AnsweredMark | null = null;
+
+/** True when this text was already answered in this session recently —
+ *  the agent is re-asking instead of continuing. Pure. */
+export function isRepeatAsk(
+  last: AnsweredMark | null,
+  sessionID: string,
+  text: string,
+  nowMs: number,
+): boolean {
+  if (!last || last.sessionID !== sessionID) return false;
+  if (nowMs - last.at > 10 * 60 * 1000) return false;
+  const norm = (t: string) => String(t ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return !!norm(text) && norm(text) === norm(last.text);
+}
+
+/** Tombstones for dead questions: answered or confirmed-aborted. The server
+ *  never drops them (abort leaves the deferred pending — verified live),
+ *  so without this the backfill resurrects ghosts mid-run and each answer
+ *  murders a healthy run: the infinite loop. Pruned per session. */
+const answeredKeys = new Set<string>();
+
+/** Record an answer (call only after the answer message is accepted). */
+export function markQuestionAnswered(q: PendingQuestion) {
+  answeredKeys.add(q.key);
+  lastAnswered = { sessionID: q.sessionID, text: q.question, at: Date.now() };
+  const cur = agentStore.get().questions;
+  agentStore.set({ questions: cur.filter((x) => x.key !== q.key) });
+}
+
+/** Merge a live server list with tombstone + repeat filtering. Pure core
+ *  of backfillQuestions (which only fetches). Exported for smoke. */
+export function pruneQuestions(
+  stored: PendingQuestion[],
+  server: PendingQuestion[],
+  answered: Set<string>,
+): PendingQuestion[] {
+  const seen = new Set(server.map((c) => c.key));
+  const kept = (stored ?? []).filter((q) => seen.has(q.key) && !answered.has(q.key));
+  const fresh = (server ?? []).filter((c) => !kept.some((q) => q.key === c.key) && !answered.has(c.key));
+  return [...kept, ...fresh];
 }
 
 /** Drop a resolved question (replied/rejected event). */
@@ -392,28 +447,39 @@ export function removeQuestion(sessionID: string, questionID: string): boolean {
   return true;
 }
 
-/** Drop all of one session's questions (fresh send / confirmed stop: the
- *  wait belongs to a dead run). */
+/** Drop all of one session's questions AND tombstone them (fresh send /
+ *  confirmed stop: the wait belongs to a dead run, and the server keeps
+ *  listing it — without the tombstone the backfill resurrects it). */
 export function clearSessionQuestions(sessionID: string) {
   const cur = agentStore.get().questions;
+  for (const q of cur) {
+    if (q.sessionID === sessionID) answeredKeys.add(q.key);
+  }
   if (cur.some((q) => q.sessionID === sessionID)) {
     agentStore.set({ questions: cur.filter((q) => q.sessionID !== sessionID) });
   }
 }
 
+/** Forget tombstones for a deleted session. */
+export function pruneAnsweredKeys(sessionID: string) {
+  for (const k of [...answeredKeys]) {
+    if (k.startsWith(`${sessionID}:`)) answeredKeys.delete(k);
+  }
+  if (lastAnswered?.sessionID === sessionID) lastAnswered = null;
+}
+
 /** Reconcile with the server's live question list (GET /question covers
  *  waits from before this window subscribed — e.g. app restart). Prunes
- *  dead entries; never invents any. */
+ *  dead entries, never invents any, and never resurrects tombstones. */
 export async function backfillQuestions() {
   try {
     const list = await oc.get<unknown[]>('/question');
     if (!Array.isArray(list)) return;
     const cards = list.map(questionFromEvent).filter((c): c is PendingQuestion => !!c);
-    const seen = new Set(cards.map((c) => c.key));
-    const kept = agentStore.get().questions.filter((q) => seen.has(q.key));
-    const fresh = cards.filter((c) => !kept.some((q) => q.key === c.key));
-    if (fresh.length || kept.length !== agentStore.get().questions.length) {
-      agentStore.set({ questions: [...kept, ...fresh] });
+    const next = pruneQuestions(agentStore.get().questions, cards, answeredKeys);
+    const prev = agentStore.get().questions;
+    if (next.length !== prev.length || next.some((q, i) => q.key !== prev[i]?.key)) {
+      agentStore.set({ questions: next });
     }
   } catch { /* older server / offline — events still cover live waits */ }
 }
@@ -767,6 +833,7 @@ export async function selectSession(id: string) {
 
 export async function deleteSession(id: string) {
   await oc.del(`/session/${id}`);
+  pruneAnsweredKeys(id);
   const s = agentStore.get();
   const rest = s.sessions.filter((x) => x.id !== id);
   agentStore.set({

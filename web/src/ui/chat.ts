@@ -8,7 +8,7 @@ import {
   refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
   statusTextFor, messageErrorText, todoProgress, classifyAttachFile,
   loadCommands, parseSlashCommand, sendCommand,
-  compactSession, shareSession, unshareSession,
+  compactSession, shareSession, unshareSession, markQuestionAnswered,
   type ChatMessage, type ChangeEntry,
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
@@ -1230,6 +1230,9 @@ function paintTodos() {
         }
       });
       const hasOptions = q.items.some((item) => item.options.length > 0);
+      if (q.repeated) {
+        card.append(el('div', { class: 'quest-warn' }, 'Asked again — the previous answer may not have registered. If it repeats, rephrase the choice in chat instead.'));
+      }
       card.append(el('div', { class: 'quest-note' }, hasOptions
         ? 'Pick an option, then Send answer — this stops the run and replies with your choice.'
         : 'This question has no options — Stop the run, then reply in chat.'));
@@ -1242,10 +1245,11 @@ function paintTodos() {
             try {
               const lines = q.items.map((item, qi) => {
                 const pick = picks.get(qi);
+                if (!pick) return null;
                 const what = item.question || q.question;
-                return pick ? `For your question "${what}": ${pick}.` : `For your question "${what}": (no option picked).`;
-              });
-              if (![...picks.values()].length) {
+                return `Answering your question "${what}": I choose "${pick}". Please continue with this answer — do not ask the same question again.`;
+              }).filter((l): l is string => !!l);
+              if (!lines.length) {
                 hooks.toast('Pick an option first.', 'error');
                 return;
               }
@@ -1255,7 +1259,8 @@ function paintTodos() {
                 return;
               }
               const ok = await sendMessage(lines.join('\n'));
-              if (!ok) hooks.toast('Could not send the answer — try again from the composer.', 'error');
+              if (ok) markQuestionAnswered(q);
+              else hooks.toast('Could not send the answer — try again from the composer.', 'error');
             } finally {
               bSend.toggleAttribute('disabled', false);
             }

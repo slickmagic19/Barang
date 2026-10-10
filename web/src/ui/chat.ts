@@ -1066,6 +1066,9 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
 
 // Sessions the user collapsed in Todos (new sessions default open).
 const todosCollapsed = new Set<string>();
+// Question wizard state (survives repaints): step + picks per question key.
+const questStep = new Map<string, number>();
+const questPicks = new Map<string, Map<number, string>>();
 // Sessions the user explicitly toggled (auto-collapse only fires before that).
 const todosTouched = new Set<string>();
 const changesTouched = new Set<string>();
@@ -1203,50 +1206,78 @@ function paintTodos() {
     paintTodos();
     // Agent question-tool waits: 1.18 serve has no answer route, so picking
     // an option stops the stuck run and sends the choice as a new message.
+    // Multi-question asks step one at a time (opencode-style); picks and
+    // step survive repaints via module maps keyed by question key.
     quests.innerHTML = '';
+    const liveKeys = new Set(s.questions.map((q) => q.key));
+    for (const k of [...questStep.keys()]) if (!liveKeys.has(k)) questStep.delete(k);
+    for (const k of [...questPicks.keys()]) if (!liveKeys.has(k)) questPicks.delete(k);
     for (const q of s.questions) {
       const card = el('div', { class: 'quest-card' });
-      const title = el('div', { class: 'quest-title' }, q.items.length > 1 ? `The agent has ${q.items.length} questions` : (q.header || 'The agent has a question'));
+      const total = q.items.length;
+      const step = Math.max(0, Math.min(total - 1, questStep.get(q.key) ?? 0));
+      const item = q.items[step] ?? q.items[0];
+      const title = el('div', { class: 'quest-title' }, total > 1 ? `Question ${step + 1} of ${total}` : (q.header || 'The agent has a question'));
       title.prepend(iconEl('help', 14));
       card.append(title);
-      const picks = new Map<number, string>();
-      q.items.forEach((item, qi) => {
-        if (q.items.length > 1) card.append(el('div', { class: 'quest-q' }, item.question));
-        else card.append(el('div', { class: 'quest-q' }, item.question || q.question));
-        if (item.options.length) {
-          const opts = el('div', { class: 'quest-opts' });
-          item.options.forEach((o) => {
-            const lab = el('label', { class: 'quest-opt' }) as HTMLLabelElement;
-            const radio = el('input', { type: 'radio', name: `quest-${q.questionID}-${qi}` }) as HTMLInputElement;
-            radio.value = o.label;
-            radio.onchange = () => {
-              if (radio.checked) picks.set(qi, o.label);
-            };
-            lab.append(radio, el('span', { class: 'quest-opt-label' }, o.label));
-            if (o.description) lab.append(el('span', { class: 'quest-opt-desc' }, o.description));
-            opts.append(lab);
-          });
-          card.append(opts);
-        }
-      });
-      const hasOptions = q.items.some((item) => item.options.length > 0);
+      if (!questPicks.has(q.key)) questPicks.set(q.key, new Map());
+      const picks = questPicks.get(q.key)!;
+      card.append(el('div', { class: 'quest-q' }, item?.question || q.question));
+      if (item && item.options.length) {
+        const opts = el('div', { class: 'quest-opts' });
+        item.options.forEach((o) => {
+          const lab = el('label', { class: 'quest-opt' }) as HTMLLabelElement;
+          const radio = el('input', { type: 'radio', name: `quest-${q.questionID}-${step}` }) as HTMLInputElement;
+          radio.value = o.label;
+          radio.checked = picks.get(step) === o.label;
+          radio.onchange = () => {
+            if (radio.checked) picks.set(step, o.label);
+          };
+          lab.append(radio, el('span', { class: 'quest-opt-label' }, o.label));
+          if (o.description) lab.append(el('span', { class: 'quest-opt-desc' }, o.description));
+          opts.append(lab);
+        });
+        card.append(opts);
+      }
+      const hasOptions = q.items.some((it) => it.options.length > 0);
       if (q.repeated) {
         card.append(el('div', { class: 'quest-warn' }, 'Asked again — the previous answer may not have registered. If it repeats, rephrase the choice in chat instead.'));
       }
       card.append(el('div', { class: 'quest-note' }, hasOptions
         ? 'Pick an option, then Send answer — this stops the run and replies with your choice.'
         : 'This question has no options — Stop the run, then reply in chat.'));
+      if (total > 1) {
+        const nav = el('div', { class: 'quest-nav' });
+        const bBack = el('button', { class: 'btn btn-sm' }, 'Back') as HTMLButtonElement;
+        bBack.toggleAttribute('disabled', step === 0);
+        bBack.onclick = () => {
+          questStep.set(q.key, Math.max(0, step - 1));
+          requestChatPaint?.();
+        };
+        const dots = el('div', { class: 'qstep-dots' });
+        for (let i = 0; i < total; i++) {
+          dots.append(el('span', { class: `qstep-dot${i < step ? ' done' : ''}${i === step ? ' now' : ''}` }));
+        }
+        const bNext = el('button', { class: 'btn btn-sm' }, 'Next') as HTMLButtonElement;
+        bNext.toggleAttribute('disabled', step >= total - 1);
+        bNext.onclick = () => {
+          questStep.set(q.key, Math.min(total - 1, step + 1));
+          requestChatPaint?.();
+        };
+        nav.append(bBack, dots, bNext);
+        card.append(nav);
+      }
       const row = el('div', { class: 'perm-row' });
       if (hasOptions) {
-        const bSend = el('button', { class: 'btn btn-primary btn-sm' }, 'Send answer') as HTMLButtonElement;
+        const bSend = el('button', { class: 'btn btn-primary btn-sm' }, total > 1 ? 'Send answers' : 'Send answer') as HTMLButtonElement;
         bSend.onclick = () => {
           bSend.toggleAttribute('disabled', true);
           void (async () => {
             try {
-              const lines = q.items.map((item, qi) => {
+              const lines = q.items.map((it, qi) => {
                 const pick = picks.get(qi);
                 if (!pick) return null;
-                const what = item.question || q.question;
+                const what = it.question || q.question;
                 return `Answering your question "${what}": I choose "${pick}". Please continue with this answer — do not ask the same question again.`;
               }).filter((l): l is string => !!l);
               if (!lines.length) {
@@ -1259,8 +1290,11 @@ function paintTodos() {
                 return;
               }
               const ok = await sendMessage(lines.join('\n'));
-              if (ok) markQuestionAnswered(q);
-              else hooks.toast('Could not send the answer — try again from the composer.', 'error');
+              if (ok) {
+                markQuestionAnswered(q);
+                questStep.delete(q.key);
+                questPicks.delete(q.key);
+              } else hooks.toast('Could not send the answer — try again from the composer.', 'error');
             } finally {
               bSend.toggleAttribute('disabled', false);
             }

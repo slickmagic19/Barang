@@ -2564,6 +2564,70 @@ async function runUiSmoke() {
   } catch (e) { searchHl = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] search-hl: ' + searchHl);
   pass = pass && searchHl === 'ok';
+  // Question wizard: one at a time, Next/Back, picks survive navigation.
+  let questWiz = 'skip';
+  try {
+    questWiz = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.upsertQuestion !== 'function' || typeof u.removeQuestion !== 'function') return 'no-quest-fns';
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const props = {
+        id: 'qwizard', sessionID: 'ses-wizard',
+        questions: [
+          { header: 'H1', question: 'Pick a color?', options: [{ label: 'Red' }, { label: 'Blue' }] },
+          { header: 'H2', question: 'Pick a size?', options: [{ label: 'Small' }, { label: 'Large' }] },
+          { header: 'H3', question: 'Pick a shape?', options: [{ label: 'Round' }, { label: 'Square' }] },
+        ],
+        tool: {},
+      };
+      u.upsertQuestion(props);
+      await sleep(600);
+      const card = () => document.querySelector('.quest-card');
+      const txt = () => (card()?.textContent || '');
+      const title = () => (card()?.querySelector('.quest-title')?.textContent || '');
+      if (!card()) return 'no-card';
+      if (!/Question 1 of 3/.test(title())) return 'title-1:' + title();
+      if (!txt().includes('Pick a color?')) return 'no-q1';
+      if (txt().includes('Pick a size?') || txt().includes('Pick a shape?')) return 'all-visible';
+      const next = () => [...(card()?.querySelectorAll('.quest-nav .btn') ?? [])].find((b) => b.textContent.trim() === 'Next');
+      const back = () => [...(card()?.querySelectorAll('.quest-nav .btn') ?? [])].find((b) => b.textContent.trim() === 'Back');
+      const pick = (label) => {
+        const lab = [...(card()?.querySelectorAll('.quest-opt') ?? [])].find((l) => (l.textContent || '').includes(label));
+        const radio = lab?.querySelector('input[type="radio"]');
+        if (!radio) return false;
+        radio.click();
+        return radio.checked;
+      };
+      if (!pick('Blue')) return 'pick-fail';
+      if (!next()) return 'no-next';
+      next().click();
+      await sleep(400);
+      if (!/Question 2 of 3/.test(title())) return 'title-2:' + title();
+      if (!txt().includes('Pick a size?') || txt().includes('Pick a color?')) return 'step-2-wrong';
+      if (!pick('Large')) return 'pick2-fail';
+      if (!next()) return 'no-next2';
+      next().click();
+      await sleep(400);
+      if (!/Question 3 of 3/.test(title()) || !txt().includes('Pick a shape?')) return 'step-3-wrong';
+      if (!back()) return 'no-back';
+      back().click();
+      await sleep(400);
+      if (!/Question 2 of 3/.test(title())) return 'back-wrong';
+      const still = [...(card()?.querySelectorAll('.quest-opt') ?? [])].find((l) => (l.textContent || '').includes('Large'))?.querySelector('input');
+      if (!still || !still.checked) return 'pick-lost';
+      if (!back()) return 'no-back2';
+      back().click();
+      await sleep(400);
+      const still1 = [...(card()?.querySelectorAll('.quest-opt') ?? [])].find((l) => (l.textContent || '').includes('Blue'))?.querySelector('input');
+      if (!/Question 1 of 3/.test(title()) || !still1 || !still1.checked) return 'pick1-lost';
+      u.removeQuestion('ses-wizard', 'qwizard');
+      await sleep(400);
+      if (document.querySelector('.quest-card')) return 'card-lingers';
+      return 'ok';
+    })()`);
+  } catch (e) { questWiz = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] quest-wizard: ' + questWiz);
+  pass = pass && questWiz === 'ok';
   // Split editor: toggle, per-group strips, open-in-other, auto-collapse.
   let splitEd = 'skip';
   try {

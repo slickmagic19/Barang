@@ -600,6 +600,11 @@ kbd {
 .quest-opt-label { font-weight: 650; }
 .quest-opt-desc { color: var(--text-dim); }
 .quest-note { color: var(--text-dim); font-size: 11.5px; line-height: 1.55; margin-bottom: 9px; }
+.quest-nav { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.qstep-dots { display: flex; gap: 6px; flex: 1; justify-content: center; }
+.qstep-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); }
+.qstep-dot.done { background: var(--green); }
+.qstep-dot.now { background: var(--yellow); animation: pulse 1.1s ease-in-out infinite; }
 .quest-warn {
   color: var(--yellow); font-size: 11.5px; line-height: 1.55; margin-bottom: 9px;
   background: #e0af6812; border: 1px solid #e0af6852; border-radius: 7px; padding: 7px 9px;

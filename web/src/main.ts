@@ -5,7 +5,7 @@ import { appState } from './lib/api';
 import { barang } from './lib/transport';
 import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
-resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions } from './lib/agent';
+resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion } from './lib/agent';
 import { sliceWindow, truncateText } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -914,6 +914,8 @@ async function boot() {
     parseSlashCommand,
     isRepeatAsk,
     pruneQuestions,
+    upsertQuestion,
+    removeQuestion,
     pathOf,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).

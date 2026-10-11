@@ -1018,9 +1018,9 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       return;
     }
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey) {
-      // opencode-style history (suggest already handled above): Up recalls
-      // older, Down moves back toward the draft. Recalled text stays out of
-      // the suggest popup so arrows keep walking history.
+      // History is gated on an empty box (or mid-navigation): with text
+      // present, arrows fall through to normal cursor movement.
+      if (histIdx === -1 && input.value.trim() !== '') return;
       e.preventDefault();
       const dir = e.key === 'ArrowUp' ? 'up' : 'down';
       if (dir === 'up' && histIdx === -1) histDraft = input.value;

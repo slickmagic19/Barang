@@ -316,7 +316,7 @@ async function boot() {
         <div><kbd>Ctrl+Shift+P</kbd><span>commands</span></div>
         <div><kbd>Ctrl+Shift+F</kbd><span>search in files</span></div>
         <div><kbd>Enter</kbd><span>send to agent</span></div>
-        <div><kbd>↑↓</kbd><span>input history</span></div>
+        <div><kbd>↑↓</kbd><span>history (empty box)</span></div>
         <div><kbd>Ctrl+S</kbd><span>save file</span></div>
         <div><kbd>Ctrl+N</kbd><span>new untitled tab</span></div>
         <div><kbd>Ctrl+W</kbd><span>close tab</span></div>

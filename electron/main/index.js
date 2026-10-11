@@ -2485,6 +2485,15 @@ async function runUiSmoke() {
         if (v !== '') return 'walk-nodraft:' + JSON.stringify(v);
         press('ArrowDown'); await sleep(120);
         if (input.value !== '') return 'walk-draft:' + JSON.stringify(input.value);
+        // Gated: arrows with text present leave it alone (cursor moves).
+        input.value = 'typing here';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await sleep(150);
+        press('ArrowUp'); await sleep(150);
+        if (input.value !== 'typing here') return 'gated-fail:' + JSON.stringify(input.value);
+        press('ArrowDown'); await sleep(150);
+        if (input.value !== 'typing here') return 'gated-down-fail:' + JSON.stringify(input.value);
+        input.value = '';
         return 'ok';
       } finally {
         try {

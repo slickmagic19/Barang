@@ -46,10 +46,10 @@ export async function ocCall(path, { method = 'GET', body, timeoutMs } = {}) {
 let bootSeq = 0; // guards rapid project switches: only the latest boot wins
 
 /** (Re)start the server rooted at cwd. Restarts the event pump too. */
-export async function ensureServer(cwd, { port = 0, onLog = () => {} } = {}) {
+export async function ensureServer(cwd, { port = 0, onLog = () => {}, extraEnv = {} } = {}) {
   if (server) return server;
   const my = ++bootSeq;
-  const s = await startOpencodeServer({ cwd, port, onLog });
+  const s = await startOpencodeServer({ cwd, port, onLog, extraEnv });
   if (my !== bootSeq) {
     try { s.stop(); } catch { /* noop */ }
     throw new Error('superseded');

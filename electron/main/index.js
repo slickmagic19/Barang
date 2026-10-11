@@ -157,7 +157,37 @@ async function bootOpencode() {
   } catch {
     /* last resort: serve fails loudly below with a clear error */
   }
-  await ensureServer(cwd, { onLog: (line) => console.log(line.trimEnd()) });
+  await ensureServer(cwd, { onLog: (line) => console.log(line.trimEnd()), extraEnv: await mcpEnv() });
+}
+
+/** Barang-managed MCP config file (global scope). opencode merges it over
+ *  every other layer, so Barang never edits the user's own config files
+ *  for global servers. Respects a user-set OPENCODE_CONFIG. */
+function managedMcpPath() {
+  return path.join(app.getPath('userData'), 'opencode-mcp.json');
+}
+
+async function ensureManagedMcp() {
+  const p = managedMcpPath();
+  const cur = await fs.readFile(p, 'utf8').catch(() => null);
+  if (cur === null) {
+    try {
+      await fs.mkdir(path.dirname(p), { recursive: true });
+    } catch { /* noop */ }
+    await fs.writeFile(p, '{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {}\n}\n').catch(() => {});
+  }
+  return p;
+}
+
+/** Extra env for the opencode server: point it at our managed MCP file
+ *  unless the user already overrides config discovery themselves. */
+async function mcpEnv() {
+  if (process.env.OPENCODE_CONFIG) return {};
+  try {
+    return { OPENCODE_CONFIG: await ensureManagedMcp() };
+  } catch {
+    return {};
+  }
 }
 
 function createWindow() {
@@ -392,7 +422,7 @@ async function openPath(dir) {
   await touchRecent(root);
   watchProject(root);
   broadcast('app:root-changed', { root });
-  restartServer(root, { onLog: (line) => console.log(line.trimEnd()) }).then(
+  restartServer(root, { onLog: (line) => console.log(line.trimEnd()), extraEnv: await mcpEnv() }).then(
     () => broadcast('opencode:ready', { root }),
     (e) => {
       if (!/superseded/.test(e?.message || '')) broadcast('opencode:error', { error: e?.message || String(e) });
@@ -638,6 +668,49 @@ function registerIpc() {
     }
     setTimeout(() => app.quit(), 800);
     return { ok: true };
+  });
+  // MCP config files: raw read/write with validation + rotating backup.
+  // Scopes: 'managed' (Barang's global file, merged by opencode over every
+  // other layer) and 'project' (<root>/opencode.json). The renderer owns all
+  // merging/validation (pure, unit-tested); main only touches bytes.
+  ipcMain.handle('mcp:config', async (_ev, p = {}) => {
+    try {
+      const scope = p.scope === 'project' ? 'project' : 'managed';
+      if (p.action === 'read') {
+        let fp;
+        if (scope === 'project') {
+          if (!root) throw new Error('No folder open');
+          fp = path.join(root, 'opencode.json');
+        } else {
+          fp = managedMcpPath();
+          await ensureManagedMcp();
+        }
+        const text = await fs.readFile(fp, 'utf8').catch(() => '');
+        return { ok: true, data: { path: fp, text, exists: text !== '' } };
+      }
+      if (p.action === 'write') {
+        const text = String(p.text ?? '');
+        JSON.parse(text); // strict-JSON validation before touching disk
+        let fp;
+        if (scope === 'project') {
+          if (!root) throw new Error('No folder open');
+          fp = path.join(root, 'opencode.json');
+          await fs.mkdir(path.dirname(fp), { recursive: true }).catch(() => {});
+        } else {
+          fp = managedMcpPath();
+          await ensureManagedMcp();
+        }
+        const prev = await fs.readFile(fp, 'utf8').catch(() => null);
+        if (prev !== null && prev !== text) {
+          await fs.writeFile(fp + '.bak', prev).catch(() => {});
+        }
+        await fs.writeFile(fp, text);
+        return { ok: true, data: { path: fp } };
+      }
+      throw new Error('Unknown mcp:config action');
+    } catch (e) {
+      return { ok: false, error: e?.message || String(e) };
+    }
   });
   ipcMain.handle('app:pick-files', async () => {
     // Composer attachments: images (inline) or any file (@mention).
@@ -1843,6 +1916,57 @@ async function runUiSmoke() {
         if (fu(msgs, 'msg_abc', 'hi') !== true) bad.push('fu-id');
         if (fu(msgs, 'msg_nope', 'hi') !== false) bad.push('fu-miss');
       }
+      // MCP config: parse/merge/validate/build + WordPress mapping.
+      if (typeof u.parseMcpFile !== 'function' || typeof u.toServerList !== 'function' ||
+        typeof u.buildFileText !== 'function' || typeof u.validateServer !== 'function' ||
+        typeof u.parseKvLines !== 'function' || typeof u.toLiveConfig !== 'function' ||
+        typeof u.wordpressQuickFill !== 'function' || typeof u.wordpressEndpoint !== 'function' ||
+        typeof u.mergeStatuses !== 'function') bad.push('no-mcp-fns');
+      else {
+        const mp = u.parseMcpFile('{\\n// comment\\n"$schema": "x",\\n"mcp": { "wp": { "type": "remote", "url": "https://s/mcp", "oauth": false } },\\n}');
+        if (!mp.mcp || !mp.mcp.wp) bad.push('mcp-parse');
+        let threw = false;
+        try { u.parseMcpFile('not json'); } catch { threw = true; }
+        if (!threw) bad.push('mcp-parse-throws');
+        if (u.parseMcpFile('').mcp === undefined || Object.keys(u.toServerList({})).length !== 0) bad.push('mcp-empty');
+        const tl = u.toServerList({ wp: { type: 'remote', url: 'https://s/mcp' }, bad: 42, loc: { type: 'local', command: ['npx', 'x'] } });
+        if (tl.length !== 2 || tl[0].name !== 'wp' || tl[1].command.join(' ') !== 'npx x') bad.push('mcp-list');
+        const bf = u.buildFileText('{"model":"m","mcp":{"old":{"type":"remote","url":"https://o"}}}', { wp: { type: 'remote', url: 'https://n' } });
+        const bj = JSON.parse(bf);
+        if (bj.model !== 'm' || !bj.mcp || !bj.mcp.wp || bj.mcp.wp.url !== 'https://n' || bj.mcp.old) bad.push('mcp-build');
+        let buildThrew = false;
+        try { u.buildFileText('{{{nope', {}); } catch { buildThrew = true; }
+        if (!buildThrew) bad.push('mcp-build-throws');
+        if (u.validateServer({ name: 'bad name!', type: 'remote', url: 'x' }).length !== 2) bad.push('mcp-val-remote');
+        if (u.validateServer({ name: 'ok', type: 'local', command: [] }).length !== 1) bad.push('mcp-val-local');
+        if (u.validateServer({ name: 'ok', type: 'remote', url: 'https://s/mcp' }).length !== 0) bad.push('mcp-val-ok');
+        const kv = u.parseKvLines('Authorization: Bearer abc\\n# comment\\n\\nX-Empty:\\nBadLine', ':');
+        if (kv.Authorization !== 'Bearer abc' || kv['X-Empty'] !== '' || kv.BadLine !== undefined) bad.push('mcp-kv');
+        const ke = u.parseKvLines('A=1\\nB = 2 ', '=');
+        if (ke.A !== '1' || ke.B !== '2') bad.push('mcp-kv-env');
+        const lc = u.toLiveConfig({ name: 'w', type: 'remote', url: 'https://s', headers: {}, oauth: false });
+        if (lc.headers !== undefined || lc.oauth !== false) bad.push('mcp-live-drop');
+        if (u.wordpressEndpoint('example.com ') !== 'https://example.com/wp-json/easy-mcp-ai/v1/mcp') bad.push('mcp-wp-url');
+        if (u.wordpressEndpoint('https://s/wp-json/easy-mcp-ai/v1/mcp/') !== 'https://s/wp-json/easy-mcp-ai/v1/mcp') bad.push('mcp-wp-keep');
+        const wq = u.wordpressQuickFill('example.com', 'wpmcp_123');
+        if (wq.name !== 'wordpress' || wq.oauth !== false || wq.headers.Authorization !== 'Bearer wpmcp_123') bad.push('mcp-wp-fill');
+        const wq2 = u.wordpressQuickFill('example.com', '');
+        if (wq2.oauth !== true || wq2.headers.Authorization !== undefined) bad.push('mcp-wp-oauth');
+        const mg = u.mergeStatuses(
+          [{ name: 'a', type: 'remote', url: 'https://a' }, { name: 'b', type: 'remote', url: 'https://b', enabled: false }],
+          { a: { status: 'connected' }, c: { status: 'connected' } },
+        );
+        if (mg.rows[0].effective !== 'connected') bad.push('mg-conn');
+        if (mg.rows[1].effective !== 'disabled') bad.push('mg-dis');
+        if (mg.foreign !== 1) bad.push('mg-foreign');
+        const mg2 = u.mergeStatuses(
+          [{ name: 'x', type: 'remote', url: 'https://x' }],
+          { x: { status: 'failed', error: 'boom' } },
+        );
+        if (mg2.rows[0].effective !== 'failed' || !(mg2.rows[0].note || '').includes('boom')) bad.push('mg-fail');
+        const mg3 = u.mergeStatuses([{ name: 'y', type: 'remote', url: 'https://y' }], {});
+        if (mg3.rows[0].effective !== 'needs-restart') bad.push('mg-restart');
+      }
       // Explorer copy paths: absolute vs root-relative, separator-aware.
       const po = u.pathOf;
       if (typeof po !== 'function') bad.push('no-pathof-fn');
@@ -2133,7 +2257,7 @@ async function runUiSmoke() {
     })()`);
   } catch (e) { settingsUi = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] settings-ui: ' + settingsUi);
-  pass = pass && /nav=10 navOk=ok tog=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
+  pass = pass && /nav=11 navOk=ok tog=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
   // Bolt E2E (local stub server above — no internet): pure helpers, then a
   // real UI flow — new request, POST JSON + header, send, save, project
   // mirror, history. Hermetic: localStorage + mirror file snapshotted first.
@@ -2732,6 +2856,48 @@ async function runUiSmoke() {
   } catch (e) { pomoUi = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] pomodoro: ' + pomoUi);
   pass = pass && pomoUi === 'ok';
+  // MCP: section renders, config round-trips, live connect reports.
+  let mcpUi = 'skip';
+  try {
+    mcpUi = await w.webContents.executeJavaScript(`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      document.querySelector('.topbar .settings-btn')?.click();
+      await sleep(700);
+      const nav = [...document.querySelectorAll('.settings-overlay .settings-nav-item')].find((b) => b.textContent === 'MCP');
+      if (!nav) return 'no-mcp-nav';
+      nav.click();
+      await sleep(1800);
+      const sec = document.querySelector('.settings-overlay #sec-mcp');
+      if (!sec) return 'no-mcp-sec';
+      const box = sec.parentElement?.querySelector('.mcp-box') ?? document.querySelector('.settings-overlay .mcp-box');
+      if (!box) return 'no-mcp-box';
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.buildFileText !== 'function') return 'no-mcp-utils';
+      let orig = null;
+      try {
+        const r0 = await window.barang.mcpConfig('read', { scope: 'managed' });
+        orig = r0?.text ?? null;
+        const text = u.buildFileText(orig ?? '', { 'barang-smoke': { type: 'remote', url: 'https://example.invalid/mcp', oauth: false } });
+        await window.barang.mcpConfig('write', { scope: 'managed', text });
+        const r1 = await window.barang.mcpConfig('read', { scope: 'managed' });
+        if (!(r1?.text || '').includes('barang-smoke')) return 'roundtrip-missing';
+        await window.barang.oc('/mcp', { method: 'POST', body: { name: 'barang-smoke', config: { type: 'remote', url: 'https://example.invalid/mcp', oauth: false } } }).catch(() => null);
+        await sleep(2500);
+        const live = await window.barang.oc('/mcp').catch(() => ({}));
+        const st = live && live['barang-smoke'] ? String(live['barang-smoke'].status || '') : '';
+        if (st !== '' && st !== 'failed') return 'live-unexpected:' + st;
+        return 'ok';
+      } finally {
+        try {
+          if (orig) await window.barang.mcpConfig('write', { scope: 'managed', text: orig });
+          else await window.barang.mcpConfig('write', { scope: 'managed', text: '{"$schema":"https://opencode.ai/config.json","mcp":{}}' });
+        } catch {}
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      }
+    })()`);
+  } catch (e) { mcpUi = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] mcp-e2e: ' + mcpUi);
+  pass = pass && mcpUi === 'ok';
   // Preview tabs: markdown renders h1, images render data URL, both close.
   let previewTabs = 'skip';
   try {

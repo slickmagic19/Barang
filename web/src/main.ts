@@ -26,6 +26,10 @@ import { initChat, filePartView, stepHistory, pushComposerHist } from './ui/chat
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
 import { pomoNext, formatClock, normalizePomoSettings, POMO_DEFAULTS } from './lib/pomodoro';
+import {
+  parseMcpFile, toServerList, buildFileText, validateServer, parseKvLines,
+  toLiveConfig, wordpressQuickFill, wordpressEndpoint, mergeStatuses,
+} from './lib/mcp';
 import { initTerminal, type TerminalApi } from './ui/terminal';
 import { initScm, decoration, type ScmApi } from './ui/scm';
 import { initSearchView, highlightLine, type SearchApi } from './ui/search';
@@ -900,6 +904,15 @@ async function boot() {
     formatClock,
     normalizePomoSettings,
     pomoDotsFilled,
+    parseMcpFile,
+    toServerList,
+    buildFileText,
+    validateServer,
+    parseKvLines,
+    toLiveConfig,
+    wordpressQuickFill,
+    wordpressEndpoint,
+    mergeStatuses,
     filePartView,
     stepHistory,
     pushComposerHist,

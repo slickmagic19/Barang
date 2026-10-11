@@ -6,6 +6,12 @@ import {
   agentStore, loadMeta, readSettings, writeSettings, isFreeModel, pickDefaultModel,
   setAgent, listSelectableModels, applyModelSelection,
 } from '../lib/agent';
+import {
+  parseMcpFile, toServerList, buildFileText, validateServer, parseKvLines,
+  toLiveConfig, wordpressQuickFill, mergeStatuses,
+  type McpScope, type McpServerConfig, type McpLive, type McpRowStatus,
+} from '../lib/mcp';
+import { confirmDialog } from './dialog';
 import { appState } from '../lib/api';
 import { barang } from '../lib/transport';
 import { el } from '../lib/util';
@@ -39,7 +45,7 @@ export function openSettings(hooks: SettingsHooks) {
 
   // Section registry (single source of truth for the nav rail). Every
   // section() call below must use one of these titles.
-  const SECTIONS = ['Model', 'Agent', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
+  const SECTIONS = ['Model', 'Agent', 'MCP', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
   const secSlug = (t: string) => 'sec-' + t.toLowerCase();
   const section = (title: string) => body.append(el('p', { class: 'settings-label', id: secSlug(title) }, title));
   // Toggle switch row (VSCode-style). The real checkbox stays in the DOM
@@ -69,6 +75,313 @@ export function openSettings(hooks: SettingsHooks) {
   const usageBox = checkRow('Show session cost meter');
   const fullAutoBox = checkRow('Full permissions (auto-approve agent requests)');
   body.append(el('p', { class: 'settings-note' }, 'Like opencode --auto: permission prompts are approved and remembered automatically. Explicit deny rules still apply.'));
+
+  // --- MCP (Model Context Protocol servers for the agent) ---
+  section('MCP');
+  body.append(el('p', { class: 'settings-note' }, 'Extra tools for the agent: local programs or remote HTTP servers. Servers apply after the agent server restarts. Tokens are stored as plain text — {env:NAME} references work too.'));
+  const mcpBox = el('div', { class: 'mcp-box' });
+  body.append(mcpBox);
+
+  interface McpScopeState {
+    servers: McpServerConfig[];
+    text: string;
+    path: string;
+    error?: string;
+  }
+  const mcpState: {
+    managed: McpScopeState | null;
+    project: McpScopeState | null;
+    live: Record<string, McpLive>;
+    loading: boolean;
+  } = { managed: null, project: null, live: {}, loading: true };
+
+  const mcpScopeTitle = (scope: McpScope) => scope === 'project' ? 'This project' : 'Global (all projects)';
+  const mcpScopeHint = (scope: McpScope) => scope === 'project'
+    ? 'Saved to opencode.json in the project root (checked into Git with the project).'
+    : 'Saved to Barang\u2019s global file, merged over every other layer (your own config files are never touched).';
+
+  async function loadScope(scope: McpScope): Promise<McpScopeState> {
+    const res = await barang().mcpConfig('read', { scope });
+    const text = String(res?.text ?? '');
+    try {
+      const { mcp } = parseMcpFile(text);
+      return { servers: toServerList(mcp), text, path: String(res?.path ?? '') };
+    } catch (e) {
+      return { servers: [], text, path: String(res?.path ?? ''), error: (e as Error).message };
+    }
+  }
+
+  async function refreshMcp() {
+    mcpState.loading = true;
+    paintMcp();
+    try {
+      const [managed, project] = await Promise.all([loadScope('managed'), loadScope('project')]);
+      mcpState.managed = managed;
+      mcpState.project = project;
+    } catch (e) {
+      hooks.toast(`MCP load failed: ${(e as Error).message}`, 'error');
+    }
+    try {
+      const live = await barang().oc('/mcp');
+      mcpState.live = (live && typeof live === 'object' ? live : {}) as Record<string, McpLive>;
+    } catch {
+      mcpState.live = {};
+    }
+    mcpState.loading = false;
+    paintMcp();
+  }
+
+  async function saveScope(scope: McpScope, servers: McpServerConfig[]) {
+    const st = scope === 'project' ? mcpState.project : mcpState.managed;
+    const mcp: Record<string, unknown> = {};
+    for (const s of servers) mcp[s.name] = toLiveConfig(s);
+    const text = buildFileText(st?.text ?? '', mcp);
+    const res = await barang().mcpConfig('write', { scope, text });
+    await refreshMcp();
+    hooks.toast(`MCP ${mcpScopeTitle(scope).toLowerCase()} saved (backup kept next to it) — restart the agent server to apply.`, 'info');
+    return res;
+  }
+
+  async function connectNow(scope: McpScope, server: McpServerConfig) {
+    try {
+      await barang().oc('/mcp', { method: 'POST', body: { name: server.name, config: toLiveConfig(server) } });
+      try {
+        mcpState.live = (await barang().oc('/mcp')) as Record<string, McpLive>;
+      } catch { /* status refresh is best-effort */ }
+      paintMcp();
+      const lv = mcpState.live[server.name];
+      if (lv?.status === 'connected' || JSON.stringify(lv).includes('connected')) {
+        hooks.toast(`${server.name}: connected.`, 'info');
+      } else {
+        hooks.toast(`${server.name}: ${lv?.error ?? 'not connected — see status'}.`, 'error');
+      }
+    } catch (e) {
+      hooks.toast(`Connect failed: ${(e as Error).message}`, 'error');
+    }
+  }
+
+  const STATUS_DOT: Record<McpRowStatus, string> = {
+    connected: 'is-ok',
+    failed: 'is-err',
+    'needs-auth': 'is-run',
+    disabled: '',
+    'needs-restart': '',
+    unknown: '',
+  };
+
+  function paintMcp() {
+    mcpBox.innerHTML = '';
+    if (mcpState.loading) {
+      mcpBox.append(el('div', { class: 'scm-none' }, 'Loading MCP servers…'));
+      return;
+    }
+    const bar = el('div', { class: 'mcp-bar' });
+    const btnRefresh = el('button', { class: 'btn btn-sm' }, 'Refresh status') as HTMLButtonElement;
+    btnRefresh.onclick = () => void refreshMcp().catch((e) => hooks.toast(e.message, 'error'));
+    const btnRestart = el('button', { class: 'btn btn-sm' }, 'Restart agent server') as HTMLButtonElement;
+    btnRestart.title = 'Applies saved MCP changes (stops running work)';
+    btnRestart.onclick = () => {
+      void (async () => {
+        const ok = await confirmDialog({
+          title: 'Restart the agent server?',
+          message: 'Saved MCP changes apply on restart. Running work will stop.',
+          confirmLabel: 'Restart',
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await barang().app.retryOpencode();
+          hooks.toast('Agent server restarting…', 'info');
+        } catch (e) {
+          hooks.toast(`Restart failed: ${(e as Error).message}`, 'error');
+        }
+      })();
+    };
+    bar.append(btnRefresh, btnRestart);
+    mcpBox.append(bar);
+
+    (['project', 'managed'] as McpScope[]).forEach((scope) => {
+      const st = scope === 'project' ? mcpState.project : mcpState.managed;
+      const group = el('div', { class: 'mcp-group' });
+      group.append(el('div', { class: 'mcp-group-title' }, mcpScopeTitle(scope)));
+      group.append(el('p', { class: 'settings-note' }, mcpScopeHint(scope)));
+      if (!st) {
+        group.append(el('div', { class: 'scm-none' }, 'Could not load.'));
+      } else if (st.error) {
+        group.append(el('div', { class: 'chat-err' }, `Config unreadable: ${st.error}`));
+      } else if (!st.servers.length) {
+        group.append(el('div', { class: 'scm-none' }, 'No servers. Add one below.'));
+      } else {
+        const { rows } = mergeStatuses(st.servers, mcpState.live);
+        for (const r of rows) {
+          const row = el('div', { class: 'mcp-row' });
+          const dot = el('span', { class: `tool-dot ${STATUS_DOT[r.effective]}`.trim() });
+          const main = el('div', { class: 'mcp-main' });
+          main.append(el('div', { class: 'mcp-name' }, r.server.name));
+          const sub = r.server.type === 'remote'
+            ? (r.server.url ?? '')
+            : `local: ${(r.server.command ?? []).join(' ')}`;
+          main.append(el('div', { class: 'mcp-sub' }, sub));
+          if (r.note) main.append(el('div', { class: 'mcp-note' }, r.note));
+          row.append(dot, main);
+          const acts = el('div', { class: 'mcp-acts' });
+          const bConn = el('button', { class: 'btn btn-sm', title: 'Connect now (no restart needed)' }, 'Connect') as HTMLButtonElement;
+          bConn.onclick = () => void connectNow(scope, r.server);
+          const bToggle = el('button', { class: 'btn btn-sm', title: r.server.enabled === false ? 'Enable' : 'Disable' }, r.server.enabled === false ? 'Enable' : 'Disable') as HTMLButtonElement;
+          bToggle.onclick = () => {
+            void (async () => {
+              try {
+                const next = (st.servers ?? []).map((x) => x.name === r.server.name
+                  ? { ...x, enabled: x.enabled === false ? true : false }
+                  : x);
+                await saveScope(scope, next);
+              } catch (e) {
+                hooks.toast((e as Error).message, 'error');
+              }
+            })();
+          };
+          const bDel = el('button', { class: 'btn btn-sm', title: 'Remove' }, 'Remove') as HTMLButtonElement;
+          bDel.onclick = () => {
+            void (async () => {
+              const ok = await confirmDialog({
+                title: `Remove ${r.server.name}?`,
+                message: 'The server entry is deleted from the config file (a backup is kept next to it).',
+                confirmLabel: 'Remove',
+                danger: true,
+              });
+              if (!ok) return;
+              try {
+                await saveScope(scope, (st.servers ?? []).filter((x) => x.name !== r.server.name));
+              } catch (e) {
+                hooks.toast((e as Error).message, 'error');
+              }
+            })();
+          };
+          acts.append(bConn, bToggle, bDel);
+          row.append(acts);
+          group.append(row);
+        }
+      }
+      mcpBox.append(group);
+    });
+
+    const foreign = Object.keys(mcpState.live).length;
+    if (foreign > 0) {
+      mcpBox.append(el('p', { class: 'settings-note' }, 'Status refresh also sees servers from your other config layers; only the two groups above are managed here.'));
+    }
+
+    // WordPress (Easy MCP AI) quick add.
+    const wp = el('div', { class: 'mcp-wp' });
+    wp.append(el('div', { class: 'mcp-group-title' }, 'WordPress quick add'));
+    wp.append(el('p', { class: 'settings-note' }, 'Easy MCP AI plugin: paste your site URL and an API token (WordPress admin → Easy MCP AI → API Tokens). Uses Bearer-token mode over Streamable HTTP.'));
+    const wpSite = el('input', { class: 'settings-text', placeholder: 'https://yoursite.com' }) as HTMLInputElement;
+    const wpToken = el('input', { class: 'settings-text', placeholder: 'wpmcp_… (API token)', type: 'password' }) as HTMLInputElement;
+    const wpScope = el('select', { class: 'settings-inline-sel', title: 'Where to save' }) as HTMLSelectElement;
+    wpScope.append(el('option', { value: 'project' }, 'This project') as HTMLOptionElement);
+    wpScope.append(el('option', { value: 'managed' }, 'Global') as HTMLOptionElement);
+    const wpAdd = el('button', { class: 'btn btn-primary btn-sm' }, 'Add WordPress') as HTMLButtonElement;
+    wpAdd.onclick = () => {
+      void (async () => {
+        const scope = (wpScope.value === 'managed' ? 'managed' : 'project') as McpScope;
+        const srv = wordpressQuickFill(wpSite.value, wpToken.value);
+        if (!srv.url) {
+          hooks.toast('Enter the site URL.', 'error');
+          return;
+        }
+        const errs = validateServer(srv);
+        if (errs.length) {
+          hooks.toast(errs.join(' '), 'error');
+          return;
+        }
+        try {
+          const st = scope === 'project' ? mcpState.project : mcpState.managed;
+          const rest = (st?.servers ?? []).filter((x) => x.name !== srv.name);
+          await saveScope(scope, [...rest, srv]);
+          wpSite.value = '';
+          wpToken.value = '';
+          await connectNow(scope, srv);
+        } catch (e) {
+          hooks.toast((e as Error).message, 'error');
+        }
+      })();
+    };
+    wp.append(wpSite, wpToken, wpScope, wpAdd);
+    mcpBox.append(wp);
+
+    // Generic add form.
+    const add = el('div', { class: 'mcp-add' });
+    add.append(el('div', { class: 'mcp-group-title' }, 'Add server'));
+    const fName = el('input', { class: 'settings-text', placeholder: 'Name (letters, numbers, dash)' }) as HTMLInputElement;
+    const fType = el('select', { class: 'settings-inline-sel', title: 'Type' }) as HTMLSelectElement;
+    fType.append(el('option', { value: 'remote' }, 'Remote (HTTP)') as HTMLOptionElement);
+    fType.append(el('option', { value: 'local' }, 'Local (program)') as HTMLOptionElement);
+    const fUrl = el('input', { class: 'settings-text', placeholder: 'https://…/mcp' }) as HTMLInputElement;
+    const fCmd = el('input', { class: 'settings-text hidden', placeholder: 'npx -y some-mcp-server' }) as HTMLInputElement;
+    const fToken = el('input', { class: 'settings-text', placeholder: 'Bearer token (optional — Bearer {env:NAME} also works)', type: 'password' }) as HTMLInputElement;
+    const fOAuth = el('label', { class: 'settings-check' }) as HTMLLabelElement;
+    const fOAuthBox = el('input', { type: 'checkbox', class: 'switch-input' }) as HTMLInputElement;
+    const fOAuthTrack = el('span', { class: 'switch-track' });
+    fOAuthTrack.append(el('span', { class: 'switch-thumb' }));
+    fOAuth.append(fOAuthBox, el('span', { class: 'settings-check-label' }, 'OAuth (uncheck for token-only servers)'), fOAuthTrack);
+    fOAuthBox.checked = true;
+    const fHeaders = el('textarea', { class: 'settings-text mcp-area hidden', placeholder: 'Extra headers, one per line — Name: value' }) as HTMLTextAreaElement;
+    const fEnv = el('textarea', { class: 'settings-text mcp-area hidden', placeholder: 'Env vars, one per line — KEY=value' }) as HTMLTextAreaElement;
+    const fScope = el('select', { class: 'settings-inline-sel', title: 'Where to save' }) as HTMLSelectElement;
+    fScope.append(el('option', { value: 'project' }, 'This project') as HTMLOptionElement);
+    fScope.append(el('option', { value: 'managed' }, 'Global') as HTMLOptionElement);
+    const paintType = () => {
+      const local = fType.value === 'local';
+      fUrl.classList.toggle('hidden', local);
+      fToken.classList.toggle('hidden', local);
+      fOAuth.classList.toggle('hidden', local);
+      fHeaders.classList.toggle('hidden', local);
+      fCmd.classList.toggle('hidden', !local);
+      fEnv.classList.toggle('hidden', !local);
+    };
+    fType.onchange = paintType;
+    paintType();
+    const fSave = el('button', { class: 'btn btn-primary btn-sm' }, 'Save server') as HTMLButtonElement;
+    fSave.onclick = () => {
+      void (async () => {
+        const scope = (fScope.value === 'managed' ? 'managed' : 'project') as McpScope;
+        const local = fType.value === 'local';
+        const hasToken = fToken.value.trim() !== '';
+        const srv: McpServerConfig = local
+          ? { name: fName.value.trim(), type: 'local', command: fCmd.value.split(/\s+/).filter(Boolean), environment: parseKvLines(fEnv.value, '='), enabled: true }
+          : {
+            name: fName.value.trim(), type: 'remote', url: fUrl.value.trim(),
+            headers: { ...parseKvLines(fHeaders.value, ':'), ...(hasToken ? { Authorization: `Bearer ${fToken.value.trim()}` } : {}) },
+            oauth: hasToken ? false : fOAuthBox.checked, enabled: true,
+          };
+        if (srv.headers && !Object.keys(srv.headers).length) delete srv.headers;
+        if (srv.environment && !Object.keys(srv.environment).length) delete srv.environment;
+        const errs = validateServer(srv);
+        if (errs.length) {
+          hooks.toast(errs.join(' '), 'error');
+          return;
+        }
+        try {
+          const st = scope === 'project' ? mcpState.project : mcpState.managed;
+          const rest = (st?.servers ?? []).filter((x) => x.name !== srv.name);
+          await saveScope(scope, [...rest, srv]);
+          fName.value = '';
+          fUrl.value = '';
+          fCmd.value = '';
+          fToken.value = '';
+          fHeaders.value = '';
+          fEnv.value = '';
+          await connectNow(scope, srv);
+        } catch (e) {
+          hooks.toast((e as Error).message, 'error');
+        }
+      })();
+    };
+    add.append(fName, fType, fUrl, fCmd, fToken, fOAuth, fHeaders, fEnv, fScope, fSave);
+    mcpBox.append(add);
+    mcpBox.append(el('p', { class: 'settings-note' }, 'OAuth servers need one browser approval — easiest via the opencode TUI (`/connect`) once; Bearer tokens connect immediately.'));
+  }
+
+  void refreshMcp().catch(() => {});
 
   // --- Chat ---
 

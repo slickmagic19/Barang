@@ -186,14 +186,10 @@ export interface ImportMap {
 let importMapForRoot = '';
 let importMap: ImportMap = { baseDir: '', aliases: [], deps: new Set() };
 
-/** Strip JSONC (comments, trailing commas) for tsconfig/package reads. Pure. */
-export function parseJsonc(text: string): unknown {
-  const noComments = String(text ?? '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:"'\\])\/\/.*$/gm, '$1');
-  const noTrailing = noComments.replace(/,\s*([}\]])/g, '$1');
-  return JSON.parse(noTrailing);
-}
+/** Strip JSONC (comments, trailing commas) for tsconfig/package reads.
+ *  Lives in util (shared with the MCP settings); re-exported here. */
+import { parseJsonc } from '../lib/util';
+export { parseJsonc };
 
 /** Pull {baseUrl, entries} from tsconfig text (missing/invalid -> empty). Pure. */
 export interface AliasEntry { pattern: string; targets: string[] }

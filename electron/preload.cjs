@@ -84,6 +84,8 @@ const barang = {
   },
   /** Source control: single channel, op dispatch (info/diff/stage/…/log/init). */
   git: (op, args = {}) => invoke('git:run', { op, args }),
+  /** MCP config files: raw read/write (renderer merges). */
+  mcpConfig: (action, payload = {}) => invoke('mcp:config', { action, ...payload }),
   /** Bolt API client: main-process HTTP (no CORS), cancellable. */
   api: {
     send: (req) => invoke('api:send', req),

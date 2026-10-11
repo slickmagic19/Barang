@@ -47,6 +47,7 @@ export interface BarangBridge {
     write(text: string): Promise<{ ok: boolean }>;
   };
   git(op: string, args?: Record<string, unknown>): Promise<any>;
+  mcpConfig(action: 'read' | 'write', payload?: { scope?: 'managed' | 'project'; text?: string }): Promise<any>;
   api: {
     send(req: { reqId: string; method: string; url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<{
       ok: boolean; status: number; statusText: string; url: string; ms: number; size: number;

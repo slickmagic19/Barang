@@ -128,6 +128,15 @@ export function timeAgo(ts: number): string {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
+
+/** Strip JSONC (comments, trailing commas) for config reads. Pure. */
+export function parseJsonc(text: string): unknown {
+  const noComments = String(text ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:"'\\])\/\/.*$/gm, '$1');
+  const noTrailing = noComments.replace(/,\s*([}\]])/g, '$1');
+  return JSON.parse(noTrailing);
+}
 export function debounce<F extends (...a: never[]) => void>(fn: F, ms: number): F {
   let t: ReturnType<typeof setTimeout> | undefined;
   return ((...a: never[]) => {

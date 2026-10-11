@@ -150,9 +150,10 @@ async function waitReady(port, timeoutMs = 60000) {
 
 /**
  * Start `opencode serve` rooted at `cwd` (0 = pick a free port).
+ * extraEnv merges over process.env (used for Barang's managed MCP file).
  * Returns { base, port, version, cliVersion, child, stop }.
  */
-export async function startOpencodeServer({ cwd, port = 0, onLog = () => {} }) {
+export async function startOpencodeServer({ cwd, port = 0, onLog = () => {}, extraEnv = {} }) {
   const found = await findOpencode();
   const listenPort = port || (await freePort());
   const direct = isDirectBinary(found.command);
@@ -161,7 +162,7 @@ export async function startOpencodeServer({ cwd, port = 0, onLog = () => {} }) {
     cwd,
     shell: direct ? false : isWin, // shims need a shell; a real binary must NOT get one
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: process.env,
+    env: { ...process.env, ...extraEnv },
     windowsHide: true,
   });
   onLog(`[barang] opencode: ${found.command} (pid ${child.pid}, direct=${direct}, bundled=${bundled})`);

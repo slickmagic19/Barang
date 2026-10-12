@@ -448,6 +448,33 @@ function registerIpc() {
   };
 
   ipcMain.handle('fs:tree', ok(needRoot((p) => files.tree(root, p))));
+  ipcMain.handle('fs:stat-paths', ok(async (p = {}) => {
+    // Absolute-path stats for OS drag-drop (may live outside the project).
+    const out = [];
+    for (const raw of ((p.paths ?? [])).slice(0, 20)) {
+      const abs = String(raw || '');
+      if (!abs) continue;
+      try {
+        const st = await fs.stat(abs);
+        out.push({ path: abs, exists: true, isDir: st.isDirectory() });
+      } catch {
+        out.push({ path: abs, exists: false, isDir: false });
+      }
+    }
+    return out;
+  }));
+  ipcMain.handle('app:reveal-path', ok(async (p = {}) => {
+    const rel = String(p.path || '');
+    if (!rel || !root) throw new Error('No folder open');
+    const abs = path.isAbsolute(rel) ? rel : path.join(root, rel);
+    const norm = path.normalize(abs);
+    const rnorm = path.normalize(root);
+    if (norm !== rnorm && !norm.startsWith(rnorm + path.sep)) throw new Error('Outside the project');
+    const st = await fs.stat(norm).catch(() => null);
+    if (!st) throw new Error('File no longer exists');
+    shell.showItemInFolder(norm);
+    return { revealed: true };
+  }));
   ipcMain.handle('fs:read', ok(needRoot((p) => files.readFile(root, p.path))));
   ipcMain.handle('fs:write', ok(needRoot((p) => files.writeFile(root, p.path, p.content))));
   ipcMain.handle('fs:mkdir', ok(needRoot((p) => files.mkdir(root, p.path))));
@@ -1029,7 +1056,7 @@ async function runUiSmoke() {
         const qa = (s) => [...document.querySelectorAll(s)];
         // Explorer context menu: synthetic right-click must open a populated
         // menu, and Escape must close it.
-        let ctxMenu = false, ctxItems = 0, ctxClosed = false, ctxCopyPaths = false;
+        let ctxMenu = false, ctxItems = 0, ctxClosed = false, ctxCopyPaths = false, ctxReveal = false;
         try {
           const lbl = qa('.tree-label')[0];
           if (lbl) {
@@ -1041,6 +1068,7 @@ async function runUiSmoke() {
             ctxItems = m ? m.querySelectorAll('.ctx-item').length : 0;
             const t = m ? (m.textContent || '') : '';
             ctxCopyPaths = t.includes('Copy Path') && t.includes('Copy Relative Path');
+            ctxReveal = t.includes('Reveal in File Explorer');
             document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
             await new Promise((rr) => setTimeout(rr, 300));
             ctxClosed = !q('.ctx-menu');
@@ -1401,7 +1429,7 @@ async function runUiSmoke() {
           settingsBtn: !!btn,
           settingsModal: !!q('.settings-overlay .settings-modal select.settings-select'),
           defaultModel: (() => { const s = q('.settings-overlay select.settings-select'); return s ? s.value : null; })(),
-          ctxMenu, ctxItems, ctxClosed, ctxCopyPaths,
+          ctxMenu, ctxItems, ctxClosed, ctxCopyPaths, ctxReveal,
           diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, renamePlaced, openedAtOnce,
           modalTrail: modalTrail.join(','), hotSwitch, switchMs, focusCreate, untitled, delKey,
           aboutVer: (q('.about-ver')?.textContent || '').trim(),
@@ -1429,7 +1457,7 @@ async function runUiSmoke() {
     dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true &&     dom.icons >= 8 && dom.selects === 3 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
-    dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true && dom.ctxCopyPaths === true &&
+    dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true && dom.ctxCopyPaths === true && dom.ctxReveal === true &&
     dom.fsRoundtrip === 'ok' && dom.changesSec === true &&
     dom.attachBtn === true && dom.modelMini === true && dom.sendIcon === true &&
     (dom.brandAlign.s === 'ok' || dom.brandAlign.s === 'skip') &&
@@ -1478,6 +1506,24 @@ async function runUiSmoke() {
   } catch (e) { singleClickFocus = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] single-click-focus: ' + singleClickFocus);
   pass = pass && (singleClickFocus === 'ok' || singleClickFocus === 'skip-no-row');
+  // Drag-drop open: dropping a project file must open it as a tab.
+  let dropProbe = 'skip';
+  try {
+    dropProbe = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.dropPaths !== 'function') return 'no-drop-fn';
+      try { await window.barang.fs.write('drop-probe.txt', 'drop me'); } catch (e) { return 'write-fail'; }
+      await u.dropPaths(['drop-probe.txt'], 1);
+      await new Promise((r) => setTimeout(r, 900));
+      const tab = document.querySelector('.tab[data-path="drop-probe.txt"]');
+      if (!tab) return 'tab-not-open';
+      if (typeof u.closeTab === 'function') await u.closeTab('drop-probe.txt');
+      try { await window.barang.fs.remove('drop-probe.txt'); } catch {}
+      return 'ok';
+    })()`);
+  } catch (e) { dropProbe = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] drop-open: ' + dropProbe);
+  pass = pass && dropProbe === 'ok';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

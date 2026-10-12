@@ -25,6 +25,7 @@ const barang = {
     find: (query, limit = 50) => invoke('fs:find', { query, limit }),
     search: (q, path = '', limit = 50) => invoke('fs:search', { q, path, limit }),
     searchReplace: (args) => invoke('fs:search-replace', args),
+    statPaths: (paths) => invoke('fs:stat-paths', { paths }),
   },
   /** Raw opencode call. Resolves parsed JSON (or undefined) / throws Error. */
   oc: async (path, { method = 'GET', body, timeoutMs } = {}) => {
@@ -109,6 +110,7 @@ const barang = {
     pickFiles: () => invoke('app:pick-files'),
     saveDialog: (defaultPath) => invoke('app:save-dialog', { defaultPath }),
     openExternal: (url) => invoke('app:open-external', { url }),
+    revealPath: (path) => invoke('app:reveal-path', { path }),
     retryOpencode: () => invoke('app:retry-opencode'),
     /** Windows toast + taskbar badge. Resolves { ok, count } (never throws). */
     notify: (n) => invoke('app:notify', n),

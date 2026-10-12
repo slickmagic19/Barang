@@ -27,6 +27,7 @@ export interface FsBridge {
     detailTruncated: boolean;
     candidateTruncated: boolean;
   }>;
+  statPaths(paths: string[]): Promise<Array<{ path: string; exists: boolean; isDir: boolean }>>;
 }
 
 export interface BarangBridge {
@@ -77,6 +78,7 @@ export interface BarangBridge {
     pickFiles(): Promise<{ files: Array<{ path: string; name: string; size: number }> }>;
     saveDialog(defaultPath?: string): Promise<{ path: string }>;
     openExternal(url: string): Promise<{ ok: boolean }>;
+    revealPath(path: string): Promise<{ revealed: boolean }>;
     retryOpencode(): Promise<{ root: string }>;
     notify(n: { title: string; body?: string; kind?: string; badge?: boolean }): Promise<{ ok: boolean; count: number }>;
     clearAttention(): Promise<{ ok: boolean }>;

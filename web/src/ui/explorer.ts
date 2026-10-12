@@ -1,6 +1,7 @@
 // Lazy file tree: one depth level per expansion, dirs-first, skips junk by default.
 // VSCode-style right-click menus: new/rename/delete/copy path per entry.
 import { fsApi, type FsEntry } from '../lib/api';
+import { barang } from '../lib/transport';
 import { el, copyText } from '../lib/util';
 import { agentStore } from '../lib/agent';
 import { iconEl } from './icons';
@@ -295,6 +296,14 @@ function entryMenu(e: FsEntry, host: HTMLElement, hooks: ExplorerHooks, x: numbe
       run: () => {
         const rel = pathOf(agentStore.get().root || '', e.path, false);
         void copyText(rel).then((ok) => hooks.toast(ok ? 'Relative path copied.' : 'Copy failed.', ok ? 'info' : 'error'));
+      },
+    },
+    {
+      label: 'Reveal in File Explorer', icon: 'external',
+      run: () => {
+        void barang().app.revealPath(e.path).catch((err) => {
+          hooks.toast(`Reveal failed: ${(err as Error).message}`, 'error');
+        });
       },
     },
     ...(isDir && hooks.onSearchInFolder

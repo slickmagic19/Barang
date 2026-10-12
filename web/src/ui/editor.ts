@@ -11,6 +11,7 @@ export interface Tab {
   file?: string; // real workspace file (== path for normal tabs)
   title?: string; // display label override (untitled tabs)
   untitled?: boolean; // unsaved scratch tab (VSCode Ctrl+N model)
+  external?: boolean; // detached tab: absolute path outside the project (OS drop)
   dirty: boolean;
   mtime?: number;
   diff?: { before: string; after: string }; // present on session-diff review tabs
@@ -62,6 +63,16 @@ let hooks: EditorHooks | null = null;
 
 function nameOf(path: string): string {
   return path.split('/').pop() || path;
+}
+
+/** Absolute filesystem path (win `C:\…` / UNC / posix `/…`). Pure. */
+export function isAbsolutePath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]|^\\\\|^\//.test(p);
+}
+
+/** Forward-slash form used for tab ids + display. Pure. */
+export function toFwd(p: string): string {
+  return p.replace(/\\/g, '/');
 }
 
 /** True when any line exceeds ~200KB (minified bundles): tokenizing those
@@ -635,8 +646,11 @@ function setGroupActive(group: EditorGroup, path: string | null) {
   editorStore.set(group === 2 ? { active2: path, focus: 2 } : { active: path, focus: 1 });
 }
 
-export async function openFile(path: string, opts?: { focus?: boolean; group?: EditorGroup }) {
+export async function openFile(path: string, opts?: { focus?: boolean; group?: EditorGroup }): Promise<void> {
   if (!editor || !monaco) return;
+  // Absolute paths route through the detached-tab flow (which folds
+  // in-project ones back to workspace tabs).
+  if (isAbsolutePath(path)) return openExternalFile(path, opts);
   const wantFocus = opts?.focus ?? true;
   const group = opts?.group ?? focusedGroup();
   if (group === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
@@ -734,6 +748,105 @@ export async function openFile(path: string, opts?: { focus?: boolean; group?: E
   if (wantFocus) ed.focus();
 }
 
+/** Open an absolute path: in-project ones become normal workspace tabs,
+ *  anything else opens as a detached tab (VSCode behavior for OS drops).
+ *  Detached tabs read/save straight through absolute IPC and carry their
+ *  full path as id + tooltip. */
+export async function openExternalFile(abs: string, opts?: { focus?: boolean; group?: EditorGroup }): Promise<void> {
+  if (!editor || !monaco) return;
+  const wantFocus = opts?.focus ?? true;
+  const group = opts?.group ?? focusedGroup();
+  if (group === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
+    return openExternalFile(abs, { focus: wantFocus, group: 1 });
+  }
+  const ed = editorFor(group);
+  if (!ed) return;
+  const key = toFwd(abs);
+  // In-project after all? Behave exactly like a workspace open (so a drop
+  // from inside the project never creates a detached duplicate).
+  const root = agentStore.get().root || '';
+  if (root) {
+    const base = toFwd(root).replace(/\/+$/, '') + '/';
+    const hit = key.startsWith(base) ? key.slice(base.length)
+      : key.toLowerCase().startsWith(base.toLowerCase()) ? key.slice(base.length) : null;
+    if (hit) return openFile(hit, { focus: wantFocus, group });
+  }
+  const dropStub = () => {
+    editorStore.set((s) => {
+      const rest = s.tabs.filter((t) => !(t.path === key && (t.group || 1) === group));
+      const g1 = rest.filter((t) => (t.group || 1) === 1);
+      const g2 = rest.filter((t) => (t.group || 1) === 2);
+      return {
+        ...s,
+        tabs: rest,
+        active: s.active === key && group === 1 ? (g1[g1.length - 1]?.path ?? null) : s.active,
+        active2: s.active2 === key && group === 2 ? (g2[g2.length - 1]?.path ?? null) : s.active2,
+      };
+    });
+    hooks?.onTabs();
+  };
+  let tab = editorStore.get().tabs.find((t) => t.path === key && (t.group || 1) === group);
+  if (!tab) {
+    const fresh: Tab = { path: key, file: key, external: true, dirty: false, group };
+    editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
+    tab = fresh;
+  }
+  setGroupActive(group, key);
+  let model = models.get(key);
+  if (!model) {
+    let file;
+    try {
+      file = await fsApi.readAbsolute(abs);
+    } catch (e) {
+      hooks?.toast(`Cannot open ${key}: ${(e as Error).message}`, 'error');
+      dropStub();
+      return;
+    }
+    if (file.binary) {
+      if (IMAGE_EXT.test(key)) {
+        editorStore.set((s) => ({
+          ...s,
+          tabs: s.tabs.filter((t) => !(t.path === key && (t.group || 1) === group && !t.image)),
+        }));
+        let imgTab = editorStore.get().tabs.find((t) => t.path === key && (t.group || 1) === group && t.image);
+        if (!imgTab) {
+          const fresh: Tab = { path: key, file: key, title: nameOf(key), external: true, dirty: false, image: true, group };
+          editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
+          imgTab = fresh;
+        }
+        setGroupActive(group, key);
+        await renderImage(imgTab);
+        showCustom(group);
+        hooks?.onTabs();
+        if (wantFocus) ed.focus();
+        return;
+      }
+      hooks?.toast(`${key} is binary — preview not supported`, 'error');
+      dropStub();
+      return;
+    }
+    tab.mtime = file.mtime;
+    const content = file.content ?? '';
+    let lang = langOf(key);
+    if (lang !== 'plaintext' && hasMonsterLine(content)) {
+      lang = 'plaintext';
+      hooks?.toast(`${nameOf(key)} has very long lines — syntax highlighting off for speed.`, 'info');
+    }
+    model = monaco.editor.createModel(content, lang, monaco.Uri.parse(`inmemory://barang/${key}`));
+    model.onDidChangeContent(() => {});
+    models.set(key, model);
+    if (lang === 'typescript' || lang === 'javascript') {
+      void ensureProjectTypes().catch(() => {});
+    }
+  }
+  tab.title = nameOf(key);
+  suppressDirty = true;
+  showNormal(group);
+  ed.setModel(model);
+  suppressDirty = false;
+  hooks?.onTabs();
+  if (wantFocus) ed.focus();
+}
 /** Show a group's code pane (the diff overlay, if open elsewhere, is left
  *  alone — groups are independent like VSCode). */
 function showNormal(group: EditorGroup) {
@@ -817,9 +930,14 @@ function el_text(t: string): HTMLElement {
 async function renderImage(tab: Tab) {
   const div = customDivFor(tab.group || 1);
   if (!div || !tab.file) return;
+  // Detached tabs already carry an absolute path; workspace files resolve
+  // against the project root.
+  const f = tab.file;
   const root = agentStore.get().root || '';
   const sep = root.includes('\\') ? '\\' : '/';
-  const abs = root.replace(/[/\\]+$/, '') + sep + tab.file.replace(/^\.\//, '').split('/').join(sep);
+  const abs = (tab.external || isAbsolutePath(f))
+    ? f
+    : root.replace(/[/\\]+$/, '') + sep + f.replace(/^\.\//, '').split('/').join(sep);
   try {
     const r = await fsApi.readExternal(abs);
     div.innerHTML = '';
@@ -1242,7 +1360,10 @@ export async function saveActive(): Promise<boolean> {
   const model = models.get(active);
   if (!model) return false;
   try {
-    const res = await fsApi.write(active, model.getValue());
+    // Detached tabs write straight back to their absolute path.
+    const res = tab?.external
+      ? await fsApi.writeAbsolute(active, model.getValue())
+      : await fsApi.write(active, model.getValue());
     editorStore.set((st) => ({
       ...st,
       tabs: st.tabs.map((t) => (t.path === active ? { ...t, dirty: false, mtime: res.mtime } : t)),
@@ -1327,7 +1448,9 @@ export async function saveAll() {
     const m = models.get(t.path);
     if (!m) continue;
     try {
-      const res = await fsApi.write(t.path, m.getValue());
+      const res = t.external
+        ? await fsApi.writeAbsolute(t.path, m.getValue())
+        : await fsApi.write(t.path, m.getValue());
       t.dirty = false;
       t.mtime = res.mtime;
     } catch (e) {
@@ -1346,7 +1469,7 @@ export async function checkExternalChanges() {
     const model = models.get(t.path);
     if (!model) continue;
     try {
-      const file = await fsApi.read(t.path);
+      const file = t.external ? await fsApi.readAbsolute(t.path) : await fsApi.read(t.path);
       if (file.binary || file.mtime === undefined || file.mtime === t.mtime) continue;
       if (t.dirty) {
         hooks?.toast(`${t.path} changed on disk (agent?) — your unsaved edits kept`, 'info');

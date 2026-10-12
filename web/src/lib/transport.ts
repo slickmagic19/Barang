@@ -9,6 +9,7 @@ export interface FsBridge {
   rename(from: string, to: string): Promise<{ ok: boolean; path: string }>;
   remove(path: string): Promise<{ ok: boolean; path: string }>;
   readExternal(path: string): Promise<{ ok: boolean; path: string; name: string; mime: string; size: number; base64: string }>;
+  readAbsolute(path: string): Promise<{ path: string; content?: string; binary?: boolean; size: number; mtime?: number }>;
   writeAbsolute(path: string, content: string): Promise<{ ok: boolean; path: string; rootRel: string | null; size: number; mtime: number }>;
   find(query: string, limit?: number): Promise<{ results: Array<{ path: string; score: number }> }>;
   search(q: string, path?: string, limit?: number): Promise<{

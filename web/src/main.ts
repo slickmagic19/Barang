@@ -21,7 +21,11 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
 }
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry,
 deleteFocusedEntry, pathOf } from './ui/explorer';
-import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor, revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds, parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup, openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab, showImageTab, getEditorDisplayFlags } from './ui/editor';
+import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor,
+revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds,
+parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup,
+openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab,
+showImageTab, getEditorDisplayFlags, isAbsolutePath } from './ui/editor';
 import { initChat, filePartView, stepHistory, pushComposerHist } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
@@ -345,15 +349,15 @@ async function boot() {
   center.append(editorCols, boltHost, welcome);
   setSplitHost(editorHost2);
 
-  // OS file drop: files dropped on the editor open as tabs (in-project ones),
-  // folders open as the project — VSCode behavior. Drops on the chat composer
-  // keep their attachment flow (the composer owns those events).
-  const isAbsDropPath = (p: string) => /^[A-Za-z]:[\\/]|^\\\\/.test(p);
+  // OS file drop: absolute paths open straight through openFile (in-project
+  // ones become workspace tabs, the rest detached tabs); folders open as the
+  // project — VSCode behavior. Drops on the chat composer keep their
+  // attachment flow (the composer owns those events).
   const dropPaths = async (paths: string[], group: 1 | 2 = 1) => {
     const list = (paths ?? []).map((p) => String(p || '')).filter(Boolean).slice(0, 20);
     if (!list.length) return;
-    const abs = list.filter(isAbsDropPath);
-    const rel = list.filter((p) => !isAbsDropPath(p));
+    const abs = list.filter(isAbsolutePath);
+    const rel = list.filter((p) => !isAbsolutePath(p));
     let stats: Array<{ path: string; exists: boolean; isDir: boolean }> = [];
     if (abs.length) {
       try {
@@ -367,28 +371,13 @@ async function boot() {
       await openPathFlow(dirs[0]); // folders win, like VSCode
       return;
     }
-    const rootNow = agentStore.get().root || '';
-    const norm = (p: string) => p.replace(/\//g, '\\').toLowerCase();
-    const toOpen = [...rel];
-    const outside: string[] = [];
     for (const s of stats) {
       if (!s.exists || s.isDir) continue;
-      const relPath = norm(s.path).startsWith(norm(rootNow) + '\\') && rootNow
-        ? s.path.slice(rootNow.length + 1).split('\\').join('/')
-        : null;
-      if (relPath) toOpen.push(relPath);
-      else outside.push(s.path);
+      await openFile(s.path, { group }); // toasts on failure
     }
-    for (const f of toOpen) {
-      try {
-        await openFile(f, { group });
-      } catch {
-        // openFile already toasts the reason.
-      }
-    }
-    if (outside.length) {
-      toast(`${outside.length} file(s) are outside the project — open their folder first.`, 'error');
-    }
+    for (const f of rel) await openFile(f, { group });
+    const gone = stats.filter((s) => !s.exists).length;
+    if (gone) toast(`${gone} dropped file(s) no longer exist.`, 'error');
   };
   const droppedPaths = (e: DragEvent): string[] =>
     [...(e.dataTransfer?.files ?? [])]
@@ -398,6 +387,8 @@ async function boot() {
   const inComposer = (t: EventTarget | null) =>
     (t as HTMLElement | null)?.closest?.('.composer') != null;
   let centerDrag = 0;
+  // Capture phase: Monaco's own drop handling must never swallow OS file
+  // drops before they reach us.
   center.addEventListener('dragenter', (e) => {
     if (!hasDroppedFiles(e as DragEvent)) return;
     e.preventDefault();
@@ -411,16 +402,16 @@ async function boot() {
       if (n !== col) n.classList.remove('drop-over');
     });
     col?.classList.add('drop-over');
-  });
+  }, true);
   center.addEventListener('dragover', (e) => {
     if (hasDroppedFiles(e as DragEvent)) e.preventDefault();
-  });
+  }, true);
   center.addEventListener('dragleave', () => {
     centerDrag = Math.max(0, centerDrag - 1);
     if (!centerDrag) {
       center.querySelectorAll('.editor-col.drop-over').forEach((n) => n.classList.remove('drop-over'));
     }
-  });
+  }, true);
   center.addEventListener('drop', (e) => {
     centerDrag = 0;
     center.querySelectorAll('.editor-col.drop-over').forEach((n) => n.classList.remove('drop-over'));
@@ -430,7 +421,7 @@ async function boot() {
     e.preventDefault();
     const group = (e.target as HTMLElement).closest?.('.split-col') ? 2 : 1;
     void dropPaths(paths, group as 1 | 2);
-  });
+  }, true);
 
   // Welcome extras: open entry points + recent projects (from app state below
   // once loaded — painted by paintWelcome()).
@@ -1018,6 +1009,8 @@ async function boot() {
     removeQuestion,
     pathOf,
     dropPaths,
+    saveActive,
+    isAbsolutePath,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

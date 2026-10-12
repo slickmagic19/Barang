@@ -22,6 +22,7 @@ const barang = {
     remove: (path) => invoke('fs:remove', { path }),
     writeAbsolute: (path, content) => invoke('fs:write-absolute', { path, content }),
     readExternal: (path) => invoke('fs:read-external', { path }),
+    readAbsolute: (path) => invoke('fs:read-absolute', { path }),
     find: (query, limit = 50) => invoke('fs:find', { query, limit }),
     search: (q, path = '', limit = 50) => invoke('fs:search', { q, path, limit }),
     searchReplace: (args) => invoke('fs:search-replace', args),

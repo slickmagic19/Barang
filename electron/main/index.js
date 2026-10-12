@@ -482,6 +482,7 @@ function registerIpc() {
   ipcMain.handle('fs:remove', ok(needRoot((p) => files.removePath(root, p.path))));
   ipcMain.handle('fs:write-absolute', ok((p) => files.writeAbsolute(p.path, p.content, root)));
   ipcMain.handle('fs:read-external', ok((p) => files.readExternal(p.path)));
+  ipcMain.handle('fs:read-absolute', ok((p) => files.readAbsolute(p.path)));
   ipcMain.handle('fs:find', ok(needRoot((p) => files.find(root, p))));
   ipcMain.handle('fs:search', ok(needRoot((p) => files.search(root, p))));
   ipcMain.handle('fs:search-replace', ok(needRoot((p) => files.searchReplace(root, p))));
@@ -1524,6 +1525,72 @@ async function runUiSmoke() {
   } catch (e) { dropProbe = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] drop-open: ' + dropProbe);
   pass = pass && dropProbe === 'ok';
+  // Detached tabs: an absolute path OUTSIDE the project must open as a tab
+  // (the old code refused these), and save must write it back in place.
+  let dropOutside = 'skip';
+  const dropTmp = path.join(app.getPath('temp'), 'barang-drop-outside.txt');
+  try {
+    await fs.writeFile(dropTmp, 'outside-1', 'utf8');
+    const fwd = dropTmp.split(path.sep).join('/');
+    dropOutside = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.dropPaths !== 'function') return 'no-drop-fn';
+      // Earlier assertions leave the settings modal open — its overlay
+      // would swallow the trusted clicks below.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      await u.dropPaths(['${fwd}'], 1);
+      await new Promise((r) => setTimeout(r, 1200));
+      const tab = document.querySelector('.tab[data-path="${fwd}"]');
+      if (!tab) return 'tab-not-open';
+      const name = tab.querySelector('.tab-name')?.textContent || '';
+      if (name !== 'barang-drop-outside.txt') return 'bad-name:' + name;
+      const ed = document.querySelector('.editor-host .monaco-editor');
+      if (!ed) return 'no-monaco';
+      const r = ed.getBoundingClientRect();
+      return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+    })()`);
+    if (dropOutside.startsWith('{')) {
+      // Trusted-type into the detached tab (proves dirty tracking works on
+      // detached models), then Ctrl+S through the real keybinding.
+      const at = JSON.parse(dropOutside);
+      w.webContents.sendInputEvent({ type: 'mouseDown', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      w.webContents.sendInputEvent({ type: 'mouseUp', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      await new Promise((r) => setTimeout(r, 600));
+      // Select-all + retype (cursor lands wherever the click put it, so
+      // replacement — not appending — is the deterministic assertion).
+      w.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'a', code: 'KeyA', key: 'a', modifiers: ['control'] });
+      w.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'a', code: 'KeyA', key: 'a', modifiers: ['control'] });
+      await new Promise((r) => setTimeout(r, 300));
+      for (const ch of 'outside-1-Xok') {
+        w.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await new Promise((r) => setTimeout(r, 400));
+      const diag = await w.webContents.executeJavaScript(`(() => ({
+        focused: !!document.querySelector('.monaco-editor')?.contains(document.activeElement),
+        dirty: !!document.querySelector('.dirty-dot'),
+        ae: (document.activeElement?.tagName || '?') + '.' + (document.activeElement?.className || ''),
+      }))()`);
+      console.log('[smoke-ui] drop-outside diag: ' + JSON.stringify(diag));
+      w.webContents.sendInputEvent({ type: 'keyDown', keyCode: 's', code: 'KeyS', key: 's', modifiers: ['control'] });
+      w.webContents.sendInputEvent({ type: 'keyUp', keyCode: 's', code: 'KeyS', key: 's', modifiers: ['control'] });
+      await new Promise((r) => setTimeout(r, 1200));
+      dropOutside = await w.webContents.executeJavaScript(`(async () => {
+        const u = window.__barangTestUtils;
+        if (typeof u.closeTab === 'function') await u.closeTab('${fwd}');
+        await new Promise((r) => setTimeout(r, 400));
+        return document.querySelector('.tab[data-path="${fwd}"]') ? 'tab-stuck' : 'ok';
+      })()`);
+    }
+    if (dropOutside === 'ok') {
+      const afterText = await fs.readFile(dropTmp, 'utf8');
+      if (afterText !== 'outside-1-Xok') dropOutside = 'content-mismatch:' + afterText;
+    }
+  } catch (e) { dropOutside = 'error: ' + (e.message || e); }
+  try { await fs.unlink(dropTmp); } catch {}
+  console.log('[smoke-ui] drop-outside: ' + dropOutside);
+  pass = pass && dropOutside === 'ok';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

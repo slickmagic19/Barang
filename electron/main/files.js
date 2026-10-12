@@ -540,6 +540,23 @@ export function isImageName(name) {
 }
 
 /**
+ * Read an absolute path anywhere on disk (detached editor tabs for files
+ * dropped from outside the project). NOT root-confined by design: the path
+ * always comes from an explicit user gesture (OS drag-drop onto the editor).
+ * Same caps as workspace reads.
+ */
+export async function readAbsolute(absPath) {
+  if (!absPath || !path.isAbsolute(absPath)) throw new Error('Need an absolute {path}');
+  const stat = await fs.stat(absPath);
+  if (!stat.isFile()) throw new Error('Not a file');
+  if (stat.size > MAX_READ) throw new Error('File too large to open (>1MB)');
+  const buf = await fs.readFile(absPath);
+  const fwd = absPath.split(path.sep).join('/');
+  if (buf.includes(0)) return { path: fwd, binary: true, size: stat.size };
+  return { path: fwd, content: buf.toString('utf8'), size: stat.size, mtime: stat.mtimeMs };
+}
+
+/**
  * Read any absolute file as base64 (for composer image attachments — these
  * live anywhere, e.g. Downloads, so this is intentionally NOT root-confined).
  */

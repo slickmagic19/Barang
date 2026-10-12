@@ -641,6 +641,16 @@ async function boot() {
               run: () => void copyText(f).then((ok) => toast(ok ? 'Path copied.' : 'Copy failed.', ok ? 'info' : 'error')),
             },
             { label: 'Reveal in Explorer', icon: 'folder' as const, run: () => void revealInTree(f) },
+            {
+              // OS file manager (the only reveal that works for detached,
+              // outside-project tabs — tree reveal can't show those).
+              label: 'Reveal in File Explorer', icon: 'external' as const,
+              run: () => {
+                void barang().app.revealPath(f).catch((err) => {
+                  toast(`Reveal failed: ${(err as Error).message}`, 'error');
+                });
+              },
+            },
           ]),
         ]);
       };

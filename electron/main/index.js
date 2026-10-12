@@ -465,14 +465,20 @@ function registerIpc() {
   }));
   ipcMain.handle('app:reveal-path', ok(async (p = {}) => {
     const rel = String(p.path || '');
-    if (!rel || !root) throw new Error('No folder open');
-    const abs = path.isAbsolute(rel) ? rel : path.join(root, rel);
-    const norm = path.normalize(abs);
-    const rnorm = path.normalize(root);
-    if (norm !== rnorm && !norm.startsWith(rnorm + path.sep)) throw new Error('Outside the project');
-    const st = await fs.stat(norm).catch(() => null);
+    if (!rel) throw new Error('No path');
+    // Absolute paths (detached tabs) are allowed anywhere: like
+    // readAbsolute/writeAbsolute they always come from an explicit user
+    // gesture, and this op is read-only. Root-relative paths stay confined.
+    const abs = path.isAbsolute(rel) ? rel : root ? path.join(root, rel) : '';
+    if (!abs) throw new Error('No folder open');
+    if (!path.isAbsolute(rel)) {
+      const norm = path.normalize(abs);
+      const rnorm = path.normalize(root);
+      if (norm !== rnorm && !norm.startsWith(rnorm + path.sep)) throw new Error('Outside the project');
+    }
+    const st = await fs.stat(abs).catch(() => null);
     if (!st) throw new Error('File no longer exists');
-    shell.showItemInFolder(norm);
+    shell.showItemInFolder(abs);
     return { revealed: true };
   }));
   ipcMain.handle('fs:read', ok(needRoot((p) => files.readFile(root, p.path))));
@@ -1518,6 +1524,17 @@ async function runUiSmoke() {
       await new Promise((r) => setTimeout(r, 900));
       const tab = document.querySelector('.tab[data-path="drop-probe.txt"]');
       if (!tab) return 'tab-not-open';
+      // Tab menu must offer both reveals (tree + OS file manager).
+      const tr = tab.getBoundingClientRect();
+      tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: tr.left + 8, clientY: tr.top + 8 }));
+      await new Promise((r) => setTimeout(r, 400));
+      const m = document.querySelector('.ctx-menu');
+      const mt = m ? (m.textContent || '') : '';
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 300));
+      if (!m || !mt.includes('Reveal in Explorer') || !mt.includes('Reveal in File Explorer')) {
+        return 'tab-menu-bad:' + mt.slice(0, 120);
+      }
       if (typeof u.closeTab === 'function') await u.closeTab('drop-probe.txt');
       try { await window.barang.fs.remove('drop-probe.txt'); } catch {}
       return 'ok';
@@ -1591,10 +1608,49 @@ async function runUiSmoke() {
       const afterText = await fs.readFile(dropTmp, 'utf8');
       if (afterText !== 'outside-1-Xok') dropOutside = 'content-mismatch:' + afterText;
     }
+    // Reveal in File Explorer on an outside-project file: real invoke (opens
+    // the OS file manager selecting the temp file), then close only the
+    // Explorer windows this invoke opened (HWND diff — never yours).
+    const listExpHwnds = () => new Promise((resolve) => {
+      let out = '';
+      const ps = spawn('powershell', ['-NoProfile', '-Command',
+        `$s=New-Object -ComObject Shell.Application;` +
+        `@($s.Windows())|Where-Object{try{$_.FullName -match 'explorer\\.exe'}catch{$false}}|` +
+        `ForEach-Object{$_.HWND}`], { windowsHide: true });
+      ps.stdout.on('data', (d) => { out += d; });
+      ps.on('close', () => resolve(out));
+      setTimeout(() => resolve(out), 15000);
+    });
+    if (dropOutside === 'ok') {
+      const beforeHwnds = new Set((await listExpHwnds()).split(/[\s,]+/).filter(Boolean));
+      const revealed = await w.webContents.executeJavaScript(
+        `window.barang.app.revealPath('${fwd}').then(() => 'revealed', (e) => 'reveal-err:' + e.message)`,
+      ).catch((e) => 'reveal-err:' + (e.message || e));
+      if (revealed !== 'revealed') {
+        dropOutside = revealed;
+      } else {
+        await new Promise((r) => setTimeout(r, 1500));
+        const afterHwnds = (await listExpHwnds()).split(/[\s,]+/).filter(Boolean);
+        const fresh = afterHwnds.filter((h) => !beforeHwnds.has(h));
+        if (fresh.length) {
+          await new Promise((resolve) => {
+            const ps = spawn('powershell', ['-NoProfile', '-Command',
+              `$n=@(${fresh.join(',')});$s=New-Object -ComObject Shell.Application;` +
+              `@($s.Windows())|Where-Object{try{$_.FullName -match 'explorer\\.exe' -and $n -contains $_.HWND}catch{$false}}|` +
+              `ForEach-Object{try{$_.Quit()}catch{}}`], { windowsHide: true });
+            ps.on('close', () => resolve());
+            setTimeout(resolve, 15000);
+          });
+          dropOutside = 'ok-revealed-cleaned';
+        } else {
+          dropOutside = 'reveal-no-window';
+        }
+      }
+    }
   } catch (e) { dropOutside = 'error: ' + (e.message || e); }
   try { await fs.unlink(dropTmp); } catch {}
   console.log('[smoke-ui] drop-outside: ' + dropOutside);
-  pass = pass && dropOutside === 'ok';
+  pass = pass && dropOutside === 'ok-revealed-cleaned';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

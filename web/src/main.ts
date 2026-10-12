@@ -379,10 +379,31 @@ async function boot() {
     const gone = stats.filter((s) => !s.exists).length;
     if (gone) toast(`${gone} dropped file(s) no longer exist.`, 'error');
   };
-  const droppedPaths = (e: DragEvent): string[] =>
-    [...(e.dataTransfer?.files ?? [])]
-      .map((f) => (f as File & { path?: string }).path)
-      .filter((p): p is string => !!p);
+  const droppedPaths = async (e: DragEvent): Promise<string[]> => {
+    const out: string[] = [];
+    const dt = e.dataTransfer;
+    if (!dt) return out;
+    const files = [...(dt.files ?? [])] as Array<File & { path?: string }>;
+    // Folders don't always surface in .files — also try the items list.
+    if (!files.length && dt.items) {
+      for (const it of [...dt.items]) {
+        try {
+          const f = it.getAsFile?.();
+          if (f) files.push(f as File & { path?: string });
+        } catch { /* ignore */ }
+      }
+    }
+    for (const f of files.slice(0, 20)) {
+      if (f.path) { out.push(f.path); continue; }
+      // Chromium Files carry no path; the preload resolves it in Node
+      // context (webUtils.getPathForFile).
+      try {
+        const p = barang().fs.pathForFile(f);
+        if (p) out.push(p);
+      } catch { /* virtual file (archive member etc.) — skip */ }
+    }
+    return out;
+  };
   const hasDroppedFiles = (e: DragEvent) => [...(e.dataTransfer?.types ?? [])].includes('Files');
   const inComposer = (t: EventTarget | null) =>
     (t as HTMLElement | null)?.closest?.('.composer') != null;
@@ -416,11 +437,12 @@ async function boot() {
     centerDrag = 0;
     center.querySelectorAll('.editor-col.drop-over').forEach((n) => n.classList.remove('drop-over'));
     if (inComposer(e.target)) return; // chat composer attach flow handles it
-    const paths = droppedPaths(e as DragEvent);
-    if (!paths.length) return;
     e.preventDefault();
     const group = (e.target as HTMLElement).closest?.('.split-col') ? 2 : 1;
-    void dropPaths(paths, group as 1 | 2);
+    void droppedPaths(e as DragEvent).then((paths) => {
+      if (!paths.length) return;
+      void dropPaths(paths, group as 1 | 2);
+    });
   }, true);
 
   // Welcome extras: open entry points + recent projects (from app state below

@@ -1545,6 +1545,10 @@ async function runUiSmoke() {
       if (!tab) return 'tab-not-open';
       const name = tab.querySelector('.tab-name')?.textContent || '';
       if (name !== 'barang-drop-outside.txt') return 'bad-name:' + name;
+      // Presence is not enough (a hidden strip still matches): the tab
+      // must actually be visible.
+      if (document.querySelector('.editor-cols.hidden')) return 'cols-hidden';
+      if (tab.getBoundingClientRect().width === 0) return 'tab-zero-width';
       const ed = document.querySelector('.editor-host .monaco-editor');
       if (!ed) return 'no-monaco';
       const r = ed.getBoundingClientRect();

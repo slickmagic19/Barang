@@ -29,6 +29,7 @@ export interface FsBridge {
     candidateTruncated: boolean;
   }>;
   statPaths(paths: string[]): Promise<Array<{ path: string; exists: boolean; isDir: boolean }>>;
+  pathForFile(file: File): string;
 }
 
 export interface BarangBridge {

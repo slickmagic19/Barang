@@ -2,7 +2,7 @@
 // Minimal, no direct ipcRenderer exposure.
 // NOTE: .cjs on purpose — sandboxed preloads load as classic scripts, so ESM
 // `import` syntax fails here ("Cannot use import statement outside a module").
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 async function invoke(channel, payload) {
   const res = await ipcRenderer.invoke(channel, payload);
@@ -27,6 +27,9 @@ const barang = {
     search: (q, path = '', limit = 50) => invoke('fs:search', { q, path, limit }),
     searchReplace: (args) => invoke('fs:search-replace', args),
     statPaths: (paths) => invoke('fs:stat-paths', { paths }),
+    // Real filesystem path of a File from an OS drag-drop / file input.
+    // (Chromium Files carry no path; webUtils resolves it in Node context.)
+    pathForFile: (file) => webUtils.getPathForFile(file),
   },
   /** Raw opencode call. Resolves parsed JSON (or undefined) / throws Error. */
   oc: async (path, { method = 'GET', body, timeoutMs } = {}) => {

@@ -1651,6 +1651,87 @@ async function runUiSmoke() {
   try { await fs.unlink(dropTmp); } catch {}
   console.log('[smoke-ui] drop-outside: ' + dropOutside);
   pass = pass && dropOutside === 'ok-revealed-cleaned';
+  // Tab sessions (VSCode hot-exit): workspace + detached + untitled tabs
+  // persist per project and reopen with unsaved content after close.
+  let sessProbe = 'skip';
+  const sessA = 'sess-restore-a.txt';
+  const sessOutside = path.join(app.getPath('temp'), 'barang-sess-outside.txt');
+  try {
+    await fs.writeFile(sessOutside, 'outside-sess-1', 'utf8');
+    const sessFwd = sessOutside.split(path.sep).join('/');
+    sessProbe = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      const need = ['openFile', 'closeAllTabs', 'flushTabSession', 'restoreTabSession', 'openUntitled', 'dropPaths'];
+      for (const f of need) if (!u || typeof u[f] !== 'function') return 'no-fn:' + f;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      try { await window.barang.fs.write('${sessA}', 'aaa'); } catch (e) { return 'write-fail'; }
+      await u.openFile('${sessA}', { group: 1 });
+      await u.dropPaths(['${sessFwd}'], 1);
+      u.openUntitled({ content: 'scratch-note', focus: false });
+      await new Promise((r) => setTimeout(r, 1200));
+      document.querySelector('.tab[data-path="${sessA}"]')?.click();
+      await new Promise((r) => setTimeout(r, 600));
+      if (document.querySelectorAll('.tab').length < 3) return 'tab-count:' + document.querySelectorAll('.tab').length;
+      const ed = document.querySelector('.editor-host .monaco-editor');
+      if (!ed) return 'no-monaco';
+      const r = ed.getBoundingClientRect();
+      return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+    })()`);
+    if (sessProbe.startsWith('{')) {
+      const at = JSON.parse(sessProbe);
+      w.webContents.sendInputEvent({ type: 'mouseDown', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      w.webContents.sendInputEvent({ type: 'mouseUp', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      await new Promise((r) => setTimeout(r, 600));
+      for (const ch of '-sessdirty') {
+        w.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+        await new Promise((r) => setTimeout(r, 90));
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      sessProbe = await w.webContents.executeJavaScript(`(async () => {
+        const u = window.__barangTestUtils;
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const st = await window.barang.app.state().catch(() => null);
+        const key = 'barang.tabs.v1|' + ((st && st.root) || '').toLowerCase();
+        u.flushTabSession();
+        let snap = null;
+        try { snap = JSON.parse(localStorage.getItem(key) || 'null'); } catch { return 'no-snap'; }
+        if (!snap) return 'no-snap:' + key;
+        const paths = (snap.tabs || []).map((t) => t.path);
+        if (!paths.includes('${sessA}')) return 'snap-miss-a';
+        if (!paths.includes('${sessFwd}')) return 'snap-miss-out';
+        if (!String((snap.dirty || {})['${sessA}'] || '').includes('-sessdirty')) return 'snap-dirty';
+        if (!(snap.untitled || []).some((x) => String(x.content || '').includes('scratch-note'))) return 'snap-untitled';
+        const p = u.closeAllTabs();
+        await sleep(800);
+        const dlg = document.querySelector('.confirm-modal');
+        if (!dlg) return 'no-dialog';
+        dlg.querySelector('.btn-danger')?.click();
+        if ((await p) !== true) return 'close-false';
+        await sleep(400);
+        if (document.querySelector('.tab')) return 'tabs-stuck';
+        await u.restoreTabSession();
+        await sleep(1800);
+        const hasA = !!document.querySelector('.tab[data-path="${sessA}"]');
+        const hasOut = !!document.querySelector('.tab[data-path="${sessFwd}"]');
+        const hasUn = [...document.querySelectorAll('.tab-name')].some((n) => (n.textContent || '').startsWith('Untitled'));
+        if (!hasA || !hasOut || !hasUn) return 'restore-miss:a=' + hasA + ' out=' + hasOut + ' un=' + hasUn;
+        const dot = !!document.querySelector('.tab[data-path="${sessA}"] .dirty-dot');
+        if (!dot) return 'restore-not-dirty';
+        const lines = document.querySelector('.editor-host .monaco-editor .view-lines')?.textContent || '';
+        if (!lines.includes('-sessdirty')) return 'restore-content';
+        const p2 = u.closeAllTabs();
+        await sleep(800);
+        document.querySelector('.confirm-modal .btn-danger')?.click();
+        await p2;
+        try { await window.barang.fs.remove('${sessA}'); } catch {}
+        return 'ok';
+      })()`);
+    }
+  } catch (e) { sessProbe = 'error: ' + (e.message || e); }
+  try { await fs.unlink(sessOutside); } catch {}
+  console.log('[smoke-ui] sess-restore: ' + sessProbe);
+  pass = pass && sessProbe === 'ok';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

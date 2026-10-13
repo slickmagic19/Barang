@@ -544,6 +544,9 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
     },
   });
   monaco.editor.setTheme('barang-dark');
+  // Tab sessions: persist the working set (debounced) + on quit.
+  editorStore.subscribe(() => scheduleTabSessionSave());
+  window.addEventListener('beforeunload', flushTabSession);
 }
 
 type EditorPrefs = { fontSize: number; minimap: boolean; wordWrap: boolean; bracketColors: boolean; stickyScroll: boolean };
@@ -646,12 +649,13 @@ function setGroupActive(group: EditorGroup, path: string | null) {
   editorStore.set(group === 2 ? { active2: path, focus: 2 } : { active: path, focus: 1 });
 }
 
-export async function openFile(path: string, opts?: { focus?: boolean; group?: EditorGroup }): Promise<void> {
+export async function openFile(path: string, opts?: { focus?: boolean; group?: EditorGroup; silent?: boolean }): Promise<void> {
   if (!editor || !monaco) return;
   // Absolute paths route through the detached-tab flow (which folds
   // in-project ones back to workspace tabs).
   if (isAbsolutePath(path)) return openExternalFile(path, opts);
   const wantFocus = opts?.focus ?? true;
+  const silent = opts?.silent ?? false;
   const group = opts?.group ?? focusedGroup();
   if (group === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
     // Split unavailable — fall back to group 1 rather than stranding.
@@ -691,7 +695,7 @@ export async function openFile(path: string, opts?: { focus?: boolean; group?: E
           if (wantFocus) ed.focus();
           return;
         }
-        hooks?.toast(`${path} is binary — preview not supported`, 'error');
+        if (!silent) hooks?.toast(`${path} is binary — preview not supported`, 'error');
         editorStore.set((s) => {
           const rest = s.tabs.filter((t) => !(t.path === path && (t.group || 1) === group));
           const g1 = rest.filter((t) => (t.group || 1) === 1);
@@ -724,7 +728,7 @@ export async function openFile(path: string, opts?: { focus?: boolean; group?: E
         void ensureProjectTypes().catch(() => {});
       }
     } catch (e) {
-      hooks?.toast(`Cannot open ${path}: ${(e as Error).message}`, 'error');
+      if (!silent) hooks?.toast(`Cannot open ${path}: ${(e as Error).message}`, 'error');
       editorStore.set((s) => {
         const rest = s.tabs.filter((t) => !(t.path === path && (t.group || 1) === group));
         const g1 = rest.filter((t) => (t.group || 1) === 1);
@@ -752,12 +756,13 @@ export async function openFile(path: string, opts?: { focus?: boolean; group?: E
  *  anything else opens as a detached tab (VSCode behavior for OS drops).
  *  Detached tabs read/save straight through absolute IPC and carry their
  *  full path as id + tooltip. */
-export async function openExternalFile(abs: string, opts?: { focus?: boolean; group?: EditorGroup }): Promise<void> {
+export async function openExternalFile(abs: string, opts?: { focus?: boolean; group?: EditorGroup; silent?: boolean }): Promise<void> {
   if (!editor || !monaco) return;
   const wantFocus = opts?.focus ?? true;
+  const silent = opts?.silent ?? false;
   const group = opts?.group ?? focusedGroup();
   if (group === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
-    return openExternalFile(abs, { focus: wantFocus, group: 1 });
+    return openExternalFile(abs, { focus: wantFocus, group: 1, silent });
   }
   const ed = editorFor(group);
   if (!ed) return;
@@ -769,7 +774,7 @@ export async function openExternalFile(abs: string, opts?: { focus?: boolean; gr
     const base = toFwd(root).replace(/\/+$/, '') + '/';
     const hit = key.startsWith(base) ? key.slice(base.length)
       : key.toLowerCase().startsWith(base.toLowerCase()) ? key.slice(base.length) : null;
-    if (hit) return openFile(hit, { focus: wantFocus, group });
+    if (hit) return openFile(hit, { focus: wantFocus, group, silent });
   }
   const dropStub = () => {
     editorStore.set((s) => {
@@ -798,7 +803,7 @@ export async function openExternalFile(abs: string, opts?: { focus?: boolean; gr
     try {
       file = await fsApi.readAbsolute(abs);
     } catch (e) {
-      hooks?.toast(`Cannot open ${key}: ${(e as Error).message}`, 'error');
+      if (!silent) hooks?.toast(`Cannot open ${key}: ${(e as Error).message}`, 'error');
       dropStub();
       return;
     }
@@ -821,7 +826,7 @@ export async function openExternalFile(abs: string, opts?: { focus?: boolean; gr
         if (wantFocus) ed.focus();
         return;
       }
-      hooks?.toast(`${key} is binary — preview not supported`, 'error');
+      if (!silent) hooks?.toast(`${key} is binary — preview not supported`, 'error');
       dropStub();
       return;
     }
@@ -1412,21 +1417,23 @@ async function awaitSaveDialog(): Promise<{ path: string }> {
 
 let untitledSeq = 0;
 
-/** New untitled scratch tab (VSCode Ctrl+N). No disk footprint until saved. */
-export function openUntitled() {
+/** New untitled scratch tab (VSCode Ctrl+N). No disk footprint until saved.
+ *  opts restores a tab-session scratch (content + dirty, no focus steal). */
+export function openUntitled(opts?: { content?: string; group?: EditorGroup; dirty?: boolean; focus?: boolean }) {
   if (!editor || !monaco) return;
-  let group = focusedGroup();
+  let group = opts?.group ?? focusedGroup();
   if (group === 2 && (!editorStore.get().split || !ensureSplitEditor())) group = 1;
   untitledSeq++;
   let n = untitledSeq;
   while (editorStore.get().tabs.some((t) => t.path === `untitled:${n}`)) n++;
   untitledSeq = n;
   const path = `untitled:${n}`;
-  const model = monaco.editor.createModel('', 'plaintext', monaco.Uri.parse(`inmemory://barang/${path}`));
+  const content = opts?.content ?? '';
+  const model = monaco.editor.createModel(content, 'plaintext', monaco.Uri.parse(`inmemory://barang/${path}`));
   models.set(path, model);
   editorStore.set((s) => ({
     ...s,
-    tabs: [...s.tabs, { path, title: `Untitled-${n}`, untitled: true, dirty: false, group }],
+    tabs: [...s.tabs, { path, title: `Untitled-${n}`, untitled: true, dirty: opts?.dirty ?? false, group }],
     active: group === 2 ? s.active : path,
     active2: group === 2 ? path : s.active2,
     focus: group,
@@ -1437,7 +1444,7 @@ export function openUntitled() {
   ed?.setModel(model);
   suppressDirty = false;
   hooks?.onTabs();
-  ed?.focus();
+  if (opts?.focus ?? true) ed?.focus();
 }
 
 export async function saveAll() {
@@ -1495,4 +1502,169 @@ export function revealInEditor(path: string, line?: number) {
       ed.setPosition({ lineNumber: line, column: 1 });
     }
   });
+}
+
+// ---- Tab sessions (VSCode hot-exit lite) ---------------------------------
+// Per-project working set persisted to localStorage: workspace + detached
+// (absolute-path) file tabs, image tabs, untitled scratches, and unsaved
+// (dirty) contents. Reopened on folder switch + app restart, so a dragged-in
+// outside file comes back with the project. Diff/preview/bolt tabs are
+// derived views and are never persisted.
+
+export interface TabSessionFile {
+  path: string; // workspace-relative, or absolute fwd-slashes when detached
+  group: EditorGroup;
+  image?: boolean;
+}
+
+export interface TabSession {
+  tabs: TabSessionFile[];
+  active: string | null;
+  active2: string | null;
+  dirty: Record<string, string>; // tab path -> unsaved content
+  untitled: Array<{ content: string; group: EditorGroup; dirty: boolean }>;
+  savedAt: number;
+}
+
+const TABSESSION_PREFIX = 'barang.tabs.v1|';
+const TABSESSION_MAX_KEYS = 20;
+const DIRTY_MAX_PER_TAB = 256 * 1024;
+const DIRTY_MAX_TOTAL = 2 * 1024 * 1024;
+const UNTITLED_MAX_COUNT = 10;
+
+function tabSessionKey(root: string): string {
+  return TABSESSION_PREFIX + root.toLowerCase();
+}
+
+/** Build the snapshot for the current project. Pure-ish (reads stores). */
+export function snapshotTabSession(): TabSession | null {
+  const root = agentStore.get().root || '';
+  if (!root) return null;
+  const s = editorStore.get();
+  const tabs: TabSessionFile[] = [];
+  const dirty: Record<string, string> = {};
+  let dirtyBytes = 0;
+  for (const t of s.tabs) {
+    if (!t.file) continue;
+    if (t.path.startsWith('bolt:') || t.diff || t.preview) continue;
+    if (t.untitled) continue; // handled below (content-addressed, no stable id)
+    const group = (t.group || 1) as EditorGroup;
+    tabs.push(t.image ? { path: t.file, group, image: true } : { path: t.file, group });
+    if (t.dirty && !t.image) {
+      const content = models.get(t.path)?.getValue() ?? '';
+      if (content.length <= DIRTY_MAX_PER_TAB && dirtyBytes + content.length <= DIRTY_MAX_TOTAL) {
+        dirty[t.path] = content;
+        dirtyBytes += content.length;
+      }
+    }
+  }
+  const untitled: TabSession['untitled'] = [];
+  for (const t of s.tabs) {
+    if (!t.untitled || untitled.length >= UNTITLED_MAX_COUNT) continue;
+    const content = models.get(t.path)?.getValue() ?? '';
+    if (!content && !t.dirty) continue; // skip pristine empties
+    if (content.length > DIRTY_MAX_PER_TAB) continue;
+    untitled.push({ content, group: (t.group || 1) as EditorGroup, dirty: t.dirty });
+  }
+  return { tabs: tabs.slice(0, 100), active: s.active, active2: s.active2, dirty, untitled, savedAt: Date.now() };
+}
+
+/** Synchronous persist (safe for beforeunload). Exported for smoke. */
+export function flushTabSession(): void {
+  try {
+    const root = agentStore.get().root || '';
+    if (!root) return;
+    const snap = snapshotTabSession();
+    if (!snap) return;
+    localStorage.setItem(tabSessionKey(root), JSON.stringify(snap));
+    // Janitor: cap stored projects so keys can't accumulate unboundedly.
+    const keys: Array<{ k: string; at: number }> = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(TABSESSION_PREFIX) && k !== tabSessionKey(root)) {
+        let at = 0;
+        try {
+          at = (JSON.parse(localStorage.getItem(k) ?? 'null') as TabSession | null)?.savedAt ?? 0;
+        } catch { /* corrupt — counts as oldest */ }
+        keys.push({ k, at });
+      }
+    }
+    keys.sort((a, b) => a.at - b.at);
+    while (keys.length >= TABSESSION_MAX_KEYS) {
+      const old = keys.shift();
+      if (old) {
+        try { localStorage.removeItem(old.k); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* storage full / blocked — sessions are best-effort */ }
+}
+
+let tabSessionTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleTabSessionSave() {
+  if (tabSessionTimer) return;
+  tabSessionTimer = setTimeout(() => {
+    tabSessionTimer = null;
+    flushTabSession();
+  }, 1000);
+}
+
+/** Reopen the current project's persisted working set. No-op when tabs are
+ *  already open (never clobbers). Missing files open silent and drop away. */
+export async function restoreTabSession(): Promise<void> {
+  const root = agentStore.get().root || '';
+  if (!root || !editor || !monaco) return;
+  if (editorStore.get().tabs.length) return;
+  let snap: TabSession | null = null;
+  try {
+    snap = JSON.parse(localStorage.getItem(tabSessionKey(root)) ?? 'null') as TabSession | null;
+  } catch { return; }
+  if (!snap || !Array.isArray(snap.tabs)) return;
+  // Split first (group-2 opens fall back to group 1 without it).
+  if (snap.tabs.some((t) => t && t.group === 2) || (snap.untitled ?? []).some((u) => u && u.group === 2)) {
+    editorStore.set((s) => ({ ...s, split: true }));
+    ensureSplitEditor();
+    hooks?.onTabs();
+  }
+  for (const t of snap.tabs.slice(0, 100)) {
+    if (!t || typeof t.path !== 'string' || !t.path) continue;
+    const group = t.group === 2 ? 2 : 1;
+    try {
+      if (t.image) await openImageTab(t.path, group);
+      else await openFile(t.path, { focus: false, group, silent: true });
+    } catch { /* gone from disk — skip */ }
+  }
+  // Unsaved contents back onto their models (dirty dots included).
+  for (const [p, content] of Object.entries(snap.dirty ?? {})) {
+    const model = models.get(p);
+    if (!model || typeof content !== 'string') continue;
+    suppressDirty = true;
+    model.setValue(content);
+    suppressDirty = false;
+  }
+  if (Object.keys(snap.dirty ?? {}).length) {
+    const dirtied = new Set(Object.keys(snap.dirty ?? {}));
+    editorStore.set((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) => (dirtied.has(t.path) && models.has(t.path) ? { ...t, dirty: true } : t)),
+    }));
+  }
+  for (const u of (snap.untitled ?? []).slice(0, UNTITLED_MAX_COUNT)) {
+    if (!u || typeof u.content !== 'string') continue;
+    openUntitled({ content: u.content, group: u.group === 2 ? 2 : 1, dirty: !!u.dirty, focus: false });
+  }
+  // Restore the active tabs (only if they survived the reopen), then sync
+  // the displayed models to them.
+  const s = editorStore.get();
+  const has = (p: string | null, g: EditorGroup) =>
+    !!p && s.tabs.some((t) => t.path === p && (t.group || 1) === g);
+  editorStore.set({
+    active: has(snap.active, 1) ? snap.active : (groupTabs(s.tabs, 1).slice(-1)[0]?.path ?? null),
+    active2: has(snap.active2, 2) ? snap.active2 : (groupTabs(s.tabs, 2).slice(-1)[0]?.path ?? null),
+  });
+  if (editor && monaco) {
+    paintGroupModel(1);
+    if (editorStore.get().split) paintGroupModel(2);
+  }
+  hooks?.onTabs();
 }

@@ -27,7 +27,7 @@ import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTa
 revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds,
 parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup,
 openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab,
-showImageTab, getEditorDisplayFlags, isAbsolutePath } from './ui/editor';
+showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession } from './ui/editor';
 import { initChat, filePartView, stepHistory, pushComposerHist } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
@@ -281,6 +281,7 @@ async function boot() {
   setInterval(() => void refreshUpdateBadge(false), 3600000);
   const openFolderFlow = async () => {
     try {
+      flushTabSession(); // snapshot this project before tabs close
       if (!(await closeAllTabs())) return; // user kept unsaved work — abort the switch
       const res = await barang().app.openFolder().catch((e) => {
         if (/cancelled/i.test((e as Error).message)) return null;
@@ -294,6 +295,7 @@ async function boot() {
   };
   const openPathFlow = async (path: string) => {
     try {
+      flushTabSession(); // snapshot this project before tabs close
       if (!(await closeAllTabs())) return;
       const res = await barang().app.openPath(path);
       await switchRoot(res.root);
@@ -864,6 +866,7 @@ async function boot() {
       paintWelcome(appRecents);
     } catch { /* recents stay as-is */ }
     await loadSessions().catch((e) => toast(`Sessions: ${(e as Error).message}`, 'error'));
+    await restoreTabSession().catch(() => {});
     void ensureSession();
   }
 
@@ -933,6 +936,8 @@ async function boot() {
     }
   }
   void ensureSession();
+  // Tab session: reopen this project's working set (incl. detached tabs).
+  void restoreTabSession().catch(() => {});
   // Agent notifications: Windows toast + taskbar badge + sound when a run
   // finishes, needs approval, or errors. Renderer decides, main toasts.
   armAudioUnlock();
@@ -1051,6 +1056,10 @@ async function boot() {
     dropPaths,
     saveActive,
     isAbsolutePath,
+    openUntitled,
+    closeAllTabs,
+    flushTabSession,
+    restoreTabSession,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

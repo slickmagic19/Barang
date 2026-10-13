@@ -315,10 +315,12 @@ export function permissionFromEvent(props: unknown): PendingPermission | null {
   };
 }
 
-/** Track a newly asked permission (dedupe by id). */
+/** Track a newly asked permission (dedupe by id). Tombstoned (answered or
+ *  confirmed-dead) ids stay buried: the server re-emits dead waits. */
 export function upsertPermission(props: unknown): PendingPermission | null {
   const card = permissionFromEvent(props);
   if (!card) return null;
+  if (answeredPermKeys.has(card.key)) return null; // dead wait re-emitted — stay buried
   const cur = agentStore.get().permissions;
   if (cur.some((p) => p.key === card.key)) return cur.find((p) => p.key === card.key) ?? null;
   agentStore.set({ permissions: [...cur, card] });
@@ -332,6 +334,41 @@ export function removePermission(sessionID: string, permissionID: string): boole
   if (next.length === cur.length) return false;
   agentStore.set({ permissions: next });
   return true;
+}
+
+/** Tombstones for dead approvals: answered, or 404-stale (the server
+ *  resolved them without telling us — e.g. a superseded batch sibling).
+ *  Without these the dead cards sit there erroring on every click. */
+const answeredPermKeys = new Set<string>();
+
+/** In-flight respond dedupe: a double-clicked Allow must not double-POST
+ *  (the second POST 404s on the consumed single-use id). */
+const permFlight = new Set<string>();
+
+/** True when a respond failure means "already gone server-side" (single-use
+ *  id consumed, superseded, or run restarted) as opposed to a real error.
+ *  Pure. */
+export function isPermissionStaleError(e: unknown): boolean {
+  const m = String((e as Error)?.message ?? e ?? '');
+  return /http\s*404|404\s*not\s*found|permission\s*(not\s*found|unknown|does\s*not\s*exist)|unknown\s*permission/i.test(m);
+}
+
+/** Record a resolved approval: tombstone + drop the card. */
+export function markPermissionAnswered(p: PendingPermission) {
+  answeredPermKeys.add(p.key);
+  removePermission(p.sessionID, p.permissionID);
+}
+
+/** Drop all of one session's approvals AND tombstone them (fresh send /
+ *  confirmed stop: the waits belong to a dead run). */
+export function clearSessionPermissions(sessionID: string) {
+  const cur = agentStore.get().permissions;
+  for (const p of cur) {
+    if (p.sessionID === sessionID) answeredPermKeys.add(p.key);
+  }
+  if (cur.some((p) => p.sessionID === sessionID)) {
+    agentStore.set({ permissions: cur.filter((p) => p.sessionID !== sessionID) });
+  }
 }
 
 /** Map a question event payload to a card. 1.18 shape: {id, sessionID,
@@ -464,6 +501,12 @@ export function clearSessionQuestions(sessionID: string) {
 export function pruneAnsweredKeys(sessionID: string) {
   for (const k of [...answeredKeys]) {
     if (k.startsWith(`${sessionID}:`)) answeredKeys.delete(k);
+  }
+  for (const k of [...answeredPermKeys]) {
+    if (k.startsWith(`${sessionID}:`)) answeredPermKeys.delete(k);
+  }
+  for (const k of [...permFlight]) {
+    if (k.startsWith(`${sessionID}:`)) permFlight.delete(k);
   }
   if (lastAnswered?.sessionID === sessionID) lastAnswered = null;
 }
@@ -944,10 +987,26 @@ export async function refreshActive() {
   if (st.busy) void backfillQuestions().catch(() => {});
 }
 
-export async function respondPermission(p: PendingPermission, response: PermissionResponse) {
-  await oc.post(`/session/${p.sessionID}/permissions/${p.permissionID}`, { response });
-  removePermission(p.sessionID, p.permissionID);
-  await refreshActive();
+export async function respondPermission(p: PendingPermission, response: PermissionResponse): Promise<'ok' | 'stale'> {
+  if (permFlight.has(p.key)) return 'ok'; // double-click: the first press owns it
+  permFlight.add(p.key);
+  try {
+    await oc.post(`/session/${p.sessionID}/permissions/${p.permissionID}`, { response });
+    markPermissionAnswered(p);
+    await refreshActive();
+    return 'ok';
+  } catch (e) {
+    if (isPermissionStaleError(e)) {
+      // Already resolved server-side (superseded batch sibling, restarted
+      // or stopped run): drop the dead card instead of erroring forever.
+      markPermissionAnswered(p);
+      await refreshActive().catch(() => {});
+      return 'stale';
+    }
+    throw e;
+  } finally {
+    permFlight.delete(p.key);
+  }
 }
 
 export interface OutgoingFile {
@@ -1033,6 +1092,7 @@ export async function sendCommand(name: string, args: string): Promise<boolean> 
   agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `running /${name}…` });
   lastSubmitAt = Date.now();
   clearSessionQuestions(id);
+  clearSessionPermissions(id);
   bumpProgress();
   try {
     await oc.post(`/session/${id}/command`, {
@@ -1189,6 +1249,7 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: 'sending…' });
   lastSubmitAt = Date.now();
   clearSessionQuestions(id); // a fresh run supersedes any dead waits
+  clearSessionPermissions(id);
   bumpProgress();
   const payload = {
     messageID,
@@ -1261,6 +1322,7 @@ export async function abortActive() {
     const cur = agentStore.get();
     if (cur.activeId !== id || !cur.busy) {
       clearSessionQuestions(id); // confirmed dead — its waits died with it
+      clearSessionPermissions(id);
       await refreshActive().catch(() => {});
       return;
     }

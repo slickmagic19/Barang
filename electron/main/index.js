@@ -2071,6 +2071,52 @@ async function runUiSmoke() {
           if (!ev || ev.type !== 'permission.asked' || ev.directory !== '/x' || ev.props.id !== 'per_1') bad.push('parse-ev');
           if (pa('not json') !== null || pa('{"a":1}') !== null) bad.push('parse-garbage');
         }
+        // Approval ghost-busting (multi-approval 404 fix): stale replies
+        // drop the card, tombstones hold re-emits, clears are session-scoped.
+        const se = u.isPermissionStaleError;
+        if (typeof se !== 'function' || typeof u.upsertPermission !== 'function' ||
+            typeof u.markPermissionAnswered !== 'function' || typeof u.clearSessionPermissions !== 'function' ||
+            typeof u.pruneAnsweredKeys !== 'function' || typeof u.removePermission !== 'function') {
+          bad.push('no-perm-ghost-fns');
+        } else {
+          if (se(new Error('HTTP 404')) !== true) bad.push('stale-404');
+          if (se(new Error('404 Not Found: no such permission')) !== true) bad.push('stale-404b');
+          if (se(new Error('HTTP 400')) !== false) bad.push('stale-400');
+          if (se(new Error('boom')) !== false) bad.push('stale-other');
+          const pa1 = { id: 'pp1', sessionID: 'ses_ta', permission: 'bash', patterns: ['x'], metadata: {}, tool: {} };
+          const pa2 = { id: 'pp2', sessionID: 'ses_ta', permission: 'edit', patterns: ['y'], metadata: {}, tool: {} };
+          const pb1 = { id: 'pp3', sessionID: 'ses_tb', permission: 'bash', patterns: ['z'], metadata: {}, tool: {} };
+          const baseCards = [...document.querySelectorAll('.perm-card')].length;
+          u.upsertPermission(pa1); u.upsertPermission(pa2); u.upsertPermission(pb1);
+          await new Promise((r) => setTimeout(r, 400));
+          if ([...document.querySelectorAll('.perm-card')].length !== baseCards + 3) bad.push('perm-cards');
+          u.clearSessionPermissions('ses_ta');
+          if (u.upsertPermission(pa1) !== null) bad.push('perm-tomb-readd');
+          u.markPermissionAnswered(u.permissionFromEvent(pb1));
+          await new Promise((r) => setTimeout(r, 400));
+          if ([...document.querySelectorAll('.perm-card')].length !== baseCards) bad.push('perm-leftover');
+          u.pruneAnsweredKeys('ses_ta'); u.pruneAnsweredKeys('ses_tb');
+          // Real-server shape: a bogus permission id on a LIVE session must
+          // come back 404-shaped, and the classifier must call it stale.
+          try {
+            const s = await window.barang.oc('/session', { method: 'POST', body: { title: 'barang perm probe' } });
+            const sid = s && s.id;
+            if (sid) {
+              let shape = 'unexpected-ok';
+              try {
+                await window.barang.oc('/session/' + sid + '/permissions/per_bogus_1', { method: 'POST', body: { response: 'once' } });
+              } catch (e) { shape = (e && e.message) || String(e); }
+              try { await window.barang.oc('/session/' + sid, { method: 'DELETE' }); } catch {}
+              if (/404|not found/i.test(shape)) {
+                if (!se(new Error(shape))) bad.push('perm-srv-shape:' + shape.slice(0, 80));
+              } else {
+                bad.push('perm-srv-unexpected:' + String(shape).slice(0, 80));
+              }
+            } else {
+              bad.push('perm-srv-no-session');
+            }
+          } catch (e) { bad.push('perm-srv-fail:' + ((e && e.message) || String(e)).slice(0, 60)); }
+        }
       }
       const td = u.isTransportDown;
       if (typeof td !== 'function') bad.push('no-td-fn');

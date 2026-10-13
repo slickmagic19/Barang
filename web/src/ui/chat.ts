@@ -9,7 +9,7 @@ import {
   statusTextFor, messageErrorText, todoProgress, classifyAttachFile,
   loadCommands, parseSlashCommand, sendCommand,
   compactSession, shareSession, unshareSession, markQuestionAnswered,
-  type ChatMessage, type ChangeEntry,
+  type ChatMessage, type ChangeEntry, type PendingPermission, type PermissionResponse,
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
 import { barang } from '../lib/transport';
@@ -1068,6 +1068,10 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
 const todosCollapsed = new Set<string>();
 // Question wizard state (survives repaints): step + picks per question key.
 const questStep = new Map<string, number>();
+// Approvals currently being answered (per-card busy: buttons disable while
+// the POST is in flight, and repaints can't resurrect a live click — the
+// Set outlives any single paint the way questStep does).
+const permBusy = new Set<string>();
 const questPicks = new Map<string, Map<number, string>>();
 // Sessions the user explicitly toggled (auto-collapse only fires before that).
 const todosTouched = new Set<string>();
@@ -1189,13 +1193,31 @@ function paintTodos() {
       else if (p.title) card.append(el('div', { class: 'perm-target' }, p.title));
       if (p.detail) card.append(el('div', { class: 'perm-detail' }, p.detail));
       const row = el('div', { class: 'perm-row' });
-      const bAllow = el('button', { class: 'btn btn-primary btn-sm' }, 'Allow');
-      const bOnce = el('button', { class: 'btn btn-sm' }, 'Allow once');
-      const bDeny = el('button', { class: 'btn btn-sm' }, 'Deny');
-      // Server enum (verified live): once | always | reject.
-      bAllow.onclick = () => void respondPermission(p, 'always').catch((e) => hooks.toast(e.message, 'error'));
-      bOnce.onclick = () => void respondPermission(p, 'once').catch((e) => hooks.toast(e.message, 'error'));
-      bDeny.onclick = () => void respondPermission(p, 'reject').catch((e) => hooks.toast(e.message, 'error'));
+      const bAllow = el('button', { class: 'btn btn-primary btn-sm' }, 'Allow') as HTMLButtonElement;
+      const bOnce = el('button', { class: 'btn btn-sm' }, 'Allow once') as HTMLButtonElement;
+      const bDeny = el('button', { class: 'btn btn-sm' }, 'Deny') as HTMLButtonElement;
+      // Server enum (verified live): once | always | reject. Guarded: a
+      // second click while the first POST is in flight no-ops (single-use
+      // ids 404 on double-POST), and a 404-stale card drops with an info
+      // note instead of an error.
+      const answerPerm = (resp: PermissionResponse) => {
+        if (permBusy.has(p.key)) return;
+        permBusy.add(p.key);
+        bAllow.disabled = bOnce.disabled = bDeny.disabled = true;
+        void respondPermission(p, resp).then((r) => {
+          if (r === 'stale') hooks.toast('That approval was already resolved — card removed.', 'info');
+        }).catch((e) => {
+          hooks.toast((e as Error).message, 'error');
+        }).finally(() => {
+          permBusy.delete(p.key);
+        });
+      };
+      if (permBusy.has(p.key)) {
+        bAllow.disabled = bOnce.disabled = bDeny.disabled = true;
+      }
+      bAllow.onclick = () => answerPerm('always');
+      bOnce.onclick = () => answerPerm('once');
+      bDeny.onclick = () => answerPerm('reject');
       row.append(bAllow, bOnce, bDeny);
       card.append(row);
       perms.append(card);

@@ -18,7 +18,7 @@ import { el } from '../lib/util';
 import { iconEl } from './icons';
 import { applyEditorPrefs } from './editor';
 import { applyTerminalPrefs } from './terminal';
-import { BUILTIN_SOUNDS, resolveSoundUrl, playNotificationSound } from '../lib/notify';
+import { BUILTIN_SOUNDS, resolveKindSound, playNotificationSound } from '../lib/notify';
 import logoUrl from '../assets/barang-logo.png';
 
 export interface SettingsHooks {
@@ -417,18 +417,33 @@ export function openSettings(hooks: SettingsHooks) {
   const notifTaskbarBox = checkRow('Taskbar badge + flashing when in the background');
   const notifToastBox = checkRow('In-app toast when Barang is focused');
   const notifSoundBox = checkRow('Play a sound');
-  const soundRow = el('div', { class: 'settings-row' });
-  soundRow.append(el('span', { class: 'settings-row-label' }, 'Sound'));
-  const soundSel = el('select', { class: 'settings-inline-sel', title: 'Notification sound' }) as HTMLSelectElement;
-  for (const s of BUILTIN_SOUNDS) soundSel.append(el('option', { value: s.id }, s.label) as HTMLOptionElement);
-  soundSel.append(el('option', { value: 'custom' }, 'Custom… (pick a file)') as HTMLOptionElement);
-  soundRow.append(soundSel);
-  body.append(soundRow);
-  const customRow = el('div', { class: 'settings-row' });
-  const customName = el('span', { class: 'settings-row-label' }, 'No custom sound');
-  const btnBrowseSound = el('button', { class: 'btn btn-sm' }, 'Browse…') as HTMLButtonElement;
-  customRow.append(customName, btnBrowseSound);
-  body.append(customRow);
+  // Per-kind sounds (opencode-style: done / approval / error each pick a
+  // builtin tone or one of your own vaulted files).
+  const soundSelFor = (label: string, title: string) => {
+    const row = el('div', { class: 'settings-row' });
+    row.append(el('span', { class: 'settings-row-label' }, label));
+    const sel = el('select', { class: 'settings-inline-sel', title }) as HTMLSelectElement;
+    row.append(sel);
+    body.append(row);
+    return sel;
+  };
+  const doneSel = soundSelFor('Run finished sound', 'Sound when a run finishes');
+  const approvalSel = soundSelFor('Approval sound', 'Sound when approval is needed');
+  const errorSel = soundSelFor('Error sound', 'Sound when a run errors');
+  const fillSoundSel = (sel: HTMLSelectElement, current: string, customs: Array<{ id: string; name: string }>) => {
+    sel.innerHTML = '';
+    for (const s of BUILTIN_SOUNDS) sel.append(el('option', { value: s.id }, s.label) as HTMLOptionElement);
+    for (const c of customs) sel.append(el('option', { value: `custom:${c.id}` }, `${c.name} (custom)`) as HTMLOptionElement);
+    const valid = [...sel.options].some((o) => o.value === current);
+    sel.value = valid ? current : sel.options[0]?.value ?? '';
+  };
+  body.append(el('p', { class: 'settings-note' }, 'Your sounds: pick audio files (MP3, WAV, OGG) — they are copied into Barang storage and offered above.'));
+  const customList = el('div', { class: 'settings-sound-list' });
+  body.append(customList);
+  const addRow = el('div', { class: 'settings-row' });
+  const btnBrowseSound = el('button', { class: 'btn btn-sm' }, 'Add custom sound…') as HTMLButtonElement;
+  addRow.append(btnBrowseSound);
+  body.append(addRow);
   const volRow = el('div', { class: 'settings-row' });
   volRow.append(el('span', { class: 'settings-row-label' }, 'Volume'));
   const volWrap = el('span', { class: 'settings-vol-wrap' });
@@ -439,10 +454,14 @@ export function openSettings(hooks: SettingsHooks) {
   body.append(volRow);
   const testRow = el('div', { class: 'settings-row' });
   testRow.append(el('span', { class: 'settings-row-label' }, 'Preview'));
-  const btnTestSound = el('button', { class: 'btn btn-sm' }, 'Play sound') as HTMLButtonElement;
-  testRow.append(btnTestSound);
+  const previewWrap = el('span', { class: 'settings-vol-wrap' });
+  const btnPlayDone = el('button', { class: 'btn btn-sm', title: 'Preview the run-finished sound' }, 'Done') as HTMLButtonElement;
+  const btnPlayApproval = el('button', { class: 'btn btn-sm', title: 'Preview the approval sound' }, 'Approval') as HTMLButtonElement;
+  const btnPlayError = el('button', { class: 'btn btn-sm', title: 'Preview the error sound' }, 'Error') as HTMLButtonElement;
+  previewWrap.append(btnPlayDone, btnPlayApproval, btnPlayError);
+  testRow.append(previewWrap);
   body.append(testRow);
-  body.append(el('p', { class: 'settings-note' }, 'Sounds are original synth tones shipped with Barang. Custom files (MP3, WAV, OGG) are copied into Barang storage.'));
+  body.append(el('p', { class: 'settings-note' }, 'Built-in sounds are original synth tones shipped with Barang.'));
 
   // --- Terminal ---
   section('Terminal');
@@ -603,8 +622,10 @@ export function openSettings(hooks: SettingsHooks) {
     notifTaskbarBox.checked = st0.notifTaskbar;
     notifToastBox.checked = st0.notifToastFocused;
     notifSoundBox.checked = st0.notifSound;
-    soundSel.value = st0.notifSoundName === 'custom' || BUILTIN_SOUNDS.some((s) => s.id === st0.notifSoundName) ? st0.notifSoundName : 'chime';
-    customName.textContent = st0.notifCustomName || 'No custom sound';
+    fillSoundSel(doneSel, st0.notifDoneSound, st0.notifCustomSounds);
+    fillSoundSel(approvalSel, st0.notifApprovalSound, st0.notifCustomSounds);
+    fillSoundSel(errorSel, st0.notifErrorSound, st0.notifCustomSounds);
+    paintCustomSounds(st0.notifCustomSounds);
     volInput.value = String(st0.notifVolume);
     volLabel.textContent = `${st0.notifVolume}%`;
     shellInput.value = st0.termShell;
@@ -677,39 +698,81 @@ export function openSettings(hooks: SettingsHooks) {
   notifTaskbarBox.onchange = () => commit((s) => { s.notifTaskbar = notifTaskbarBox.checked; });
   notifToastBox.onchange = () => commit((s) => { s.notifToastFocused = notifToastBox.checked; });
   notifSoundBox.onchange = () => commit((s) => { s.notifSound = notifSoundBox.checked; });
-  soundSel.onchange = () => {
-    commit((s) => { s.notifSoundName = soundSel.value; });
-    if (soundSel.value === 'custom' && !readSettings().notifCustomPath) void browseSound();
+  const paintCustomSounds = (customs: Array<{ id: string; name: string; fileUrl: string }>) => {
+    customList.innerHTML = '';
+    if (!customs.length) {
+      customList.append(el('p', { class: 'settings-note' }, 'No custom sounds yet.'));
+      return;
+    }
+    for (const c of customs) {
+      const row = el('div', { class: 'settings-row' });
+      row.append(el('span', { class: 'settings-row-label' }, c.name));
+      const btnPlay = el('button', { class: 'btn btn-sm', title: `Preview ${c.name}` }, 'Play') as HTMLButtonElement;
+      btnPlay.onclick = () => {
+        const s = readSettings();
+        void playNotificationSound(c.fileUrl, s.notifVolume / 100).then((ok) => {
+          if (!ok) hooks.toast('Could not play that sound (format or autoplay blocked — click anywhere and retry).', 'error');
+        });
+      };
+      const btnDel = el('button', { class: 'btn btn-sm', title: `Remove ${c.name}` }, 'Remove') as HTMLButtonElement;
+      btnDel.onclick = () => void removeCustomSound(c.id, c.name);
+      row.append(btnPlay, btnDel);
+      customList.append(row);
+    }
   };
-  volInput.onchange = () => {
-    commit((s) => { s.notifVolume = parseInt(volInput.value, 10) || 0; });
-  };
-  btnTestSound.onclick = () => {
+  doneSel.onchange = () => commit((s) => { s.notifDoneSound = doneSel.value; });
+  approvalSel.onchange = () => commit((s) => { s.notifApprovalSound = approvalSel.value; });
+  errorSel.onchange = () => commit((s) => { s.notifErrorSound = errorSel.value; });
+  const previewKind = (kind: 'done' | 'approval' | 'error') => {
     const s = readSettings();
-    const url = resolveSoundUrl(s.notifSoundName, s.notifCustomPath);
+    const url = resolveKindSound(
+      kind,
+      { done: s.notifDoneSound, approval: s.notifApprovalSound, error: s.notifErrorSound },
+      s.notifCustomSounds,
+    );
     if (!url) {
-      hooks.toast('Pick a custom sound first.', 'info');
+      hooks.toast('No sound configured.', 'info');
       return;
     }
     void playNotificationSound(url, s.notifVolume / 100).then((ok) => {
       if (!ok) hooks.toast('Could not play that sound (format or autoplay blocked — click anywhere and retry).', 'error');
     });
   };
+  btnPlayDone.onclick = () => previewKind('done');
+  btnPlayApproval.onclick = () => previewKind('approval');
+  btnPlayError.onclick = () => previewKind('error');
   async function browseSound() {
     try {
       const r = await barang().app.pickSound();
       commit((s) => {
-        s.notifSoundName = 'custom';
-        s.notifCustomName = r.name;
-        s.notifCustomPath = r.fileUrl;
+        const list = [...s.notifCustomSounds, { id: r.id, name: r.name.slice(0, 120), fileUrl: r.fileUrl }].slice(-20);
+        s.notifCustomSounds = list;
       });
       paint();
-      hooks.toast(`Custom sound: ${r.name}`, 'info');
+      hooks.toast(`Custom sound: ${r.name} — pick it in the rows above.`, 'info');
     } catch (e) {
       if (!/cancelled/i.test((e as Error).message)) hooks.toast(`Sound picker failed: ${(e as Error).message}`, 'error');
     }
   }
+  async function removeCustomSound(id: string, name: string) {
+    commit((s) => {
+      s.notifCustomSounds = s.notifCustomSounds.filter((c) => c.id !== id);
+    });
+    paint();
+    if (id !== 'legacy') {
+      try {
+        await barang().app.removeSound(id);
+      } catch (e) {
+        hooks.toast(`Entry removed, but the file stayed: ${(e as Error).message}`, 'error');
+        return;
+      }
+    }
+    hooks.toast(`Removed ${name}. Kinds using it fall back to their default tone.`, 'info');
+  }
   btnBrowseSound.onclick = () => void browseSound();
+  volInput.onchange = () => {
+    commit((s) => { s.notifVolume = parseInt(volInput.value, 10) || 0; });
+  };
   shellInput.onchange = () => {
     commit((s) => { s.termShell = shellInput.value.trim().slice(0, 500); });
     hooks.toast(shellInput.value.trim() ? 'Shell saved — applies to new terminals.' : 'Shell reset to auto.', 'info');

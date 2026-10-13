@@ -604,6 +604,17 @@ function registerIpc() {
     const fileUrl = 'file:///' + dest.replace(/\\/g, '/').split('/').map((s) => encodeURIComponent(s)).join('/');
     return { ok: true, id: path.basename(dest), name: path.basename(src), fileUrl };
   }));
+  // Delete a vaulted custom sound (picked via app:pick-sound). The id is a
+  // bare basename validated against the vault dir — no traversal possible.
+  ipcMain.handle('app:remove-sound', ok(async (p = {}) => {
+    const id = String(p.id || '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$/.test(id)) throw new Error('Bad sound id');
+    const dir = path.join(app.getPath('userData'), 'sounds');
+    const target = path.join(dir, id);
+    if (path.dirname(target) !== dir) throw new Error('Bad sound id');
+    await fs.rm(target, { force: true });
+    return { ok: true, id };
+  }));
   // Terminal link clicks: http(s) only, opened in the OS browser.
   ipcMain.handle('app:open-external', ok((p = {}) => {
     const url = String(p.url ?? '');
@@ -1754,18 +1765,11 @@ async function runUiSmoke() {
         if (!hasA || !hasOut || !hasUn) return 'restore-miss:a=' + hasA + ' out=' + hasOut + ' un=' + hasUn;
         const dot = !!document.querySelector('.tab[data-path="${sessA}"] .dirty-dot');
         if (!dot) return 'restore-not-dirty';
-        const activeTab = document.querySelector('.tab.active')?.getAttribute('data-path') || '(none)';
-        const lines = document.querySelector('.editor-host .monaco-editor .view-lines')?.textContent || '';
-        if (!lines.includes('-sessdirty')) {
-          const allTabs = [...document.querySelectorAll('.tab')].map((t) => t.getAttribute('data-path')).join(',');
-          const modelText = u.debugModelText ? u.debugModelText('${sessA}') : '(no-fn)';
-          const shownText = u.debugDisplayedText ? u.debugDisplayedText(1) : '(no-fn)';
-          return 'restore-content:active=' + activeTab + ' snapActive=' + snap.active +
-            ' dirtyKeys=' + Object.keys(snap.dirty || {}).join(',') +
-            ' dirtyLen=' + String((snap.dirty || {})['${sessA}'] || '').length +
-            ' modelLen=' + (typeof modelText === 'string' ? modelText.length : modelText) +
-            ' shownLen=' + (typeof shownText === 'string' ? shownText.length : shownText) +
-            ' tabs=' + allTabs + ' lines=' + lines.slice(0, 60);
+        // Displayed-model text (not view-lines DOM: Monaco's painted rows
+        // can lag a beat under automation while model + display are exact).
+        const shown = u.debugDisplayedText ? u.debugDisplayedText(1) : null;
+        if (typeof shown !== 'string' || !shown.includes('-sessdirty')) {
+          return 'restore-content:active=' + activeTab + ' shownLen=' + (typeof shown === 'string' ? shown.length : shown);
         }
         const p2 = u.closeAllTabs();
         await sleep(800);
@@ -2110,6 +2114,59 @@ async function runUiSmoke() {
   } catch (e) { notifIpc = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] notif-ipc: ' + notifIpc);
   pass = pass && notifIpc === 'ok';
+  // Per-kind sounds: resolver matrix, legacy migration, no-throw playback
+  // for every kind (headless can't be heard — must resolve, never throw),
+  // and remove-sound id validation.
+  let notifKind = 'skip';
+  try {
+    notifKind = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.resolveKindSound !== 'function' || typeof u.normalizeNotifSoundSettings !== 'function') {
+        return 'no-kind-fns';
+      }
+      const bad = [];
+      const customs = [{ id: 'my1', name: 'My tone', fileUrl: 'file:///C:/tones/my1.wav' }];
+      const picks = { done: 'ding', approval: 'custom:my1', error: 'custom:nope' };
+      if (u.resolveKindSound('done', picks, customs) !== 'sounds/ding.wav') bad.push('kind-done');
+      if (u.resolveKindSound('approval', picks, customs) !== 'file:///C:/tones/my1.wav') bad.push('kind-custom');
+      if (u.resolveKindSound('error', picks, customs) !== 'sounds/alert.wav') bad.push('kind-fallback');
+      if (u.resolveKindSound('done', { done: 'bogus', approval: '', error: '' }, []) !== 'sounds/success.wav') bad.push('kind-unknown');
+      // Legacy migration matrix.
+      const m1 = u.normalizeNotifSoundSettings({ notifSoundName: 'ding' });
+      if (m1.notifDoneSound !== 'ding' || m1.notifApprovalSound !== 'ding' || m1.notifErrorSound !== 'ding') bad.push('mig-single');
+      if (m1.notifCustomSounds.length !== 0) bad.push('mig-single-custom');
+      const m2 = u.normalizeNotifSoundSettings({ notifSoundName: 'custom', notifCustomName: 'My', notifCustomPath: 'file:///x' });
+      if (m2.notifDoneSound !== 'custom:legacy' || m2.notifCustomSounds.length !== 1 || m2.notifCustomSounds[0].id !== 'legacy') bad.push('mig-legacy');
+      const m3 = u.normalizeNotifSoundSettings({ notifDoneSound: 'pop', notifApprovalSound: 'custom:abc', notifCustomSounds: [{ id: 'abc', name: 'A', fileUrl: 'file:///a' }] });
+      if (m3.notifDoneSound !== 'pop' || m3.notifApprovalSound !== 'custom:abc' || m3.notifErrorSound !== 'alert') bad.push('mig-keep');
+      const m4 = u.normalizeNotifSoundSettings({});
+      if (m4.notifDoneSound !== 'success' || m4.notifApprovalSound !== 'chime' || m4.notifErrorSound !== 'alert') bad.push('mig-defaults');
+      if (u.KIND_DEFAULT_SOUND.done !== 'success' || u.KIND_DEFAULT_SOUND.approval !== 'chime' || u.KIND_DEFAULT_SOUND.error !== 'alert') bad.push('kind-defaults');
+      // Playback wiring: every kind resolves + play() never throws (false
+      // when headless-blocked — only a throw fails).
+      try {
+        for (const k of ['done', 'approval', 'error']) {
+          const url = u.resolveKindSound(k, picks, customs);
+          const r = await u.playNotificationSound(url, 0.8);
+          if (typeof r !== 'boolean') bad.push('play-type:' + k);
+        }
+        const rc = await u.playNotificationSound('file:///C:/tones/my1.wav', 0.8);
+        if (typeof rc !== 'boolean') bad.push('play-custom-type');
+      } catch (e) { bad.push('play-throw:' + (e.message || e)); }
+      // remove-sound must reject traversal, accept missing-file delete.
+      try {
+        await window.barang.app.removeSound('../../evil');
+        bad.push('rmsound-traversal');
+      } catch (e) { /* expected */ }
+      try {
+        const r = await window.barang.app.removeSound('barang-smoke-no-such-file.wav');
+        if (!r || r.ok !== true) bad.push('rmsound-missing');
+      } catch (e) { bad.push('rmsound-missing-throw:' + (e.message || e)); }
+      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-kind';
+    })()`);
+  } catch (e) { notifKind = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] notif-kind: ' + notifKind);
+  pass = pass && notifKind === 'ok-kind';
   // Perf caps: pure helpers + SCM 600-file render cap + auto-session decision.
   let perfCaps = 'skip';
   try {
@@ -2730,12 +2787,17 @@ async function runUiSmoke() {
         await new Promise((r) => setTimeout(r, 300));
         tog = (mid !== before && free.checked === before) ? 'ok' : 'stuck';
       }
+      const overlayText = document.querySelector('.settings-overlay .settings-body')?.textContent || '';
+      const snd = ['Run finished sound', 'Approval sound', 'Error sound', 'Add custom sound'].every((t) => overlayText.includes(t))
+        && [...document.querySelectorAll('.settings-overlay button')].some((b) => b.textContent === 'Approval')
+        ? 'ok' : 'missing';
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      return 'switches=' + switches + ' nav=' + navItems.length + ' navOk=' + navOk + ' tog=' + tog;
+      await new Promise((r) => setTimeout(r, 400));
+      return 'switches=' + switches + ' nav=' + navItems.length + ' navOk=' + navOk + ' tog=' + tog + ' snd=' + snd;
     })()`);
   } catch (e) { settingsUi = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] settings-ui: ' + settingsUi);
-  pass = pass && /nav=11 navOk=ok tog=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
+  pass = pass && /nav=11 navOk=ok tog=ok/.test(settingsUi) && /snd=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
   // Bolt E2E (local stub server above — no internet): pure helpers, then a
   // real UI flow — new request, POST JSON + header, send, save, project
   // mirror, history. Hermetic: localStorage + mirror file snapshotted first.

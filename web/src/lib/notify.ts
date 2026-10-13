@@ -111,6 +111,37 @@ export function resolveSoundUrl(soundName: string, customPath: string): string |
   return hit.file;
 }
 
+export interface CustomSoundEntry {
+  id: string;
+  name: string;
+  fileUrl: string;
+}
+
+/** Per-kind fallback when the pick is missing/invalid. */
+export const KIND_DEFAULT_SOUND: Record<NotifyKind, string> = {
+  done: 'success',
+  approval: 'chime',
+  error: 'alert',
+};
+
+/** Resolve one kind's pick (builtin id or 'custom:<vaultId>') to a playable
+ *  URL. Missing customs and unknown ids fall back to the kind default —
+ *  a removed custom never silences notifications. Pure. */
+export function resolveKindSound(
+  kind: NotifyKind,
+  picks: { done: string; approval: string; error: string },
+  customs: CustomSoundEntry[],
+): string | null {
+  const raw = kind === 'done' ? picks.done : kind === 'approval' ? picks.approval : picks.error;
+  const fallback = BUILTIN_SOUNDS.find((s) => s.id === KIND_DEFAULT_SOUND[kind]) ?? BUILTIN_SOUNDS[0];
+  if (raw.startsWith('custom:')) {
+    const hit = (customs ?? []).find((c) => c.id === raw.slice('custom:'.length));
+    if (hit?.fileUrl) return hit.fileUrl;
+    return fallback.file;
+  }
+  return (BUILTIN_SOUNDS.find((s) => s.id === raw) ?? fallback).file;
+}
+
 /** Session title for notification bodies (best effort). */
 export function activeSessionTitle(): string | null {
   const a = agentStore.get();

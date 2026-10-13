@@ -7,9 +7,9 @@ import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readS
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
-pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges } from './lib/agent';
+pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings } from './lib/agent';
 import { sliceWindow, truncateText, parseUnifiedPatch, applyHunkSubset } from './lib/util';
-import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
+import { watchAgentNotifications, playNotificationSound, resolveKindSound, KIND_DEFAULT_SOUND, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
 import { fileIconEl } from './ui/fileIcons';
@@ -961,7 +961,11 @@ async function boot() {
       })()
         : (activeSessionTitle() ?? 'Your task is complete.');
     if (s.notifSound) {
-      const url = resolveSoundUrl(kind === 'error' ? 'alert' : s.notifSoundName, s.notifCustomPath);
+      const url = resolveKindSound(
+        kind,
+        { done: s.notifDoneSound, approval: s.notifApprovalSound, error: s.notifErrorSound },
+        s.notifCustomSounds,
+      );
       void playNotificationSound(url, s.notifVolume / 100);
     }
     const focused = document.hasFocus();
@@ -1018,6 +1022,10 @@ async function boot() {
     markReviewed,
     loadReviewedState,
     scheduleReviewedPersist,
+    resolveKindSound,
+    KIND_DEFAULT_SOUND,
+    normalizeNotifSoundSettings,
+    playNotificationSound,
     isTransportDown,
     findUserMessage,
     todoProgress,

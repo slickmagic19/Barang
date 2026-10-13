@@ -122,6 +122,7 @@ const barang = {
     clearAttention: () => invoke('app:clear-attention'),
     /** Custom notification sound picker (vaulted to userData). */
     pickSound: () => invoke('app:pick-sound'),
+    removeSound: (id) => invoke('app:remove-sound', { id }),
     /** Menu + root-change events. cb(kind, payload). */
     onMenu: (cb) => {      const handlers = {
         'menu:toggle-agent': () => cb('toggle-agent'),

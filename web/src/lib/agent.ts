@@ -666,9 +666,13 @@ export interface BarangSettings {
   notifEnabled: boolean; // master switch, default true
   notifNative: boolean; // Windows toast when unfocused, default true
   notifSound: boolean; // play a sound, default true
-  notifSoundName: string; // builtin id or 'custom', default 'chime'
-  notifCustomName: string; // picked file display name
-  notifCustomPath: string; // picked file file:// URL
+  notifSoundName: string; // legacy single sound (migrated to per-kind on load)
+  notifCustomName: string; // legacy picked file display name
+  notifCustomPath: string; // legacy picked file file:// URL
+  notifDoneSound: string; // builtin id or 'custom:<vaultId>', default 'success'
+  notifApprovalSound: string; // builtin id or 'custom:<vaultId>', default 'chime'
+  notifErrorSound: string; // builtin id or 'custom:<vaultId>', default 'alert'
+  notifCustomSounds: Array<{ id: string; name: string; fileUrl: string }>; // vault picks
   notifVolume: number; // 0-100, default 80
   notifOnDone: boolean; // notify when a run finishes, default true
   notifOnApproval: boolean; // notify on pending approvals, default true
@@ -705,6 +709,10 @@ const SETTING_DEFAULTS: BarangSettings = {
   notifSoundName: 'chime',
   notifCustomName: '',
   notifCustomPath: '',
+  notifDoneSound: 'success',
+  notifApprovalSound: 'chime',
+  notifErrorSound: 'alert',
+  notifCustomSounds: [],
   notifVolume: 80,
   notifOnDone: true,
   notifOnApproval: true,
@@ -712,6 +720,76 @@ const SETTING_DEFAULTS: BarangSettings = {
   notifTaskbar: true,
   notifToastFocused: true,
 };
+
+/** Builtin notification sound ids (mirrors notify.BUILTIN_SOUNDS — kept
+ *  local: notify imports this module, so importing it back would cycle). */
+const NOTIF_BUILTIN_IDS = ['chime', 'ding', 'pop', 'alert', 'success'];
+
+export interface NotifCustomSound {
+  id: string;
+  name: string;
+  fileUrl: string;
+}
+
+/** Normalize per-kind sounds + custom vault (legacy single-sound migrates
+ *  to all three kinds). Pure — smoke covers the migration matrix. */
+export function normalizeNotifSoundSettings(p: {
+  notifSoundName?: unknown;
+  notifCustomName?: unknown;
+  notifCustomPath?: unknown;
+  notifDoneSound?: unknown;
+  notifApprovalSound?: unknown;
+  notifErrorSound?: unknown;
+  notifCustomSounds?: unknown;
+}): {
+  notifSoundName: string;
+  notifCustomName: string;
+  notifCustomPath: string;
+  notifDoneSound: string;
+  notifApprovalSound: string;
+  notifErrorSound: string;
+  notifCustomSounds: NotifCustomSound[];
+} {
+  const customs: NotifCustomSound[] = [];
+  if (Array.isArray(p.notifCustomSounds)) {
+    for (const c of p.notifCustomSounds.slice(0, 20)) {
+      const e = c as Record<string, unknown>;
+      if (e && typeof e.id === 'string' && e.id && typeof e.fileUrl === 'string' && e.fileUrl) {
+        customs.push({
+          id: e.id.slice(0, 120),
+          name: typeof e.name === 'string' && e.name ? e.name.slice(0, 120) : 'Custom sound',
+          fileUrl: e.fileUrl.slice(0, 2000),
+        });
+      }
+    }
+  }
+  const legacyName = typeof p.notifCustomName === 'string' ? p.notifCustomName.slice(0, 120) : '';
+  const legacyPath = typeof p.notifCustomPath === 'string' ? p.notifCustomPath.slice(0, 2000) : '';
+  if (!customs.length && legacyPath) {
+    customs.push({ id: 'legacy', name: legacyName || 'Custom sound', fileUrl: legacyPath });
+  }
+  const legacy = typeof p.notifSoundName === 'string' && p.notifSoundName ? p.notifSoundName.slice(0, 120) : '';
+  const pick = (v: unknown, fallback: string): string => {
+    const s = typeof v === 'string' && v ? v : legacy;
+    if (s === 'custom') {
+      const first = customs[0];
+      return first ? `custom:${first.id}` : fallback;
+    }
+    if (!s) return fallback;
+    if ((NOTIF_BUILTIN_IDS as string[]).includes(s)) return s;
+    if (s.startsWith('custom:') && customs.some((c) => c.id === s.slice(7))) return s;
+    return fallback;
+  };
+  return {
+    notifSoundName: legacy || 'chime',
+    notifCustomName: legacyName,
+    notifCustomPath: legacyPath,
+    notifDoneSound: pick(p.notifDoneSound, 'success'),
+    notifApprovalSound: pick(p.notifApprovalSound, 'chime'),
+    notifErrorSound: pick(p.notifErrorSound, 'alert'),
+    notifCustomSounds: customs,
+  };
+}
 
 export function readSettings(): BarangSettings {
   try {
@@ -737,9 +815,7 @@ export function readSettings(): BarangSettings {
       notifEnabled: p.notifEnabled !== false,
       notifNative: p.notifNative !== false,
       notifSound: p.notifSound !== false,
-      notifSoundName: typeof p.notifSoundName === 'string' && p.notifSoundName ? p.notifSoundName.slice(0, 120) : 'chime',
-      notifCustomName: typeof p.notifCustomName === 'string' ? p.notifCustomName.slice(0, 120) : '',
-      notifCustomPath: typeof p.notifCustomPath === 'string' ? p.notifCustomPath.slice(0, 2000) : '',
+      ...normalizeNotifSoundSettings(p),
       notifVolume: Number.isFinite(p.notifVolume) ? Math.max(0, Math.min(100, p.notifVolume)) : SETTING_DEFAULTS.notifVolume,
       notifOnDone: p.notifOnDone !== false,
       notifOnApproval: p.notifOnApproval !== false,

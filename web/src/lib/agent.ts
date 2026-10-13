@@ -877,6 +877,7 @@ export async function selectSession(id: string) {
 export async function deleteSession(id: string) {
   await oc.del(`/session/${id}`);
   pruneAnsweredKeys(id);
+  clearQueuedFollowUps(id);
   const s = agentStore.get();
   const rest = s.sessions.filter((x) => x.id !== id);
   agentStore.set({
@@ -1286,6 +1287,69 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   }
   await loadSessions().catch(() => {});
   return true;
+}
+
+/** Follow-ups queued while a run is busy (opencode behavior: Enter never
+ *  drops text — it waits its turn). Per session, capped, in-memory. */
+export interface QueuedFollowUp {
+  text: string;
+  files: OutgoingFile[];
+  at: number;
+}
+
+const MAX_QUEUED = 5;
+
+const followUpQueue = new Map<string, QueuedFollowUp[]>();
+
+/** Append (oldest-first, cap 5). Returns the queue length. Pure-ish. */
+export function enqueueFollowUp(sessionID: string, text: string, files: OutgoingFile[] = []): number {
+  const q = followUpQueue.get(sessionID) ?? [];
+  q.push({ text, files, at: Date.now() });
+  while (q.length > MAX_QUEUED) q.shift();
+  followUpQueue.set(sessionID, q);
+  return q.length;
+}
+
+/** Snapshot (render + smoke). Pure-ish. */
+export function queuedFollowUps(sessionID: string): QueuedFollowUp[] {
+  return [...(followUpQueue.get(sessionID) ?? [])];
+}
+
+export function dequeueFollowUp(sessionID: string): QueuedFollowUp | null {
+  const q = followUpQueue.get(sessionID);
+  const it = q?.shift() ?? null;
+  if (q && !q.length) followUpQueue.delete(sessionID);
+  return it;
+}
+
+export function removeQueuedFollowUp(sessionID: string, index: number): void {
+  const q = followUpQueue.get(sessionID);
+  if (!q) return;
+  q.splice(Math.max(0, index), 1);
+  if (!q.length) followUpQueue.delete(sessionID);
+}
+
+export function clearQueuedFollowUps(sessionID: string): void {
+  followUpQueue.delete(sessionID);
+}
+
+/** Send the next queued follow-up (no-op when busy or empty). A refused
+ *  send requeues front so nothing is silently lost. The sender is
+ *  injectable for smoke (default: the real submit). */
+export async function drainQueue(
+  sessionID: string,
+  send: (text: string, files: OutgoingFile[]) => Promise<boolean> = sendMessage,
+): Promise<boolean> {
+  if (!sessionID || agentStore.get().busy) return false;
+  const next = dequeueFollowUp(sessionID);
+  if (!next) return false;
+  const ok = await send(next.text, next.files).catch(() => false);
+  if (!ok) {
+    const q = followUpQueue.get(sessionID) ?? [];
+    q.unshift(next);
+    followUpQueue.set(sessionID, q);
+  }
+  return ok;
 }
 
 /**

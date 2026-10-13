@@ -1469,6 +1469,49 @@ export async function saveAll() {
   hooks?.onTabs();
 }
 
+/** Write content to a tab's file AND sync its open model (review Reject):
+ *  the tab ends clean with a fresh mtime. Refuses when the tab holds the
+ *  user's own unsaved edits ('dirty'). Works for detached tabs too. */
+export async function writeTabContent(path: string, content: string): Promise<'ok' | 'dirty' | 'missing'> {
+  const tab = editorStore.get().tabs.find((t) => t.path === path);
+  if (tab?.dirty) return 'dirty';
+  try {
+    const res = tab?.external || isAbsolutePath(path)
+      ? await fsApi.writeAbsolute(path, content)
+      : await fsApi.write(path, content);
+    const m = models.get(path);
+    if (m) {
+      suppressDirty = true;
+      m.setValue(content);
+      suppressDirty = false;
+    }
+    editorStore.set((st) => ({
+      ...st,
+      tabs: st.tabs.map((t) => (t.path === path ? { ...t, dirty: false, mtime: res.mtime } : t)),
+    }));
+    hooks?.onTabs();
+    return 'ok';
+  } catch {
+    return 'missing';
+  }
+}
+
+/** Delete a tab's file AND drop its open tabs (review Reject of an
+ *  agent-created file). Refuses when the tab holds unsaved edits. */
+export async function removeTabFile(path: string): Promise<'ok' | 'dirty' | 'missing'> {
+  const tabs = editorStore.get().tabs.filter((t) => t.path === path);
+  if (tabs.some((t) => t.dirty)) return 'dirty';
+  try {
+    if (isAbsolutePath(path)) await fsApi.deleteAbsolute(path);
+    else await fsApi.remove(path);
+  } catch {
+    return 'missing';
+  }
+  dropTabs(tabs);
+  hooks?.onTabs();
+  return 'ok';
+}
+
 /** On window focus: reload clean tabs changed on disk (agent edits!), warn on dirty ones. */
 export async function checkExternalChanges() {
   const s = editorStore.get();

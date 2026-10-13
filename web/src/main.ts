@@ -7,8 +7,8 @@ import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readS
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
-pruneAnsweredKeys } from './lib/agent';
-import { sliceWindow, truncateText } from './lib/util';
+pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue } from './lib/agent';
+import { sliceWindow, truncateText, parseUnifiedPatch, applyHunkSubset } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
@@ -1004,6 +1004,14 @@ async function boot() {
     clearSessionPermissions,
     isPermissionStaleError,
     pruneAnsweredKeys,
+    enqueueFollowUp,
+    queuedFollowUps,
+    dequeueFollowUp,
+    removeQueuedFollowUp,
+    clearQueuedFollowUps,
+    drainQueue,
+    parseUnifiedPatch,
+    applyHunkSubset,
     isTransportDown,
     findUserMessage,
     todoProgress,
@@ -1060,6 +1068,7 @@ async function boot() {
     closeAllTabs,
     flushTabSession,
     restoreTabSession,
+    debugSetMessages: (msgs: never[]) => agentStore.set({ messages: msgs }),
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

@@ -487,6 +487,7 @@ function registerIpc() {
   ipcMain.handle('fs:rename', ok(needRoot((p) => files.renamePath(root, p.from, p.to))));
   ipcMain.handle('fs:remove', ok(needRoot((p) => files.removePath(root, p.path))));
   ipcMain.handle('fs:write-absolute', ok((p) => files.writeAbsolute(p.path, p.content, root)));
+  ipcMain.handle('fs:delete-absolute', ok((p) => files.removeAbsolute(p.path)));
   ipcMain.handle('fs:read-external', ok((p) => files.readExternal(p.path)));
   ipcMain.handle('fs:read-absolute', ok((p) => files.readAbsolute(p.path)));
   ipcMain.handle('fs:find', ok(needRoot((p) => files.find(root, p))));
@@ -1680,13 +1681,40 @@ async function runUiSmoke() {
     })()`);
     if (sessProbe.startsWith('{')) {
       const at = JSON.parse(sessProbe);
-      w.webContents.sendInputEvent({ type: 'mouseDown', x: at.x, y: at.y, button: 'left', clickCount: 1 });
-      w.webContents.sendInputEvent({ type: 'mouseUp', x: at.x, y: at.y, button: 'left', clickCount: 1 });
-      await new Promise((r) => setTimeout(r, 600));
-      for (const ch of '-sessdirty') {
-        w.webContents.sendInputEvent({ type: 'char', keyCode: ch });
-        await new Promise((r) => setTimeout(r, 90));
+      const focusOk = async () => w.webContents.executeJavaScript(
+        `!!document.querySelector('.monaco-editor')?.contains(document.activeElement)`,
+      ).catch(() => false);
+      const hasMarker = async () => w.webContents.executeJavaScript(
+        `!!document.querySelector('.editor-host .monaco-editor .view-lines')?.textContent?.includes('-sessdirty')`,
+      ).catch(() => false);
+      const clickEd = async () => {
+        w.webContents.sendInputEvent({ type: 'mouseDown', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+        w.webContents.sendInputEvent({ type: 'mouseUp', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+        await new Promise((r) => setTimeout(r, 600));
+      };
+      const typeMarker = async () => {
+        for (const ch of '-sessdirty') {
+          w.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+          await new Promise((r) => setTimeout(r, 90));
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      };
+      await clickEd();
+      if (!(await focusOk())) await clickEd();
+      if (!(await focusOk())) {
+        sessProbe = 'focus-fail';
+      } else {
+        // A slipped focus can strand a partial marker (char 1 landed, rest
+        // lost) — verify the full marker and retype (appends) until it
+        // reads back, so the product asserts below judge the feature,
+        // not the input rig.
+        for (let t = 0; t < 3 && !(await hasMarker()); t++) {
+          if (!(await focusOk())) await clickEd();
+          await typeMarker();
+        }
       }
+    }
+    if (sessProbe.startsWith('{')) {
       await new Promise((r) => setTimeout(r, 500));
       sessProbe = await w.webContents.executeJavaScript(`(async () => {
         const u = window.__barangTestUtils;
@@ -1718,8 +1746,15 @@ async function runUiSmoke() {
         if (!hasA || !hasOut || !hasUn) return 'restore-miss:a=' + hasA + ' out=' + hasOut + ' un=' + hasUn;
         const dot = !!document.querySelector('.tab[data-path="${sessA}"] .dirty-dot');
         if (!dot) return 'restore-not-dirty';
+        const activeTab = document.querySelector('.tab.active')?.getAttribute('data-path') || '(none)';
         const lines = document.querySelector('.editor-host .monaco-editor .view-lines')?.textContent || '';
-        if (!lines.includes('-sessdirty')) return 'restore-content';
+        if (!lines.includes('-sessdirty')) {
+          const allTabs = [...document.querySelectorAll('.tab')].map((t) => t.getAttribute('data-path')).join(',');
+          return 'restore-content:active=' + activeTab + ' snapActive=' + snap.active +
+            ' dirtyKeys=' + Object.keys(snap.dirty || {}).join(',') +
+            ' dirtyLen=' + String((snap.dirty || {})['${sessA}'] || '').length +
+            ' tabs=' + allTabs + ' lines=' + lines.slice(0, 60);
+        }
         const p2 = u.closeAllTabs();
         await sleep(800);
         document.querySelector('.confirm-modal .btn-danger')?.click();
@@ -1732,6 +1767,67 @@ async function runUiSmoke() {
   try { await fs.unlink(sessOutside); } catch {}
   console.log('[smoke-ui] sess-restore: ' + sessProbe);
   pass = pass && sessProbe === 'ok';
+  // Review flow: a seeded session edit reviews per-hunk against real disk
+  // (reject hunk 0, then hunk 1, then Keep), plus Reject-all w/ confirm.
+  let reviewProbe = 'skip';
+  const revFile = 'sess-review.txt';
+  try {
+    reviewProbe = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.debugSetMessages !== 'function') return 'no-seed-fn';
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const after = 'a\\nB\\nc\\nd\\ne\\nF\\ng\\nh';
+      try { await window.barang.fs.write('${revFile}', after); } catch (e) { return 'write-fail'; }
+      const st = await window.barang.app.state().catch(() => null);
+      const root = ((st && st.root) || '').replace(/[/\\\\]+$/, '');
+      const abs = root + '/' + '${revFile}';
+      const patch = '@@ -1,3 +1,3 @@\\n a\\n-b\\n+B\\n c\\n@@ -5,4 +5,4 @@\\n e\\n-f\\n+F\\n g\\n h';
+      u.debugSetMessages([{ info: { id: 'm_rev', role: 'assistant' }, parts: [
+        { type: 'tool', tool: 'edit', state: { metadata: { filediff: { file: abs, additions: 2, deletions: 2, patch } } } },
+      ] }]);
+      await sleep(900);
+      const rowOf = () => [...document.querySelectorAll('.change-row')]
+        .find((r) => (r.textContent || '').includes('${revFile}'));
+      if (!rowOf()) return 'no-row';
+      const chev = rowOf().querySelector('.change-chev');
+      if (!chev) return 'no-chev';
+      chev.click();
+      await sleep(500);
+      let hrs = [...document.querySelectorAll('.hunk-row')];
+      if (hrs.length !== 2) return 'hunk-count:' + hrs.length;
+      hrs[0].querySelector('button')?.click();
+      await sleep(1300);
+      let cur = '';
+      try { cur = (await window.barang.fs.read('${revFile}')).content || ''; } catch (e) { return 'read-fail'; }
+      if (cur !== 'a\\nb\\nc\\nd\\ne\\nF\\ng\\nh') return 'hunk0-content:' + JSON.stringify(cur);
+      hrs = [...document.querySelectorAll('.hunk-row')];
+      const open = hrs.filter((h) => h.querySelector('button'));
+      if (open.length !== 1) return 'hunk-remain:' + open.length;
+      open[0].querySelector('button')?.click();
+      await sleep(1300);
+      try { cur = (await window.barang.fs.read('${revFile}')).content || ''; } catch (e) { return 'read-fail2'; }
+      if (cur !== 'a\\nb\\nc\\nd\\ne\\nf\\ng\\nh') return 'hunk1-content:' + JSON.stringify(cur);
+      const keep = rowOf()?.querySelector('.change-keep');
+      if (!keep) return 'no-keep';
+      keep.click();
+      await sleep(500);
+      const wrap = rowOf()?.closest('.change-row-wrap');
+      if (!wrap || !wrap.classList.contains('is-reviewed')) return 'not-dimmed';
+      return 'ok';
+    })()`);
+  } catch (e) { reviewProbe = 'error: ' + (e.message || e); }
+  try {
+    await w.webContents.executeJavaScript(`(async () => {
+      try {
+        const u = window.__barangTestUtils;
+        if (u) u.debugSetMessages([]);
+        try { await window.barang.fs.remove('${revFile}'); } catch {}
+      } catch {}
+      return 'cleaned';
+    })()`);
+  } catch {}
+  console.log('[smoke-ui] review-hunks: ' + reviewProbe);
+  pass = pass && reviewProbe === 'ok';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));
@@ -2197,6 +2293,46 @@ async function runUiSmoke() {
               bad.push('perm-srv-no-session');
             }
           } catch (e) { bad.push('perm-srv-fail:' + ((e && e.message) || String(e)).slice(0, 60)); }
+        }
+        // Review engine: hunk-subset application (order-independent rejects).
+        if (typeof u.parseUnifiedPatch !== 'function' || typeof u.applyHunkSubset !== 'function') {
+          bad.push('no-hunk-fns');
+        } else {
+          const hp = '@@ -1,3 +1,3 @@\\n a\\n-b\\n+B\\n c\\n@@ -5,4 +5,4 @@\\n e\\n-f\\n+F\\n g\\n h';
+          const before8 = 'a\\nb\\nc\\nd\\ne\\nf\\ng\\nh';
+          const full8 = 'a\\nB\\nc\\nd\\ne\\nF\\ng\\nh';
+          const hunks = u.parseUnifiedPatch(hp);
+          if (!hunks || hunks.length !== 2) bad.push('hunk-parse');
+          if (u.applyHunkSubset(before8, hp, new Set()) !== full8) bad.push('hunk-full');
+          if (u.applyHunkSubset(before8, hp, new Set([0])) !== 'a\\nb\\nc\\nd\\ne\\nF\\ng\\nh') bad.push('hunk-skip0');
+          if (u.applyHunkSubset(before8, hp, new Set([1])) !== 'a\\nB\\nc\\nd\\ne\\nf\\ng\\nh') bad.push('hunk-skip1');
+          if (u.applyHunkSubset(before8, hp, new Set([0, 1])) !== before8) bad.push('hunk-skipall');
+          if (u.applyHunkSubset(before8, 'garbage', new Set()) !== null) bad.push('hunk-garbage');
+          if (u.applyHunkSubset('zzz\\n', hp, new Set()) !== null) bad.push('hunk-drift');
+          if (u.parseUnifiedPatch('not a patch') !== null) bad.push('hunk-parse-garbage');
+        }
+        // Follow-up queue: cap, order, stubbed drain, requeue-on-refusal.
+        if (typeof u.enqueueFollowUp !== 'function' || typeof u.queuedFollowUps !== 'function' ||
+            typeof u.dequeueFollowUp !== 'function' || typeof u.removeQueuedFollowUp !== 'function' ||
+            typeof u.clearQueuedFollowUps !== 'function' || typeof u.drainQueue !== 'function') {
+          bad.push('no-queue-fns');
+        } else {
+          const qs = 'ses_q';
+          u.clearQueuedFollowUps(qs);
+          for (let i = 0; i < 7; i++) u.enqueueFollowUp(qs, 'm' + i);
+          const snap = u.queuedFollowUps(qs);
+          if (snap.length !== 5 || snap[0].text !== 'm2' || snap[4].text !== 'm6') bad.push('queue-cap');
+          u.removeQueuedFollowUp(qs, 0);
+          if (u.queuedFollowUps(qs)[0].text !== 'm3') bad.push('queue-remove');
+          const got = [];
+          const stub = async (t) => { got.push(t); return true; };
+          if ((await u.drainQueue(qs, stub)) !== true) bad.push('queue-drain-false');
+          if (got.length !== 1 || got[0] !== 'm3' || u.queuedFollowUps(qs).length !== 3) bad.push('queue-drain');
+          const no = await u.drainQueue(qs, async () => false);
+          if (no !== false || u.queuedFollowUps(qs).length !== 3 || u.queuedFollowUps(qs)[0].text !== 'm4') bad.push('queue-requeue');
+          u.clearQueuedFollowUps(qs);
+          if (u.queuedFollowUps(qs).length !== 0) bad.push('queue-clear');
+          if ((await u.drainQueue(qs, stub)) !== false) bad.push('queue-drain-empty');
         }
       }
       const td = u.isTransportDown;

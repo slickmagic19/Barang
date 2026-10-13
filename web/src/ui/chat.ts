@@ -9,14 +9,15 @@ import {
   statusTextFor, messageErrorText, todoProgress, classifyAttachFile,
   loadCommands, parseSlashCommand, sendCommand,
   compactSession, shareSession, unshareSession, markQuestionAnswered,
+  enqueueFollowUp, queuedFollowUps, removeQueuedFollowUp, drainQueue,
   type ChatMessage, type ChangeEntry, type PendingPermission, type PermissionResponse,
 } from '../lib/agent';
 import { fsApi } from '../lib/api';
 import { barang } from '../lib/transport';
-import { el, md, timeAgo, debounce, roundTripChange, sliceWindow, truncateText, copyText } from '../lib/util';
+import { el, md, timeAgo, debounce, roundTripChange, parseUnifiedPatch, applyHunkSubset, sliceWindow, truncateText, copyText } from '../lib/util';
 import { iconEl } from './icons';
 import { confirmDialog } from './dialog';
-import { revealInEditor, openDiffTab } from './editor';
+import { revealInEditor, openDiffTab, isAbsolutePath, writeTabContent, removeTabFile } from './editor';
 
 export interface ChatHooks {
   toast(msg: string, kind?: 'info' | 'error'): void;
@@ -383,6 +384,235 @@ let prevBusy = false;
 // Sessions the user collapsed in Changes (new sessions default open).
 const changesCollapsed = new Set<string>();
 
+// Review state (Cursor-style Keep/Reject, per session — survives repaints
+// like questStep; a fresh agent edit re-pends its file automatically).
+// reviewedFp: `${sessionId}|${rel}` -> fingerprint of the reviewed change.
+// rejectedHunks: `${sessionId}|${rel}|${fp}` -> rejected hunk indices.
+// beforeCache: same key -> pristine pre-edit content (rejects recompute
+// from this base, so multi-hunk rejects stay order-independent).
+// expandedRows: `${sessionId}|${rel}` currently showing its hunks.
+const reviewedFp = new Map<string, string>();
+const rejectedHunks = new Map<string, Set<number>>();
+const beforeCache = new Map<string, string>();
+const expandedRows = new Set<string>();
+
+/** Fingerprint of one derived change (new agent edits re-pend). Pure. */
+export function changeFp(d: ChangeEntry): string {
+  return `${d.kind}|${d.additions}|${d.deletions}|${(d.patch ?? '').length}|${d.status}`;
+}
+
+function revKey(sessionID: string, rel: string): string {
+  return `${sessionID}|${rel}`;
+}
+
+function isReviewed(sessionID: string, d: ChangeEntry): boolean {
+  return reviewedFp.get(revKey(sessionID, d.rel)) === changeFp(d);
+}
+
+function markReviewed(sessionID: string, d: ChangeEntry) {
+  reviewedFp.set(revKey(sessionID, d.rel), changeFp(d));
+}
+
+/** Current content of a change (detached-aware). Null when unreadable. */
+async function readChangeCurrent(d: ChangeEntry): Promise<string | null> {
+  try {
+    const f = isAbsolutePath(d.rel) ? await fsApi.readAbsolute(d.rel) : await fsApi.read(d.rel);
+    if (f.binary) return null;
+    return f.content ?? '';
+  } catch {
+    return null;
+  }
+}
+
+/** Pristine pre-edit content for an edit-kind change (cached per fp).
+ *  Null when the file drifted since the agent edit. */
+async function beforeForChange(sid: string, d: ChangeEntry, current: string): Promise<string | null> {
+  if (d.kind !== 'edit' || !d.patch) return null;
+  const key = `${revKey(sid, d.rel)}|${changeFp(d)}`;
+  const hit = beforeCache.get(key);
+  if (hit !== undefined) return hit;
+  const before = roundTripChange(current, d.patch);
+  if (before === null || before.length > 1024 * 1024) return null;
+  beforeCache.set(key, before);
+  if (beforeCache.size > 30) beforeCache.delete(beforeCache.keys().next().value!);
+  return before;
+}
+
+/** True when the file holds exactly the expected review state (pristine
+ *  base plus already-rejected hunks — anything else means someone touched
+ *  it since, and rejects stay out). */
+function isExpectedReviewState(before: string, patch: string, rejected: Set<number>, current: string): boolean {
+  const norm = (t: string) => t.split(/\r?\n/).join('\n');
+  const out = applyHunkSubset(before, patch, rejected);
+  return out !== null && out === norm(current);
+}
+
+export interface RejectOpts {
+  quiet?: boolean; // Reject-all: caller toasts the summary, not per file
+  preconfirmed?: boolean; // master confirm already covers destructive ops
+}
+
+const toastRejectFail = (hooks: ChatHooks, rel: string, why: string, quiet?: boolean) => {
+  if (!quiet) hooks.toast(`${rel}: ${why}`, 'error');
+};
+
+/** Reject one file (restore pre-edit). Returns true when resolved. */
+async function rejectChangeFile(sid: string, d: ChangeEntry, hooks: ChatHooks, opts?: RejectOpts): Promise<boolean> {
+  const current = await readChangeCurrent(d);
+  if (current === null) {
+    if (!opts?.quiet) hooks.toast(`Cannot read ${d.rel} — review it in the diff instead.`, 'error');
+    return false;
+  }
+  if (d.kind === 'edit' && d.patch) {
+    const before = await beforeForChange(sid, d, current);
+    const key = `${revKey(sid, d.rel)}|${changeFp(d)}`;
+    const already = rejectedHunks.get(key) ?? new Set<number>();
+    if (before === null || !isExpectedReviewState(before, d.patch, already, current)) {
+      if (!opts?.quiet) hooks.toast(`${d.rel} changed since this edit — open the diff to reconcile manually.`, 'error');
+      return false;
+    }
+    const r = await writeTabContent(d.rel, before);
+    if (r === 'dirty') { toastRejectFail(hooks, d.rel, 'has your unsaved edits — save or close them first', opts?.quiet); return false; }
+    if (r !== 'ok') { toastRejectFail(hooks, d.rel, 'reject failed', opts?.quiet); return false; }
+    rejectedHunks.delete(`${revKey(sid, d.rel)}|${changeFp(d)}`);
+    markReviewed(sid, d);
+    return true;
+  }
+  return rejectWriteChange(sid, d, hooks, opts);
+}
+
+/** Reject a whole-file write (no session snapshot of "before" — git HEAD
+ *  or delete, always confirmed unless the master confirm covers it). */
+async function rejectWriteChange(sid: string, d: ChangeEntry, hooks: ChatHooks, opts?: RejectOpts): Promise<boolean> {
+  const name = d.rel.split('/').pop() ?? d.rel;
+  if (isAbsolutePath(d.rel)) {
+    if (!opts?.preconfirmed) {
+      const ok = await confirmDialog({
+        title: `Delete ${name}?`,
+        message: 'No pre-edit snapshot exists for this file. Delete it?',
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!ok) return false;
+    }
+    const r = await removeTabFile(d.rel);
+    if (r === 'dirty') { toastRejectFail(hooks, d.rel, 'has your unsaved edits — save or close them first', opts?.quiet); return false; }
+    if (r !== 'ok') { toastRejectFail(hooks, d.rel, 'delete failed', opts?.quiet); return false; }
+    markReviewed(sid, d);
+    return true;
+  }
+  let info: { isRepo?: boolean; files?: Array<{ path: string; work: string }> } | null = null;
+  try {
+    info = await barang().git('info');
+  } catch { info = null; }
+  if (!info?.isRepo) {
+    if (!opts?.quiet) hooks.toast('No snapshot to reject to (not a git repo) — delete or edit the file manually.', 'error');
+    return false;
+  }
+  const hit = (info.files ?? []).find((f) => f.path === d.rel);
+  let headBefore = '';
+  try {
+    const gd = await barang().git('diff', { path: d.rel });
+    headBefore = typeof gd?.before === 'string' ? gd.before : '';
+  } catch { headBefore = ''; }
+  const current = await readChangeCurrent(d);
+  if (current !== null && headBefore !== '' && current === headBefore) {
+    markReviewed(sid, d); // no effective change — just done
+    return true;
+  }
+  if (hit?.work === '?' || (headBefore === '' && !hit)) {
+    if (!opts?.preconfirmed) {
+      const ok = await confirmDialog({
+        title: `Delete ${name}?`,
+        message: `${d.rel} was created during this session. Delete it?`,
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!ok) return false;
+    }
+    const r = await removeTabFile(d.rel);
+    if (r === 'dirty') { toastRejectFail(hooks, d.rel, 'has your unsaved edits — save or close them first', opts?.quiet); return false; }
+    if (r !== 'ok') { toastRejectFail(hooks, d.rel, 'delete failed', opts?.quiet); return false; }
+    markReviewed(sid, d);
+    return true;
+  }
+  if (!opts?.preconfirmed) {
+    const ok = await confirmDialog({
+      title: `Restore ${name} to HEAD?`,
+      message: `${d.rel} has no session snapshot — restoring the committed version discards uncommitted changes.`,
+      confirmLabel: 'Restore',
+      danger: true,
+    });
+    if (!ok) return false;
+  }
+  const r = await writeTabContent(d.rel, headBefore);
+  if (r === 'dirty') { toastRejectFail(hooks, d.rel, 'has your unsaved edits — save or close them first', opts?.quiet); return false; }
+  if (r !== 'ok') { toastRejectFail(hooks, d.rel, 'restore failed', opts?.quiet); return false; }
+  markReviewed(sid, d);
+  return true;
+}
+
+/** Reject a single hunk (order-independent: recomputed from the pristine
+ *  base every time, so multi-hunk rejects never drift). */
+async function rejectChangeHunk(sid: string, d: ChangeEntry, idx: number, hooks: ChatHooks): Promise<void> {
+  if (d.kind !== 'edit' || !d.patch) return;
+  const current = await readChangeCurrent(d);
+  if (current === null) {
+    hooks.toast(`Cannot read ${d.rel} — review it in the diff instead.`, 'error');
+    return;
+  }
+  const before = await beforeForChange(sid, d, current);
+  const key = `${revKey(sid, d.rel)}|${changeFp(d)}`;
+  const rej = new Set(rejectedHunks.get(key) ?? []);
+  if (before === null || !isExpectedReviewState(before, d.patch, rej, current)) {
+    hooks.toast(`${d.rel} changed since this edit — open the diff to reconcile manually.`, 'error');
+    return;
+  }
+  rej.add(idx);
+  const out = applyHunkSubset(before, d.patch, rej);
+  if (out === null) {
+    hooks.toast('That hunk would not apply cleanly — reject the whole file instead.', 'error');
+    return;
+  }
+  const r = await writeTabContent(d.rel, out);
+  if (r === 'dirty') {
+    hooks.toast(`${d.rel} has your unsaved edits — save or close them first.`, 'error');
+    return;
+  }
+  if (r !== 'ok') {
+    hooks.toast(`Reject failed for ${d.rel}.`, 'error');
+    return;
+  }
+  rejectedHunks.set(key, rej);
+  hooks.toast(`Hunk rejected in ${d.rel}.`, 'info');
+}
+
+/** Reject every pending file behind one master confirm. */
+async function rejectAllChanges(sid: string, pending: ChangeEntry[], hooks: ChatHooks): Promise<void> {
+  if (!pending.length) return;
+  const ok = await confirmDialog({
+    title: `Reject all ${pending.length} change(s)?`,
+    message: 'Every file is restored to its pre-edit state. Agent-created files are deleted. This cannot be undone.',
+    confirmLabel: 'Reject all',
+    danger: true,
+  });
+  if (!ok) return;
+  let done = 0;
+  let failed = 0;
+  for (const d of pending) {
+    try {
+      if (await rejectChangeFile(sid, d, hooks, { quiet: true, preconfirmed: true })) done++;
+      else failed++;
+    } catch {
+      failed++;
+    }
+  }
+  hooks.toast(
+    failed ? `Rejected ${done} file(s), ${failed} need attention.` : `Rejected ${done} file(s).`,
+    failed ? 'error' : 'info',
+  );
+}
+
 const CHAT_WINDOW = 150; // rendered messages (older hidden behind a button)
 const CHANGES_CAP = 200; // rendered change rows (counts stay exact)
 let chatShown = CHAT_WINDOW;
@@ -564,7 +794,9 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   const changesRefresh = el('button', { class: 'icon-btn', title: 'Refresh changed files' }) as HTMLButtonElement;
   changesRefresh.append(iconEl('refresh', 13));
   changesRefresh.onclick = () => void refreshActive().catch((e) => hooks.toast(e.message, 'error'));
-  changesHead.append(changesToggle, changesRefresh);
+  const btnKeepAll = el('button', { class: 'btn btn-sm', title: 'Accept all changes in this session' }, 'Keep all') as HTMLButtonElement;
+  const btnRejectAll = el('button', { class: 'btn btn-sm', title: 'Restore every file to its pre-edit state' }, 'Reject all') as HTMLButtonElement;
+  changesHead.append(changesToggle, changesRefresh, btnKeepAll, btnRejectAll);
   const changesList = el('div', { class: 'changes-list' });
   changesSec.append(changesHead, changesList);
   changesToggle.onclick = () => {
@@ -577,6 +809,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
 
   const composer = el('div', { class: 'composer' });
   const attachBar = el('div', { class: 'attach-bar hidden' });
+  const queueSec = el('div', { class: 'queue-sec hidden' });
   const box = el('div', { class: 'composer-box' });
   const input = el('textarea', { class: 'composer-input', placeholder: 'Ask, build, refactor… (@ for files, paste/drop images, Enter to send)' }) as HTMLTextAreaElement;
   input.rows = 2;
@@ -590,7 +823,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   btnSend.append(iconEl('send', 14));
   sendRow.append(btnAttach, modelMini, effortMini, btnSend);
   box.append(input, sendRow);
-  composer.append(attachBar, box, suggest);
+  composer.append(attachBar, queueSec, box, suggest);
 
   panel.append(sessSection, perms, quests, list, errBox, busyRow, todosSec, changesSec, composer);
 
@@ -614,6 +847,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       chip.append(x);
       attachBar.append(chip);
     });
+    paintSendBtn();
   };
 
   const insertFileMention = (absPath: string) => {
@@ -879,10 +1113,15 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
 
   const doSend = async () => {
     const v = input.value;
-    if ((!v.trim() && !imgAttaches.length) || agentStore.get().busy) return;
+    if (!v.trim() && !imgAttaches.length) return;
+    const busy = agentStore.get().busy;
     // Slash commands go to the command endpoint (server list) or the local
     // TUI-parity map — never the prompt endpoint.
     const slash = !imgAttaches.length ? parseSlashCommand(v) : null;
+    if (slash && busy) {
+      hooks.toast('Let the run finish (or Stop it) before running commands.', 'error');
+      return; // keep the text so it can run right after
+    }
     if (slash) {
       const local = LOCAL_COMMANDS[slash.name];
       if (local) {
@@ -905,6 +1144,22 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       await sendCommand(slash.name, slash.args);
       return;
     }
+    if (agentStore.get().busy) {
+      // Queue (opencode behavior): the run is busy, so this waits its turn
+      // instead of stacking onto the live run or being dropped.
+      const id = agentStore.get().activeId;
+      if (!id) return; // no session — keep the text
+      const files = imgAttaches.map((a) => ({ mime: a.mime, filename: a.filename, url: a.dataUrl }));
+      imgAttaches = [];
+      paintAttach();
+      input.value = '';
+      autoGrow();
+      pushComposerHist(v);
+      const n = enqueueFollowUp(id, v, files);
+      hooks.toast(`Queued (#${n}) — sends when the run finishes.`, 'info');
+      paint();
+      return;
+    }
     const files = imgAttaches.map((a) => ({ mime: a.mime, filename: a.filename, url: a.dataUrl }));
     imgAttaches = [];
     paintAttach();
@@ -922,6 +1177,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   input.addEventListener('input', () => {
     autoGrow();
     histIdx = -1; // typing abandons history navigation
+    paintSendBtn();
     void updateSuggest();
   });
 
@@ -1108,6 +1364,14 @@ function paintTodos() {
 
   function paintChanges() {
     const s = agentStore.get();
+    // Run-end edge (computed once: the empty-list early return below must
+    // not swallow it — queued follow-ups send even with zero file changes).
+    const finished = prevBusy && !s.busy;
+    prevBusy = s.busy;
+    if (finished && s.activeId) {
+      // Queued follow-up sends now (opencode: Enter while busy waits its turn).
+      void drainQueue(s.activeId).catch(() => {});
+    }
     // Changed files, derived from the session's edit/write tool calls —
     // always consistent with the loaded messages. Memoized: derivation only
     // re-runs when the message list actually changes, not on every paint.
@@ -1128,17 +1392,33 @@ function paintTodos() {
     changesSec.classList.toggle('collapsed', collapsed);
     changesList.classList.toggle('hidden', collapsed);
     if (!changes.length) {
-      prevBusy = s.busy;
       return;
     }
     changesCount.textContent = String(changes.length);
     changesList.innerHTML = '';
+    const sid = s.activeId ?? '';
+    const pending = changes.filter((d) => !isReviewed(sid, d));
+    btnKeepAll.toggleAttribute('disabled', !pending.length);
+    btnRejectAll.toggleAttribute('disabled', !pending.length);
+    btnKeepAll.onclick = () => {
+      for (const d of pending) markReviewed(sid, d);
+      paintChanges();
+    };
+    btnRejectAll.onclick = () => void rejectAllChanges(sid, pending, hooks).finally(() => paintChanges());
+    // Prune expansion/reject state for files that left the change set.
+    const liveKeys = new Set(changes.map((d) => revKey(sid, d.rel)));
+    for (const k of [...expandedRows]) {
+      if (k.startsWith(`${sid}|`) && !liveKeys.has(k)) expandedRows.delete(k);
+    }
     // Cap rendered rows (thousands of changed files must not build
     // thousands of DOM rows + icons every paint — counts stay exact).
     const shown = changes.slice(0, CHANGES_CAP);
     for (const d of shown) {
       const st = diffStatus(d);
-      const row = el('button', { class: `change-row ${st.cls}`, title: `${st.label} — click to review` }) as HTMLButtonElement;
+      const reviewed = isReviewed(sid, d);
+      const wrap = el('div', { class: `change-row-wrap${reviewed ? ' is-reviewed' : ''}` });
+      const row = el('div', { class: `change-row ${st.cls}`, title: `${st.label} — click to review` });
+      const main = el('button', { class: 'change-main', title: `${st.label} — click to review` }) as HTMLButtonElement;
       const stat = el('span', { class: 'change-stat' });
       if (d.kind === 'write') {
         stat.append(el('span', { class: 'stat-add' }, 'new'));
@@ -1149,22 +1429,116 @@ function paintTodos() {
           el('span', { class: 'stat-del' }, `−${d.deletions}`),
         );
       }
-      row.append(
+      main.append(
         iconEl(st.icon, 13),
         el('span', { class: 'change-path' }, d.rel),
         stat,
       );
+      main.onclick = () => void openChangeReview(d, hooks);
       row.onclick = () => void openChangeReview(d, hooks);
-      changesList.append(row);
+      row.append(main);
+      // Multi-hunk edits expand to per-hunk rejects.
+      const hunks = !reviewed && d.kind === 'edit' && d.patch ? parseUnifiedPatch(d.patch) : null;
+      const multi = !!hunks && hunks.length > 1;
+      const rkey = revKey(sid, d.rel);
+      if (multi) {
+        const chev = el('button', { class: 'icon-btn change-chev', title: expandedRows.has(rkey) ? 'Hide hunks' : 'Show hunks' }) as HTMLButtonElement;
+        chev.append(iconEl('chevR', 12));
+        chev.classList.toggle('open', expandedRows.has(rkey));
+        chev.onclick = (e) => {
+          e.stopPropagation();
+          if (expandedRows.has(rkey)) expandedRows.delete(rkey);
+          else expandedRows.add(rkey);
+          paintChanges();
+        };
+        row.append(chev);
+      }
+      if (!reviewed) {
+        const bKeep = el('button', { class: 'icon-btn change-keep', title: `Keep ${d.rel}` }) as HTMLButtonElement;
+        bKeep.append(iconEl('check', 13));
+        bKeep.onclick = (e) => {
+          e.stopPropagation();
+          markReviewed(sid, d);
+          paintChanges();
+        };
+        const bRej = el('button', { class: 'icon-btn change-reject', title: `Reject ${d.rel} (restore pre-edit)` }) as HTMLButtonElement;
+        bRej.append(iconEl('x', 13));
+        bRej.onclick = (e) => {
+          e.stopPropagation();
+          bKeep.disabled = true;
+          bRej.disabled = true;
+          void rejectChangeFile(sid, d, hooks).finally(() => paintChanges());
+        };
+        row.append(bKeep, bRej);
+      } else {
+        const done = el('span', { class: 'change-done', title: 'Reviewed' });
+        done.append(iconEl('check', 13));
+        row.append(done);
+      }
+      wrap.append(row);
+      if (multi && hunks && expandedRows.has(rkey)) {
+        const hkey = `${rkey}|${changeFp(d)}`;
+        const rej = rejectedHunks.get(hkey) ?? new Set<number>();
+        const list = el('div', { class: 'hunk-list' });
+        hunks.forEach((h, i) => {
+          const del = h.lines.filter((l) => l.k === '-').length;
+          const add = h.lines.filter((l) => l.k === '+').length;
+          const hr = el('div', { class: `hunk-row${rej.has(i) ? ' is-rejected' : ''}` });
+          hr.append(el('span', { class: 'hunk-meta' }, `Hunk ${i + 1}/${hunks.length} · −${del} +${add}`));
+          if (!rej.has(i)) {
+            const b = el('button', { class: 'btn btn-sm', title: `Reject this hunk in ${d.rel}` }, 'Reject') as HTMLButtonElement;
+            b.onclick = () => {
+              b.disabled = true;
+              void rejectChangeHunk(sid, d, i, hooks).finally(() => paintChanges());
+            };
+            hr.append(b);
+          } else {
+            hr.append(el('span', { class: 'hunk-rejected-label' }, 'Rejected'));
+          }
+          list.append(hr);
+        });
+        wrap.append(list);
+      }
+      changesList.append(wrap);
     }
     if (changes.length > shown.length) {
       changesList.append(el('div', { class: 'scm-none' }, `…and ${changes.length - shown.length} more (open a diff from search, or commit in batches)`));
     }
     // run finished with new changes → toast once
-    if (prevBusy && !s.busy) {
+    if (finished) {
       hooks.toast(`Agent changed ${changes.length} file${changes.length > 1 ? 's' : ''} — see Changes.`, 'info');
     }
-    prevBusy = s.busy;
+  }
+
+  /** Queued follow-ups under the composer (opencode: Enter while busy
+   *  waits its turn instead of dropping text). */
+  function paintQueue(activeId: string | null, busy: boolean) {
+    const q = activeId ? queuedFollowUps(activeId) : [];
+    queueSec.classList.toggle('hidden', !q.length);
+    if (!q.length) return;
+    queueSec.innerHTML = '';
+    queueSec.append(el('span', { class: 'queue-cap' },
+      busy ? `Queued — sends when the run finishes (${q.length})` : `Queued (${q.length})`));
+    q.forEach((item, i) => {
+      const row = el('div', { class: 'queue-row' });
+      const label = item.text.trim() || `(${item.files.length} image${item.files.length === 1 ? '' : 's'})`;
+      row.append(el('span', { class: 'queue-text', title: item.text }, label));
+      const x = el('button', { class: 'icon-btn queue-x', title: 'Remove from queue' }) as HTMLButtonElement;
+      x.append(iconEl('x', 12));
+      x.onclick = () => {
+        if (activeId) removeQueuedFollowUp(activeId, i);
+        paint();
+      };
+      row.append(x);
+      queueSec.append(row);
+    });
+  }
+
+  /** Send stays available while busy when there's text (it queues). */
+  function paintSendBtn() {
+    const empty = !input.value.trim() && !imgAttaches.length;
+    btnSend.toggleAttribute('disabled', empty);
+    btnSend.title = agentStore.get().busy ? 'Queue follow-up (Enter)' : 'Send (Enter)';
   }
 
   const paint = () => {
@@ -1343,7 +1717,8 @@ function paintTodos() {
       errBox.append(iconEl('alert', 14), el('span', {}, s.error));
       errBox.classList.remove('hidden');
     } else errBox.classList.add('hidden');
-    btnSend.toggleAttribute('disabled', s.busy);
+    paintQueue(s.activeId, s.busy);
+    paintSendBtn();
   };
   const paintDebounced = debounce(paint, 120);
   requestChatPaint = paint;

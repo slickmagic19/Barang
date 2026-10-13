@@ -501,6 +501,17 @@ export async function removePath(root, rel) {
 }
 
 /**
+ * Delete an absolute path anywhere on disk (rejecting an agent-created
+ * file that lives outside the project). NOT root-confined by design: the
+ * path always comes from an explicit user gesture (review Reject).
+ */
+export async function removeAbsolute(absPath) {
+  if (!absPath || !path.isAbsolute(absPath)) throw new Error('Need an absolute {path}');
+  await fs.rm(absPath, { recursive: false, force: true });
+  return { ok: true, path: absPath.split(path.sep).join('/') };
+}
+
+/**
  * Write an absolute path (untitled Save-As only). NOT root-confined by
  * design: the path always comes from the native save dialog, which is
  * explicit user consent for that exact location.

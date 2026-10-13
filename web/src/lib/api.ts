@@ -19,6 +19,7 @@ export const fsApi = {
   readExternal: (path: string) => barang().fs.readExternal(path),
   readAbsolute: (path: string) => barang().fs.readAbsolute(path),
   writeAbsolute: (path: string, content: string) => barang().fs.writeAbsolute(path, content),
+  deleteAbsolute: (path: string) => barang().fs.deleteAbsolute(path),
   find: (query: string, limit = 50) => barang().fs.find(query, limit),
   search: (q: string, path = '', limit = 50) => barang().fs.search(q, path, limit),
   searchReplace: (args: { q: string; replacement?: string; regex?: boolean; wholeWord?: boolean; caseSensitive?: boolean; path?: string; include?: string[]; exclude?: string[]; onlyFiles?: string[]; dryRun?: boolean }) =>

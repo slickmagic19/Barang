@@ -276,6 +276,18 @@ function applyForward(before: string[], hunks: PatchHunk[]): string[] | null {
   return out;
 }
 
+/** Content with selected hunks excluded: exact forward-apply of the kept
+ *  hunks onto `before`. Order-independent multi-hunk rejects (each reject
+ *  recomputes from the pristine base instead of shifting offsets).
+ *  Null when the patch is malformed or any kept hunk misses. Pure. */
+export function applyHunkSubset(before: string, patch: string, skip: Set<number>): string | null {
+  const hunks = parseUnifiedPatch(patch);
+  if (!hunks) return null;
+  const kept = hunks.filter((_, i) => !skip.has(i));
+  const out = applyForward(before.split(/\r?\n/), kept);
+  return out ? out.join('\n') : null;
+}
+
 /** Last-N windowing for ever-growing lists (chat history): returns the
  *  visible slice plus how many older items are hidden. Pure (smoke-tested). */
 export function sliceWindow<T>(list: readonly T[], shown: number): { visible: T[]; hidden: number } {

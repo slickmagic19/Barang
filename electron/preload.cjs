@@ -21,6 +21,7 @@ const barang = {
     rename: (from, to) => invoke('fs:rename', { from, to }),
     remove: (path) => invoke('fs:remove', { path }),
     writeAbsolute: (path, content) => invoke('fs:write-absolute', { path, content }),
+    deleteAbsolute: (path) => invoke('fs:delete-absolute', { path }),
     readExternal: (path) => invoke('fs:read-external', { path }),
     readAbsolute: (path) => invoke('fs:read-absolute', { path }),
     find: (query, limit = 50) => invoke('fs:find', { query, limit }),

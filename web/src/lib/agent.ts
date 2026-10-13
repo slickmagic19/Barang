@@ -669,13 +669,15 @@ export interface BarangSettings {
   notifSoundName: string; // legacy single sound (migrated to per-kind on load)
   notifCustomName: string; // legacy picked file display name
   notifCustomPath: string; // legacy picked file file:// URL
-  notifDoneSound: string; // builtin id or 'custom:<vaultId>', default 'success'
-  notifApprovalSound: string; // builtin id or 'custom:<vaultId>', default 'chime'
-  notifErrorSound: string; // builtin id or 'custom:<vaultId>', default 'alert'
+  notifDoneSound: string; // builtin id or 'custom:<vaultId>', default 'complete'
+  notifApprovalSound: string; // builtin id or 'custom:<vaultId>', default 'approval'
+  notifQuestionSound: string; // builtin id or 'custom:<vaultId>', default 'question'
+  notifErrorSound: string; // builtin id or 'custom:<vaultId>', default 'error'
   notifCustomSounds: Array<{ id: string; name: string; fileUrl: string }>; // vault picks
   notifVolume: number; // 0-100, default 80
   notifOnDone: boolean; // notify when a run finishes, default true
   notifOnApproval: boolean; // notify on pending approvals, default true
+  notifOnQuestion: boolean; // notify on pending questions, default true
   notifOnError: boolean; // notify on run errors, default true
   notifTaskbar: boolean; // taskbar badge + flash, default true
   notifToastFocused: boolean; // in-app toast when focused, default true
@@ -709,13 +711,15 @@ const SETTING_DEFAULTS: BarangSettings = {
   notifSoundName: 'chime',
   notifCustomName: '',
   notifCustomPath: '',
-  notifDoneSound: 'success',
-  notifApprovalSound: 'chime',
-  notifErrorSound: 'alert',
+  notifDoneSound: 'complete',
+  notifApprovalSound: 'approval',
+  notifQuestionSound: 'question',
+  notifErrorSound: 'error',
   notifCustomSounds: [],
   notifVolume: 80,
   notifOnDone: true,
   notifOnApproval: true,
+  notifOnQuestion: true,
   notifOnError: true,
   notifTaskbar: true,
   notifToastFocused: true,
@@ -739,6 +743,7 @@ export function normalizeNotifSoundSettings(p: {
   notifCustomPath?: unknown;
   notifDoneSound?: unknown;
   notifApprovalSound?: unknown;
+  notifQuestionSound?: unknown;
   notifErrorSound?: unknown;
   notifCustomSounds?: unknown;
 }): {
@@ -747,6 +752,7 @@ export function normalizeNotifSoundSettings(p: {
   notifCustomPath: string;
   notifDoneSound: string;
   notifApprovalSound: string;
+  notifQuestionSound: string;
   notifErrorSound: string;
   notifCustomSounds: NotifCustomSound[];
 } {
@@ -784,9 +790,10 @@ export function normalizeNotifSoundSettings(p: {
     notifSoundName: legacy || 'chime',
     notifCustomName: legacyName,
     notifCustomPath: legacyPath,
-    notifDoneSound: pick(p.notifDoneSound, 'success'),
-    notifApprovalSound: pick(p.notifApprovalSound, 'chime'),
-    notifErrorSound: pick(p.notifErrorSound, 'alert'),
+    notifDoneSound: pick(p.notifDoneSound, 'complete'),
+    notifApprovalSound: pick(p.notifApprovalSound, 'approval'),
+    notifQuestionSound: pick(p.notifQuestionSound, 'question'),
+    notifErrorSound: pick(p.notifErrorSound, 'error'),
     notifCustomSounds: customs,
   };
 }
@@ -819,6 +826,7 @@ export function readSettings(): BarangSettings {
       notifVolume: Number.isFinite(p.notifVolume) ? Math.max(0, Math.min(100, p.notifVolume)) : SETTING_DEFAULTS.notifVolume,
       notifOnDone: p.notifOnDone !== false,
       notifOnApproval: p.notifOnApproval !== false,
+      notifOnQuestion: p.notifOnQuestion !== false,
       notifOnError: p.notifOnError !== false,
       notifTaskbar: p.notifTaskbar !== false,
       notifToastFocused: p.notifToastFocused !== false,
@@ -1445,9 +1453,31 @@ const SEND_RETRY_MAX_MS = 30000;
 
 const ABORT_TIMEOUT_MS = 15000;
 
+/** Stop-edge silencer (no celebration for aborts/answers): armed by
+ *  abortActive, consumed once by the notifier on the next 'done' edge,
+ *  expires on its own so a failed stop can't eat a later real finish. */
+let quietStopUntil = 0;
+
+export function quietNextStop(windowMs = 15000) {
+  quietStopUntil = Math.max(quietStopUntil, Date.now() + Math.max(1000, windowMs));
+}
+
+export function consumeQuietStop(): boolean {
+  if (Date.now() > quietStopUntil) {
+    quietStopUntil = 0;
+    return false;
+  }
+  quietStopUntil = 0;
+  return true;
+}
+
 export async function abortActive() {
   const s = agentStore.get();
   if (!s.activeId) return;
+  // A stop is never a completion: silence the 'done' edge it produces
+  // (answering a question stops-then-sends — without this the stop alone
+  // chimes, then the answer run chimes again). One-shot, time-boxed.
+  if (s.busy) quietNextStop();
   const id = s.activeId;
   // Optimistic stopping state: the button visibly does something even if the
   // server is wedged. Verified after (missing status entry = stopped).

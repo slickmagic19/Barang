@@ -2057,7 +2057,7 @@ async function runUiSmoke() {
   let notifSounds = 'skip';
   try {
     notifSounds = await w.webContents.executeJavaScript(`(async () => {
-      const files = ['sounds/chime.wav','sounds/ding.wav','sounds/pop.wav','sounds/alert.wav','sounds/success.wav'];
+      const files = ['sounds/chime.wav','sounds/ding.wav','sounds/pop.wav','sounds/alert.wav','sounds/success.wav','sounds/complete.wav','sounds/approval.wav','sounds/error.wav','sounds/question.wav'];
       const out = [];
       for (const f of files) {
         try {
@@ -2074,7 +2074,7 @@ async function runUiSmoke() {
     })()`);
   } catch (e) { notifSounds = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] notif-sounds: ' + notifSounds);
-  pass = pass && /^([^,]+wav=ok,){4}[^,]+wav=ok$/.test(notifSounds);
+  pass = pass && /^([^,]+wav=ok,){8}[^,]+wav=ok$/.test(notifSounds);
   let notifDecide = 'skip';
   try {
     notifDecide = await w.webContents.executeJavaScript(`(() => {
@@ -2092,19 +2092,22 @@ async function runUiSmoke() {
         [{ ...idle, busy: true, activeId: 's1' }, { ...idle, activeId: 's2' }, null],
         [{ ...idle, busy: true, perms: 0 }, { ...idle, busy: true, perms: 1 }, 'approval'],
         [{ ...idle, busy: true, perms: 1 }, { ...idle, busy: true, perms: 1 }, null],
-        [{ ...idle, busy: true, questions: 0 }, { ...idle, busy: true, questions: 1 }, 'approval'],
+        [{ ...idle, busy: true, questions: 0 }, { ...idle, busy: true, questions: 1 }, 'question'],
         [{ ...idle, busy: true, questions: 1 }, { ...idle, questions: 0 }, 'done'],
+        [{ ...idle }, { ...idle, questions: 1 }, 'question'],
+        [{ ...idle, busy: true }, { ...idle, questions: 1 }, 'question'],
+        [{ ...idle, busy: true }, { ...idle, perms: 1, questions: 1 }, 'question'],
       ];
       const bad = [];
       cases.forEach(([a, b, want], i) => {
         const got = d(a, b);
         if (got !== want) bad.push(i + ':' + got + '!==' + want);
       });
-      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-12';
+      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-15';
     })()`);
   } catch (e) { notifDecide = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] notif-decide: ' + notifDecide);
-  pass = pass && notifDecide === 'ok-12';
+  pass = pass && notifDecide === 'ok-15';
   let notifIpc = 'skip';
   try {
     notifIpc = await w.webContents.executeJavaScript(`(async () => {
@@ -2126,33 +2129,54 @@ async function runUiSmoke() {
       }
       const bad = [];
       const customs = [{ id: 'my1', name: 'My tone', fileUrl: 'file:///C:/tones/my1.wav' }];
-      const picks = { done: 'ding', approval: 'custom:my1', error: 'custom:nope' };
+      const picks = { done: 'ding', approval: 'custom:my1', error: 'custom:nope', question: 'question' };
       if (u.resolveKindSound('done', picks, customs) !== 'sounds/ding.wav') bad.push('kind-done');
       if (u.resolveKindSound('approval', picks, customs) !== 'file:///C:/tones/my1.wav') bad.push('kind-custom');
-      if (u.resolveKindSound('error', picks, customs) !== 'sounds/alert.wav') bad.push('kind-fallback');
-      if (u.resolveKindSound('done', { done: 'bogus', approval: '', error: '' }, []) !== 'sounds/success.wav') bad.push('kind-unknown');
+      if (u.resolveKindSound('error', picks, customs) !== 'sounds/error.wav') bad.push('kind-fallback');
+      if (u.resolveKindSound('question', picks, customs) !== 'sounds/question.wav') bad.push('kind-question');
+      if (u.resolveKindSound('done', { done: 'bogus', approval: '', error: '', question: '' }, []) !== 'sounds/complete.wav') bad.push('kind-unknown');
       // Legacy migration matrix.
       const m1 = u.normalizeNotifSoundSettings({ notifSoundName: 'ding' });
       if (m1.notifDoneSound !== 'ding' || m1.notifApprovalSound !== 'ding' || m1.notifErrorSound !== 'ding') bad.push('mig-single');
+      if (m1.notifQuestionSound !== 'ding') bad.push('mig-single-q');
       if (m1.notifCustomSounds.length !== 0) bad.push('mig-single-custom');
       const m2 = u.normalizeNotifSoundSettings({ notifSoundName: 'custom', notifCustomName: 'My', notifCustomPath: 'file:///x' });
       if (m2.notifDoneSound !== 'custom:legacy' || m2.notifCustomSounds.length !== 1 || m2.notifCustomSounds[0].id !== 'legacy') bad.push('mig-legacy');
       const m3 = u.normalizeNotifSoundSettings({ notifDoneSound: 'pop', notifApprovalSound: 'custom:abc', notifCustomSounds: [{ id: 'abc', name: 'A', fileUrl: 'file:///a' }] });
-      if (m3.notifDoneSound !== 'pop' || m3.notifApprovalSound !== 'custom:abc' || m3.notifErrorSound !== 'alert') bad.push('mig-keep');
+      if (m3.notifDoneSound !== 'pop' || m3.notifApprovalSound !== 'custom:abc' || m3.notifErrorSound !== 'error') bad.push('mig-keep');
       const m4 = u.normalizeNotifSoundSettings({});
-      if (m4.notifDoneSound !== 'success' || m4.notifApprovalSound !== 'chime' || m4.notifErrorSound !== 'alert') bad.push('mig-defaults');
-      if (u.KIND_DEFAULT_SOUND.done !== 'success' || u.KIND_DEFAULT_SOUND.approval !== 'chime' || u.KIND_DEFAULT_SOUND.error !== 'alert') bad.push('kind-defaults');
+      if (m4.notifDoneSound !== 'complete' || m4.notifApprovalSound !== 'approval' || m4.notifErrorSound !== 'error' || m4.notifQuestionSound !== 'question') bad.push('mig-defaults');
+      if (u.KIND_DEFAULT_SOUND.done !== 'complete' || u.KIND_DEFAULT_SOUND.approval !== 'approval' || u.KIND_DEFAULT_SOUND.error !== 'error' || u.KIND_DEFAULT_SOUND.question !== 'question') bad.push('kind-defaults');
       // Playback wiring: every kind resolves + play() never throws (false
-      // when headless-blocked — only a throw fails).
+      // when headless-blocked — only a throw fails). Single voice: the
+      // second play takes over (no overlaps), verified via debug src.
       try {
-        for (const k of ['done', 'approval', 'error']) {
+        for (const k of ['done', 'approval', 'error', 'question']) {
           const url = u.resolveKindSound(k, picks, customs);
           const r = await u.playNotificationSound(url, 0.8);
           if (typeof r !== 'boolean') bad.push('play-type:' + k);
         }
         const rc = await u.playNotificationSound('file:///C:/tones/my1.wav', 0.8);
         if (typeof rc !== 'boolean') bad.push('play-custom-type');
+        if (typeof u.debugAudioState !== 'function') bad.push('no-audio-state');
+        else {
+          const st1 = u.debugAudioState();
+          await u.playNotificationSound('sounds/ding.wav', 0.8);
+          await u.playNotificationSound('sounds/pop.wav', 0.8);
+          const st2 = u.debugAudioState();
+          if (typeof st1.src !== 'string' || typeof st2.src !== 'string') bad.push('audio-state-type');
+          else if (!st2.src.endsWith('sounds/pop.wav')) bad.push('audio-switch:' + st2.src.slice(-40));
+        }
       } catch (e) { bad.push('play-throw:' + (e.message || e)); }
+      // Stop-edge silencer: one-shot, silent stops never celebrate.
+      if (typeof u.quietNextStop !== 'function' || typeof u.consumeQuietStop !== 'function') {
+        bad.push('no-quiet-fns');
+      } else {
+        if (u.consumeQuietStop() !== false) bad.push('quiet-fresh');
+        u.quietNextStop();
+        if (u.consumeQuietStop() !== true) bad.push('quiet-arm');
+        if (u.consumeQuietStop() !== false) bad.push('quiet-once');
+      }
       // remove-sound must reject traversal, accept missing-file delete.
       try {
         await window.barang.app.removeSound('../../evil');
@@ -2788,8 +2812,9 @@ async function runUiSmoke() {
         tog = (mid !== before && free.checked === before) ? 'ok' : 'stuck';
       }
       const overlayText = document.querySelector('.settings-overlay .settings-body')?.textContent || '';
-      const snd = ['Run finished sound', 'Approval sound', 'Error sound', 'Add custom sound'].every((t) => overlayText.includes(t))
+      const snd = ['Run finished sound', 'Approval sound', 'Question sound', 'Error sound', 'Add custom sound'].every((t) => overlayText.includes(t))
         && [...document.querySelectorAll('.settings-overlay button')].some((b) => b.textContent === 'Approval')
+        && [...document.querySelectorAll('.settings-overlay button')].some((b) => b.textContent === 'Question')
         ? 'ok' : 'missing';
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       await new Promise((r) => setTimeout(r, 400));

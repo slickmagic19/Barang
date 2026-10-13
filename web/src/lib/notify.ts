@@ -5,7 +5,7 @@
 import { agentStore } from './agent';
 import { barang } from './transport';
 
-export type NotifyKind = 'done' | 'approval' | 'error';
+export type NotifyKind = 'done' | 'approval' | 'error' | 'question';
 
 export interface BuiltinSound {
   id: string;
@@ -19,6 +19,10 @@ export const BUILTIN_SOUNDS: BuiltinSound[] = [
   { id: 'pop', label: 'Pop', file: 'sounds/pop.wav' },
   { id: 'alert', label: 'Alert', file: 'sounds/alert.wav' },
   { id: 'success', label: 'Success', file: 'sounds/success.wav' },
+  { id: 'complete', label: 'Complete', file: 'sounds/complete.wav' },
+  { id: 'approval', label: 'Approval', file: 'sounds/approval.wav' },
+  { id: 'error', label: 'Error', file: 'sounds/error.wav' },
+  { id: 'question', label: 'Question', file: 'sounds/question.wav' },
 ];
 
 export interface AgentSnap {
@@ -35,11 +39,16 @@ export function decideAgentNotification(prev: AgentSnap, next: AgentSnap): Notif
   if (next.root !== prev.root) return null; // project switch, not a run edge
   if (next.activeId !== prev.activeId && next.activeId !== null && prev.activeId !== null) return null; // session switch
   if (next.error && next.error !== prev.error) return 'error';
-  // Approval/question waits happen mid-run (busy stays true) — fire on
-  // arrival and when a run ends with asks still pending, not only when idle.
-  const waiting = (s: AgentSnap) => s.perms + s.questions;
-  if (waiting(next) > waiting(prev) || (prev.busy && !next.busy && waiting(next) > 0)) return 'approval';
-  if (prev.busy && !next.busy && next.activeId && !next.error && waiting(next) === 0) return 'done';
+  // Permission and question waits get their own sounds. Questions win ties:
+  // they block on reading either way, and a question usually explains the
+  // approval that rode in with it.
+  const pUp = next.perms > prev.perms;
+  const qUp = next.questions > prev.questions;
+  if (qUp) return 'question';
+  if (pUp) return 'approval';
+  if (prev.busy && !next.busy && next.questions > 0) return 'question';
+  if (prev.busy && !next.busy && next.perms > 0) return 'approval';
+  if (prev.busy && !next.busy && next.activeId && !next.error && next.perms + next.questions === 0) return 'done';
   return null;
 }
 
@@ -69,6 +78,8 @@ export function watchAgentNotifications(onEvent: (kind: NotifyKind) => void): ()
 // interaction, and if a play is still refused, replay it on the next gesture.
 let audioPrimed = false;
 let pendingReplay: { url: string; volume: number } | null = null;
+// Single voice (no overlaps): at most one notification sound at a time.
+let currentAudio: HTMLAudioElement | null = null;
 
 function primeAudio() {
   if (audioPrimed) return;
@@ -87,14 +98,36 @@ export function armAudioUnlock() {
 }
 
 async function playUrl(url: string, volume: number): Promise<boolean> {
+  // Single voice: a new notification cuts the previous one off instead of
+  // overlapping it (rapid done/error/approval bursts stay intelligible).
   try {
-    const a = new Audio(url);
-    a.volume = Math.max(0, Math.min(1, volume));
+    currentAudio?.pause();
+  } catch { /* already dead */ }
+  const a = new Audio(url);
+  currentAudio = a;
+  a.volume = Math.max(0, Math.min(1, volume));
+  const clear = () => {
+    if (currentAudio === a) currentAudio = null;
+  };
+  a.addEventListener('ended', clear);
+  try {
     await a.play();
     return true;
   } catch {
+    clear();
     if (!audioPrimed) pendingReplay = { url, volume };
     return false;
+  }
+}
+
+
+/** Smoke introspection: which URL the single voice last took (audibility
+ *  itself can't be asserted headless — switching can). */
+export function debugAudioState(): { src: string } {
+  try {
+    return { src: currentAudio?.src ?? '' };
+  } catch {
+    return { src: '' };
   }
 }
 
@@ -119,9 +152,10 @@ export interface CustomSoundEntry {
 
 /** Per-kind fallback when the pick is missing/invalid. */
 export const KIND_DEFAULT_SOUND: Record<NotifyKind, string> = {
-  done: 'success',
-  approval: 'chime',
-  error: 'alert',
+  done: 'complete',
+  approval: 'approval',
+  error: 'error',
+  question: 'question',
 };
 
 /** Resolve one kind's pick (builtin id or 'custom:<vaultId>') to a playable
@@ -129,10 +163,13 @@ export const KIND_DEFAULT_SOUND: Record<NotifyKind, string> = {
  *  a removed custom never silences notifications. Pure. */
 export function resolveKindSound(
   kind: NotifyKind,
-  picks: { done: string; approval: string; error: string },
+  picks: { done: string; approval: string; error: string; question: string },
   customs: CustomSoundEntry[],
 ): string | null {
-  const raw = kind === 'done' ? picks.done : kind === 'approval' ? picks.approval : picks.error;
+  const raw = kind === 'done' ? picks.done
+    : kind === 'approval' ? picks.approval
+    : kind === 'question' ? picks.question
+    : picks.error;
   const fallback = BUILTIN_SOUNDS.find((s) => s.id === KIND_DEFAULT_SOUND[kind]) ?? BUILTIN_SOUNDS[0];
   if (raw.startsWith('custom:')) {
     const hit = (customs ?? []).find((c) => c.id === raw.slice('custom:'.length));

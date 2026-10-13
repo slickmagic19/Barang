@@ -412,6 +412,7 @@ export function openSettings(hooks: SettingsHooks) {
   const notifEnabledBox = checkRow('Enable notifications');
   const notifDoneBox = checkRow('When a run finishes');
   const notifApprovalBox = checkRow('When approval is needed');
+  const notifQuestionBox = checkRow('When the agent asks a question');
   const notifErrorBox = checkRow('When a run errors');
   const notifNativeBox = checkRow('Windows toast when Barang is in the background');
   const notifTaskbarBox = checkRow('Taskbar badge + flashing when in the background');
@@ -429,6 +430,7 @@ export function openSettings(hooks: SettingsHooks) {
   };
   const doneSel = soundSelFor('Run finished sound', 'Sound when a run finishes');
   const approvalSel = soundSelFor('Approval sound', 'Sound when approval is needed');
+  const questionSel = soundSelFor('Question sound', 'Sound when the agent asks a question');
   const errorSel = soundSelFor('Error sound', 'Sound when a run errors');
   const fillSoundSel = (sel: HTMLSelectElement, current: string, customs: Array<{ id: string; name: string }>) => {
     sel.innerHTML = '';
@@ -457,8 +459,9 @@ export function openSettings(hooks: SettingsHooks) {
   const previewWrap = el('span', { class: 'settings-vol-wrap' });
   const btnPlayDone = el('button', { class: 'btn btn-sm', title: 'Preview the run-finished sound' }, 'Done') as HTMLButtonElement;
   const btnPlayApproval = el('button', { class: 'btn btn-sm', title: 'Preview the approval sound' }, 'Approval') as HTMLButtonElement;
+  const btnPlayQuestion = el('button', { class: 'btn btn-sm', title: 'Preview the question sound' }, 'Question') as HTMLButtonElement;
   const btnPlayError = el('button', { class: 'btn btn-sm', title: 'Preview the error sound' }, 'Error') as HTMLButtonElement;
-  previewWrap.append(btnPlayDone, btnPlayApproval, btnPlayError);
+  previewWrap.append(btnPlayDone, btnPlayApproval, btnPlayQuestion, btnPlayError);
   testRow.append(previewWrap);
   body.append(testRow);
   body.append(el('p', { class: 'settings-note' }, 'Built-in sounds are original synth tones shipped with Barang.'));
@@ -617,6 +620,7 @@ export function openSettings(hooks: SettingsHooks) {
     notifEnabledBox.checked = st0.notifEnabled;
     notifDoneBox.checked = st0.notifOnDone;
     notifApprovalBox.checked = st0.notifOnApproval;
+    notifQuestionBox.checked = st0.notifOnQuestion;
     notifErrorBox.checked = st0.notifOnError;
     notifNativeBox.checked = st0.notifNative;
     notifTaskbarBox.checked = st0.notifTaskbar;
@@ -624,6 +628,7 @@ export function openSettings(hooks: SettingsHooks) {
     notifSoundBox.checked = st0.notifSound;
     fillSoundSel(doneSel, st0.notifDoneSound, st0.notifCustomSounds);
     fillSoundSel(approvalSel, st0.notifApprovalSound, st0.notifCustomSounds);
+    fillSoundSel(questionSel, st0.notifQuestionSound, st0.notifCustomSounds);
     fillSoundSel(errorSel, st0.notifErrorSound, st0.notifCustomSounds);
     paintCustomSounds(st0.notifCustomSounds);
     volInput.value = String(st0.notifVolume);
@@ -693,6 +698,7 @@ export function openSettings(hooks: SettingsHooks) {
   notifEnabledBox.onchange = () => commit((s) => { s.notifEnabled = notifEnabledBox.checked; });
   notifDoneBox.onchange = () => commit((s) => { s.notifOnDone = notifDoneBox.checked; });
   notifApprovalBox.onchange = () => commit((s) => { s.notifOnApproval = notifApprovalBox.checked; });
+  notifQuestionBox.onchange = () => commit((s) => { s.notifOnQuestion = notifQuestionBox.checked; });
   notifErrorBox.onchange = () => commit((s) => { s.notifOnError = notifErrorBox.checked; });
   notifNativeBox.onchange = () => commit((s) => { s.notifNative = notifNativeBox.checked; });
   notifTaskbarBox.onchange = () => commit((s) => { s.notifTaskbar = notifTaskbarBox.checked; });
@@ -722,12 +728,13 @@ export function openSettings(hooks: SettingsHooks) {
   };
   doneSel.onchange = () => commit((s) => { s.notifDoneSound = doneSel.value; });
   approvalSel.onchange = () => commit((s) => { s.notifApprovalSound = approvalSel.value; });
+  questionSel.onchange = () => commit((s) => { s.notifQuestionSound = questionSel.value; });
   errorSel.onchange = () => commit((s) => { s.notifErrorSound = errorSel.value; });
-  const previewKind = (kind: 'done' | 'approval' | 'error') => {
+  const previewKind = (kind: 'done' | 'approval' | 'question' | 'error') => {
     const s = readSettings();
     const url = resolveKindSound(
       kind,
-      { done: s.notifDoneSound, approval: s.notifApprovalSound, error: s.notifErrorSound },
+      { done: s.notifDoneSound, approval: s.notifApprovalSound, question: s.notifQuestionSound, error: s.notifErrorSound },
       s.notifCustomSounds,
     );
     if (!url) {
@@ -740,6 +747,7 @@ export function openSettings(hooks: SettingsHooks) {
   };
   btnPlayDone.onclick = () => previewKind('done');
   btnPlayApproval.onclick = () => previewKind('approval');
+  btnPlayQuestion.onclick = () => previewKind('question');
   btnPlayError.onclick = () => previewKind('error');
   async function browseSound() {
     try {

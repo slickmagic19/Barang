@@ -7,9 +7,9 @@ import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readS
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
-pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings } from './lib/agent';
+pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop } from './lib/agent';
 import { sliceWindow, truncateText, parseUnifiedPatch, applyHunkSubset } from './lib/util';
-import { watchAgentNotifications, playNotificationSound, resolveKindSound, KIND_DEFAULT_SOUND, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
+import { watchAgentNotifications, playNotificationSound, resolveKindSound, KIND_DEFAULT_SOUND, debugAudioState, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
 import { fileIconEl } from './ui/fileIcons';
@@ -944,12 +944,18 @@ async function boot() {
   watchAgentNotifications((kind: NotifyKind) => {
     const s = readSettings();
     if (!s.notifEnabled) return;
+    // User-driven stops (manual Stop, question answers) are never
+    // completions — the abort arms a one-shot silence for its own edge.
+    if (kind === 'done' && consumeQuietStop()) return;
     if (kind === 'done' && !s.notifOnDone) return;
     if (kind === 'approval' && !s.notifOnApproval) return;
+    if (kind === 'question' && !s.notifOnQuestion) return;
     if (kind === 'error' && !s.notifOnError) return;
     const title = agentStore.get().error && kind === 'error'
       ? 'Barang — agent error'
-      : kind === 'approval' ? 'Barang — approval needed' : 'Barang — agent finished';
+      : kind === 'approval' ? 'Barang — approval needed'
+      : kind === 'question' ? 'Barang — question waiting'
+      : 'Barang — agent finished';
     const body = kind === 'error'
       ? (agentStore.get().error ?? 'The run failed.').slice(0, 200)
     : kind === 'approval'
@@ -959,11 +965,16 @@ async function boot() {
         if (agentStore.get().questions.length) bits.push(`${agentStore.get().questions.length} question(s)`);
         return `${bits.join(' + ') || 'Something'} waiting for your review.`;
       })()
+    : kind === 'question'
+      ? (() => {
+        const n = agentStore.get().questions.length;
+        return n ? `${n} question${n === 1 ? '' : 's'} waiting for your answer.` : 'The agent has a question for you.';
+      })()
         : (activeSessionTitle() ?? 'Your task is complete.');
     if (s.notifSound) {
       const url = resolveKindSound(
         kind,
-        { done: s.notifDoneSound, approval: s.notifApprovalSound, error: s.notifErrorSound },
+        { done: s.notifDoneSound, approval: s.notifApprovalSound, question: s.notifQuestionSound, error: s.notifErrorSound },
         s.notifCustomSounds,
       );
       void playNotificationSound(url, s.notifVolume / 100);
@@ -1026,6 +1037,9 @@ async function boot() {
     KIND_DEFAULT_SOUND,
     normalizeNotifSoundSettings,
     playNotificationSound,
+    quietNextStop,
+    consumeQuietStop,
+    debugAudioState,
     isTransportDown,
     findUserMessage,
     todoProgress,

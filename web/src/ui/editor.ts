@@ -634,6 +634,16 @@ export function focusedGroup(): EditorGroup {
   return s.split && s.focus === 2 ? 2 : 1;
 }
 
+/** Smoke introspection: raw model text by tab path (null when no model). */
+export function debugModelText(path: string): string | null {
+  return models.get(path)?.getValue() ?? null;
+}
+
+/** Smoke introspection: text of the model currently displayed in a group. */
+export function debugDisplayedText(group: EditorGroup): string | null {
+  return editorFor(group)?.getModel()?.getValue() ?? null;
+}
+
 function groupActive(s: { active: string | null; active2: string | null }, group: EditorGroup): string | null {
   return group === 2 ? s.active2 : s.active;
 }

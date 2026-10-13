@@ -1526,6 +1526,7 @@ export interface ChangeEntry {
   deletions: number;
   patch: string | null; // unified diff (edit tool) — null for whole-file writes
   kind: 'edit' | 'write';
+  msg: string; // id of the last message that touched the file (re-edits re-pend review)
 }
 
 export function deriveSessionChanges(messages: ChatMessage[], root: string): ChangeEntry[] {
@@ -1544,6 +1545,7 @@ export function deriveSessionChanges(messages: ChatMessage[], root: string): Cha
       const state = part.state as Record<string, unknown> | undefined;
       const meta = state?.metadata as Record<string, unknown> | undefined;
       const fd = meta?.filediff as Record<string, unknown> | undefined;
+      const msgId = String((m.info as Record<string, unknown> | undefined)?.id ?? '');
       if (fd && typeof fd.file === 'string' && fd.file) {
         const file = fd.file;
         const patch = typeof fd.patch === 'string' ? fd.patch : typeof meta?.diff === 'string' ? (meta.diff as string) : null;
@@ -1555,6 +1557,7 @@ export function deriveSessionChanges(messages: ChatMessage[], root: string): Cha
           deletions: Number(fd.deletions) || 0,
           patch,
           kind: 'edit',
+          msg: msgId,
         });
       } else if (tool === 'write') {
         const input = state?.input as Record<string, unknown> | undefined;
@@ -1563,6 +1566,7 @@ export function deriveSessionChanges(messages: ChatMessage[], root: string): Cha
           byFile.set(norm(fp), {
             file: fp, rel: relOf(fp), status: 'added',
             additions: 0, deletions: 0, patch: null, kind: 'write',
+            msg: msgId,
           });
         }
       }

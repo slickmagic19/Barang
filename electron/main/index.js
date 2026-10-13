@@ -1666,6 +1666,14 @@ async function runUiSmoke() {
       for (const f of need) if (!u || typeof u[f] !== 'function') return 'no-fn:' + f;
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       await new Promise((r) => setTimeout(r, 400));
+      // Hermetic: earlier probes leave tabs behind — close them so the
+      // snapshot/restore below deals only with this probe's tabs.
+      await Promise.race([u.closeAllTabs(), new Promise((r) => setTimeout(r, 3000))]);
+      if (document.querySelector('.tab')) {
+        document.querySelector('.confirm-modal .btn-danger')?.click();
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (document.querySelector('.tab')) return 'slate-dirty';
       try { await window.barang.fs.write('${sessA}', 'aaa'); } catch (e) { return 'write-fail'; }
       await u.openFile('${sessA}', { group: 1 });
       await u.dropPaths(['${sessFwd}'], 1);
@@ -1750,9 +1758,13 @@ async function runUiSmoke() {
         const lines = document.querySelector('.editor-host .monaco-editor .view-lines')?.textContent || '';
         if (!lines.includes('-sessdirty')) {
           const allTabs = [...document.querySelectorAll('.tab')].map((t) => t.getAttribute('data-path')).join(',');
+          const modelText = u.debugModelText ? u.debugModelText('${sessA}') : '(no-fn)';
+          const shownText = u.debugDisplayedText ? u.debugDisplayedText(1) : '(no-fn)';
           return 'restore-content:active=' + activeTab + ' snapActive=' + snap.active +
             ' dirtyKeys=' + Object.keys(snap.dirty || {}).join(',') +
             ' dirtyLen=' + String((snap.dirty || {})['${sessA}'] || '').length +
+            ' modelLen=' + (typeof modelText === 'string' ? modelText.length : modelText) +
+            ' shownLen=' + (typeof shownText === 'string' ? shownText.length : shownText) +
             ' tabs=' + allTabs + ' lines=' + lines.slice(0, 60);
         }
         const p2 = u.closeAllTabs();
@@ -1769,8 +1781,11 @@ async function runUiSmoke() {
   pass = pass && sessProbe === 'ok';
   // Review flow: a seeded session edit reviews per-hunk against real disk
   // (reject hunk 0, then hunk 1, then Keep), plus Reject-all w/ confirm.
+  // Per-run file/message ids: review state persists, so a re-seeded
+  // identical review would (correctly) come back pre-reviewed.
   let reviewProbe = 'skip';
-  const revFile = 'sess-review.txt';
+  const revFile = 'sess-review-' + Date.now().toString(36) + '.txt';
+  const revMsg = 'm_rev_' + Date.now().toString(36);
   try {
     reviewProbe = await w.webContents.executeJavaScript(`(async () => {
       const u = window.__barangTestUtils;
@@ -1782,7 +1797,7 @@ async function runUiSmoke() {
       const root = ((st && st.root) || '').replace(/[/\\\\]+$/, '');
       const abs = root + '/' + '${revFile}';
       const patch = '@@ -1,3 +1,3 @@\\n a\\n-b\\n+B\\n c\\n@@ -5,4 +5,4 @@\\n e\\n-f\\n+F\\n g\\n h';
-      u.debugSetMessages([{ info: { id: 'm_rev', role: 'assistant' }, parts: [
+      u.debugSetMessages([{ info: { id: '${revMsg}', role: 'assistant' }, parts: [
         { type: 'tool', tool: 'edit', state: { metadata: { filediff: { file: abs, additions: 2, deletions: 2, patch } } } },
       ] }]);
       await sleep(900);
@@ -1813,6 +1828,17 @@ async function runUiSmoke() {
       await sleep(500);
       const wrap = rowOf()?.closest('.change-row-wrap');
       if (!wrap || !wrap.classList.contains('is-reviewed')) return 'not-dimmed';
+      // Persistence: the reviewed fp must reach localStorage (reload must
+      // not re-ask), and loadReviewedState must read it back.
+      u.scheduleReviewedPersist();
+      await sleep(1500);
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem('barang.review.v1') || 'null'); } catch {}
+      const fp = u.changeFp({ kind: 'edit', additions: 2, deletions: 2, patch, status: 'modified', msg: '${revMsg}' });
+      const hit = saved && Object.entries(saved.reviewed || {}).find(([k]) => k.endsWith('|${revFile}'));
+      if (!hit || hit[1] !== fp) return 'persist-miss';
+      const loaded = u.loadReviewedState();
+      if (!loaded || loaded.reviewed < 1) return 'persist-load';
       return 'ok';
     })()`);
   } catch (e) { reviewProbe = 'error: ' + (e.message || e); }
@@ -2310,6 +2336,22 @@ async function runUiSmoke() {
           if (u.applyHunkSubset(before8, 'garbage', new Set()) !== null) bad.push('hunk-garbage');
           if (u.applyHunkSubset('zzz\\n', hp, new Set()) !== null) bad.push('hunk-drift');
           if (u.parseUnifiedPatch('not a patch') !== null) bad.push('hunk-parse-garbage');
+          // Re-edits re-pend review: same file, different messages → different fps.
+          if (typeof u.deriveSessionChanges !== 'function' || typeof u.changeFp !== 'function') {
+            bad.push('no-fp-fns');
+          } else {
+            const w1 = [{ info: { id: 'm1', role: 'assistant' }, parts: [{ type: 'tool', tool: 'write', state: { input: { filePath: '/r/f.txt' } } }] }];
+            const w2 = [{ info: { id: 'm2', role: 'assistant' }, parts: [{ type: 'tool', tool: 'write', state: { input: { filePath: '/r/f.txt' } } }] }];
+            const d1 = u.deriveSessionChanges(w1, '/r');
+            const d2 = u.deriveSessionChanges(w2, '/r');
+            if (d1.length !== 1 || d2.length !== 1) bad.push('fp-derive');
+            else {
+              if (u.changeFp(d1[0]) === u.changeFp(d2[0])) bad.push('fp-collide');
+              if (!u.changeFp(d1[0]).endsWith('|m1') || !u.changeFp(d2[0]).endsWith('|m2')) bad.push('fp-msg');
+              const d1b = u.deriveSessionChanges(w1, '/r');
+              if (u.changeFp(d1[0]) !== u.changeFp(d1b[0])) bad.push('fp-unstable');
+            }
+          }
         }
         // Follow-up queue: cap, order, stubbed drain, requeue-on-refusal.
         if (typeof u.enqueueFollowUp !== 'function' || typeof u.queuedFollowUps !== 'function' ||

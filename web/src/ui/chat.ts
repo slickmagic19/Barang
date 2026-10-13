@@ -396,21 +396,81 @@ const rejectedHunks = new Map<string, Set<number>>();
 const beforeCache = new Map<string, string>();
 const expandedRows = new Set<string>();
 
-/** Fingerprint of one derived change (new agent edits re-pend). Pure. */
+/** Fingerprint of one derived change (a re-edit — even a byte-identical
+ *  whole-file rewrite — lands in a new message, so it re-pends review).
+ *  Pure. */
 export function changeFp(d: ChangeEntry): string {
-  return `${d.kind}|${d.additions}|${d.deletions}|${(d.patch ?? '').length}|${d.status}`;
+  return `${d.kind}|${d.additions}|${d.deletions}|${(d.patch ?? '').length}|${d.status}|${d.msg ?? ''}`;
 }
 
 function revKey(sessionID: string, rel: string): string {
   return `${sessionID}|${rel}`;
 }
 
-function isReviewed(sessionID: string, d: ChangeEntry): boolean {
+export function isReviewed(sessionID: string, d: ChangeEntry): boolean {
   return reviewedFp.get(revKey(sessionID, d.rel)) === changeFp(d);
 }
 
-function markReviewed(sessionID: string, d: ChangeEntry) {
+export function markReviewed(sessionID: string, d: ChangeEntry) {
   reviewedFp.set(revKey(sessionID, d.rel), changeFp(d));
+  scheduleReviewedPersist();
+}
+
+// Review persistence (a reload must not resurrect Kept/Rejected files):
+// reviewed fingerprints + rejected hunk sets, debounced to localStorage,
+// hydrated once in initChat. beforeCache (whole-file contents) and the
+// expansion UI stay session-local — before reconstructs on demand.
+const REVIEW_LS_KEY = 'barang.review.v1';
+const REVIEW_MAX_KEYS = 300;
+const REJECT_MAX_KEYS = 100;
+
+function persistReviewedState() {
+  try {
+    const reviewed: Record<string, string> = {};
+    for (const [k, v] of reviewedFp) reviewed[k] = v;
+    const rejected: Record<string, number[]> = {};
+    for (const [k, v] of rejectedHunks) rejected[k] = [...v];
+    // Cap (drop oldest — insertion order).
+    const rks = Object.keys(reviewed);
+    for (const k of rks.slice(0, Math.max(0, rks.length - REVIEW_MAX_KEYS))) delete reviewed[k];
+    const jks = Object.keys(rejected);
+    for (const k of jks.slice(0, Math.max(0, jks.length - REJECT_MAX_KEYS))) delete rejected[k];
+    localStorage.setItem(REVIEW_LS_KEY, JSON.stringify({ v: 1, reviewed, rejected }));
+  } catch { /* storage full/blocked — best effort */ }
+}
+
+let reviewedTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Schedule a persist after review mutations. Exported for smoke. */
+export function scheduleReviewedPersist() {
+  if (reviewedTimer) return;
+  reviewedTimer = setTimeout(() => {
+    reviewedTimer = null;
+    persistReviewedState();
+  }, 1000);
+}
+
+/** Load persisted review state (initChat hydration). Exported for smoke. */
+export function loadReviewedState(): { reviewed: number; rejected: number } {
+  const out = { reviewed: 0, rejected: 0 };
+  try {
+    const raw = localStorage.getItem(REVIEW_LS_KEY);
+    if (!raw) return out;
+    const data = JSON.parse(raw) as { reviewed?: Record<string, string>; rejected?: Record<string, number[]> };
+    for (const [k, v] of Object.entries(data.reviewed ?? {})) {
+      if (typeof v === 'string' && reviewedFp.size < REVIEW_MAX_KEYS) {
+        reviewedFp.set(k, v);
+        out.reviewed++;
+      }
+    }
+    for (const [k, v] of Object.entries(data.rejected ?? {})) {
+      if (Array.isArray(v) && rejectedHunks.size < REJECT_MAX_KEYS) {
+        rejectedHunks.set(k, new Set(v.filter((n) => Number.isInteger(n) && (n as number) >= 0).slice(0, 50)));
+        out.rejected++;
+      }
+    }
+  } catch { /* corrupt — start fresh */ }
+  return out;
 }
 
 /** Current content of a change (detached-aware). Null when unreadable. */
@@ -584,6 +644,7 @@ async function rejectChangeHunk(sid: string, d: ChangeEntry, idx: number, hooks:
     return;
   }
   rejectedHunks.set(key, rej);
+  scheduleReviewedPersist();
   hooks.toast(`Hunk rejected in ${d.rel}.`, 'info');
 }
 
@@ -742,6 +803,10 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
 
 export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   panel.classList.add('agent-panel');
+  // Review state survives reloads (a reopened project must not re-ask
+  // already Kept/Rejected files).
+  loadReviewedState();
+  window.addEventListener('beforeunload', persistReviewedState);
 
   const sessSection = el('div', { class: 'agent-section sess-section' });
   const sessRow = el('div', { class: 'sess-row' });
@@ -1504,9 +1569,9 @@ function paintTodos() {
     if (changes.length > shown.length) {
       changesList.append(el('div', { class: 'scm-none' }, `…and ${changes.length - shown.length} more (open a diff from search, or commit in batches)`));
     }
-    // run finished with new changes → toast once
-    if (finished) {
-      hooks.toast(`Agent changed ${changes.length} file${changes.length > 1 ? 's' : ''} — see Changes.`, 'info');
+    // run finished with new (unreviewed) changes → toast once
+    if (finished && pending.length) {
+      hooks.toast(`Agent changed ${pending.length} file${pending.length > 1 ? 's' : ''} — see Changes.`, 'info');
     }
   }
 

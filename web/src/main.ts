@@ -7,7 +7,7 @@ import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readS
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
-pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue } from './lib/agent';
+pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges } from './lib/agent';
 import { sliceWindow, truncateText, parseUnifiedPatch, applyHunkSubset } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveSoundUrl, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -27,8 +27,8 @@ import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTa
 revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds,
 parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup,
 openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab,
-showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession } from './ui/editor';
-import { initChat, filePartView, stepHistory, pushComposerHist } from './ui/chat';
+showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText } from './ui/editor';
+import { initChat, filePartView, stepHistory, pushComposerHist, changeFp, isReviewed, markReviewed, loadReviewedState, scheduleReviewedPersist } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
 import { pomoNext, formatClock, normalizePomoSettings, POMO_DEFAULTS } from './lib/pomodoro';
@@ -1010,8 +1010,14 @@ async function boot() {
     removeQueuedFollowUp,
     clearQueuedFollowUps,
     drainQueue,
+    deriveSessionChanges,
     parseUnifiedPatch,
     applyHunkSubset,
+    changeFp,
+    isReviewed,
+    markReviewed,
+    loadReviewedState,
+    scheduleReviewedPersist,
     isTransportDown,
     findUserMessage,
     todoProgress,
@@ -1068,6 +1074,8 @@ async function boot() {
     closeAllTabs,
     flushTabSession,
     restoreTabSession,
+    debugModelText,
+    debugDisplayedText,
     debugSetMessages: (msgs: never[]) => agentStore.set({ messages: msgs }),
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).

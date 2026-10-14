@@ -2145,6 +2145,45 @@ async function runUiSmoke() {
   } catch (e) { agenticProbe = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] agentic-mode: ' + agenticProbe);
   pass = pass && agenticProbe === 'ok';
+  // Vibe polish: BARANG caps, seamless backdrop, compact send row, and a
+  // single error voice (inline only — no echo toast, no second box).
+  let vibePolish = 'skip';
+  try {
+    vibePolish = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.enterAgenticFlow !== 'function' || typeof u.debugSetError !== 'function') return 'no-fns';
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      if (u.isAgentic()) u.exitAgentic();
+      await u.enterAgenticFlow();
+      await sleep(800);
+      if (!u.isAgentic()) return 'not-entered';
+      const wm = document.querySelector('.agentic-wordmark')?.textContent || '';
+      if (wm !== 'BARANG') return 'wordmark:' + wm;
+      const bg = getComputedStyle(document.querySelector('.agent-wrap')).backgroundColor;
+      if (bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') return 'backdrop:' + bg;
+      const mw = getComputedStyle(document.querySelector('.composer .model-mini')).maxWidth;
+      if (mw !== '210px') return 'model-width:' + mw;
+      // One error voice: seed a message-level failure + store error.
+      u.debugSetMessages([{ info: { id: 'm_verr', role: 'assistant', error: { name: 'X', data: { message: 'probe-boom-verify', statusCode: 500 } } }, parts: [{ type: 'text', text: 'working' }] }]);
+      await sleep(300);
+      u.debugSetError('probe-boom-verify');
+      await sleep(1200);
+      const runErr = [...document.querySelectorAll('.msg-runerr')].some((n) => (n.textContent || '').includes('probe-boom'));
+      const errBox = document.querySelector('.chat-err');
+      const boxHidden = !errBox || errBox.classList.contains('hidden');
+      const echoToast = [...document.querySelectorAll('#toasts .toast')].some((n) => (n.textContent || '').includes('probe-boom'));
+      u.debugSetMessages([]);
+      u.debugSetError(null);
+      u.exitAgentic();
+      await sleep(400);
+      if (!runErr) return 'no-inline-error';
+      if (!boxHidden) return 'box-not-hidden';
+      if (echoToast) return 'echo-toast';
+      return 'ok';
+    })()`);
+  } catch (e) { vibePolish = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] vibe-polish: ' + vibePolish);
+  pass = pass && vibePolish === 'ok';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

@@ -920,7 +920,7 @@ async function boot() {
   const isAgentic = () => agentic;
 
   const agenticHero = el('div', { class: 'agentic-hero hidden' });
-  agenticHero.append(el('div', { class: 'agentic-wordmark' }, 'barang'));
+  agenticHero.append(el('div', { class: 'agentic-wordmark' }, 'BARANG'));
   agentPanel.prepend(agenticHero);
 
   const agenticMeta = el('div', { class: 'agentic-meta hidden' });
@@ -1187,7 +1187,8 @@ async function boot() {
     if (!focused && s.notifNative) {
       void barang().app.notify({ title, body, kind, badge: s.notifTaskbar }).catch(() => undefined);
     } else if (focused && s.notifToastFocused) {
-      toast(`${title.replace('Barang — ', '')}: ${body}`, kind === 'error' ? 'error' : 'info');
+      // Vibe: run errors already show inline — skip the echo toast.
+      if (!(agentic && kind === 'error')) toast(`${title.replace('Barang — ', '')}: ${body}`, kind === 'error' ? 'error' : 'info');
     }
   });
   // Smoke/introspection hook (read-only decision fn, like __barangTermBuffer).
@@ -1309,6 +1310,7 @@ async function boot() {
     isAgentic,
     openPathFlow,
     debugSetMessages: (msgs: never[]) => agentStore.set({ messages: msgs }),
+    debugSetError: (msg: string | null) => agentStore.set({ error: msg }),
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

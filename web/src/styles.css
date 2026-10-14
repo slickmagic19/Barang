@@ -540,7 +540,7 @@ body.agentic #term-panel { display: none; }
 body.agentic .main { justify-content: center; }
 body.agentic .agent-wrap {
   flex: 0 1 860px; width: 100%; max-width: 860px; height: 100%;
-  border-left: none;
+  border-left: none; background: transparent;
 }
 body.agentic .agent-wrap.agentic-empty { justify-content: center; }
 .agentic-hero { display: none; flex-direction: column; align-items: center; padding: 12px 24px 30px; }
@@ -559,7 +559,7 @@ body.agentic .composer-box {
   box-shadow: 0 8px 30px rgba(0, 0, 0, .45);
 }
 body.agentic .composer-input { font-size: 13.5px; padding: 10px 10px 4px 0; }
-.agentic-meta { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 12px 18px; color: var(--text-dim); font-size: 12px; }
+.agentic-meta { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 12px 14px; color: var(--text-dim); font-size: 12px; }
 .agentic-meta.hidden { display: none; }
 .agentic-meta .sep { color: var(--text-faint); }
 .agentic-folder {
@@ -569,6 +569,15 @@ body.agentic .composer-input { font-size: 13.5px; padding: 10px 10px 4px 0; }
 }
 .agentic-folder:hover { background: #ffffff0c; color: var(--text); border-color: var(--border-strong, var(--border)); }
 .agentic-folder span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Vibe-only refinements: subtler errors, compact send row. */
+body.agentic .chat-err,
+body.agentic .msg-runerr {
+  background: transparent; border-color: #f7768e33; border-radius: 8px; padding: 8px 10px;
+}
+body.agentic .send-row { gap: 8px; margin-top: 6px; }
+body.agentic .model-mini { flex: 0 1 210px; max-width: 210px; }
+body.agentic .effort-mini { flex: 0 0 auto; }
+body.agentic .send-row .btn-primary { margin-left: auto; }
 .agentic-branch { display: flex; align-items: center; gap: 5px; color: var(--text-faint); }
 .agentic-branch.hidden { display: none; }
 .agent-section { padding: 12px 12px 0; }

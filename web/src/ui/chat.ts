@@ -1946,9 +1946,14 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
         : statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
     }
     if (s.error) {
+      const errText: string = s.error;
       errBox.innerHTML = '';
-      errBox.append(iconEl('alert', 14), el('span', {}, s.error));
-      errBox.classList.remove('hidden');
+      errBox.append(iconEl('alert', 14), el('span', {}, errText));
+      // Vibe: the transcript already shows this failure inline — a second
+      // shouty box is pure duplication (Cursor shows it once).
+      const dup = document.body.classList.contains('agentic') &&
+        [...list.querySelectorAll('.msg-runerr')].some((n) => (n.textContent || '').includes(errText));
+      errBox.classList.toggle('hidden', dup);
     } else errBox.classList.add('hidden');
     paintQueue(s.activeId, s.busy);
     paintSendBtn();

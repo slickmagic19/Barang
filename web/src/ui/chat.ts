@@ -1492,27 +1492,73 @@ function kickWriteStats(sid: string, rels: string[]) {
   void (async () => {
     try {
       const res = await barang().git('write-status', { paths: missing });
-      const files = ((res as { files?: Record<string, unknown> } | null)?.files ?? {}) as Record<string, unknown>;
-      for (const r of missing) {
-        const v = files[r];
-        let ws: WriteStat = 'unknown';
-        if (v === 'new' || v === 'same' || v === 'modified' || v === 'unknown') ws = v;
-        else if (v && typeof (v as { additions?: unknown }).additions === 'number') {
-          ws = { a: (v as { additions: number }).additions, d: Number((v as { deletions?: unknown }).deletions) || 0 };
+      if (res?.isRepo) {
+        const files = ((res as { files?: Record<string, unknown> } | null)?.files ?? {}) as Record<string, unknown>;
+        for (const r of missing) {
+          const v = files[r];
+          let ws: WriteStat = 'unknown';
+          if (v === 'new' || v === 'same' || v === 'modified' || v === 'unknown') ws = v;
+          else if (v && typeof (v as { additions?: unknown }).additions === 'number') {
+            ws = { a: (v as { additions: number }).additions, d: Number((v as { deletions?: unknown }).deletions) || 0 };
+          }
+          cacheWriteStat(sid, r, ws);
         }
-        writeStatCache.set(`${sid}|${r}`, ws);
-        if (writeStatCache.size > 300) {
-          const first = writeStatCache.keys().next().value;
-          if (first !== undefined) writeStatCache.delete(first);
-        }
+      } else {
+        // No git here: "existed at project open" decides new vs modified.
+        await fillFromSnapshot(sid, missing);
       }
     } catch {
-      for (const r of missing) writeStatCache.set(`${sid}|${r}`, 'unknown');
+      try {
+        await fillFromSnapshot(sid, missing);
+      } catch {
+        for (const r of missing) cacheWriteStat(sid, r, 'unknown');
+      }
     } finally {
       for (const r of missing) writeStatFlight.delete(`${sid}|${r}`);
       paintChanges();
     }
   })();
+}
+
+function cacheWriteStat(sid: string, rel: string, ws: WriteStat) {
+  writeStatCache.set(`${sid}|${rel}`, ws);
+  if (writeStatCache.size > 300) {
+    const first = writeStatCache.keys().next().value;
+    if (first !== undefined) writeStatCache.delete(first);
+  }
+}
+
+// "Existed at project open" snapshot (git-less new-vs-modified). Root-keyed,
+// complete-list only (a truncated walk answers nothing honestly).
+let projectSnap: { root: string; files: Set<string> } | null = null;
+let projectSnapFlight: Promise<Set<string> | null> | null = null;
+
+function ensureProjectSnapshot(): Promise<Set<string> | null> {
+  const root = agentStore.get().root || '';
+  if (!root) return Promise.resolve(null);
+  if (projectSnap && projectSnap.root === root) return Promise.resolve(projectSnap.files);
+  if (!projectSnapFlight) {
+    projectSnapFlight = (async () => {
+      try {
+        const r = await fsApi.listFiles();
+        if (!r || r.truncated || !Array.isArray(r.files)) return null;
+        projectSnap = { root, files: new Set(r.files) };
+        return projectSnap.files;
+      } catch {
+        return null;
+      } finally {
+        projectSnapFlight = null;
+      }
+    })();
+  }
+  return projectSnapFlight;
+}
+
+async function fillFromSnapshot(sid: string, rels: string[]) {
+  const snap = await ensureProjectSnapshot();
+  for (const r of rels) {
+    cacheWriteStat(sid, r, !snap ? 'unknown' : snap.has(r) ? 'modified' : 'new');
+  }
 }
 
 /** Display status for a write-kind row (resolved or legacy). */

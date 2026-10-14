@@ -46,6 +46,40 @@ export async function tree(root, { path: rel = '.', depth = 1, all = false } = {
   return { path: rel, children: await listDir(abs, root, Math.min(depth, 3), all) };
 }
 
+/** Flat recursive file list for "existed at project open" snapshots
+ *  (git-less new-vs-modified). Skips deps/build dirs, caps count. */
+export async function listFiles(root, maxFiles = 20000) {
+  if (!root) throw new Error('No folder open');
+  const out = [];
+  const stack = [''];
+  let truncated = false;
+  while (stack.length) {
+    const cur = stack.pop();
+    const abs = path.join(root, cur);
+    let dirents;
+    try {
+      dirents = await fs.readdir(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of dirents) {
+      if (d.isDirectory() && SKIP_DIRS.has(d.name)) continue;
+      const child = cur ? `${cur}/${d.name}` : d.name;
+      if (d.isDirectory()) {
+        stack.push(child);
+      } else {
+        out.push(child);
+        if (out.length >= maxFiles) {
+          truncated = true;
+          stack.length = 0;
+          break;
+        }
+      }
+    }
+  }
+  return { files: out, truncated };
+}
+
 export async function readFile(root, rel) {
   if (!rel) throw new Error('Missing path');
   const abs = resolveIn(root, rel);

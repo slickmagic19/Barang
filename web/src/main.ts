@@ -1125,6 +1125,7 @@ async function boot() {
     restoreTabSession,
     debugModelText,
     debugDisplayedText,
+    openPathFlow,
     debugSetMessages: (msgs: never[]) => agentStore.set({ messages: msgs }),
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).

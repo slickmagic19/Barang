@@ -15,6 +15,7 @@ async function invoke(channel, payload) {
 const barang = {
   fs: {
     tree: (path = '.', depth = 1, all = false) => invoke('fs:tree', { path, depth, all }),
+    listFiles: () => invoke('fs:list-files'),
     read: (path) => invoke('fs:read', { path }),
     write: (path, content) => invoke('fs:write', { path, content }),
     mkdir: (path) => invoke('fs:mkdir', { path }),

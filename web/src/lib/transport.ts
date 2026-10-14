@@ -3,6 +3,7 @@
 // throws, the UI was opened outside Electron (e.g. a plain browser tab).
 export interface FsBridge {
   tree(path?: string, depth?: number, all?: boolean): Promise<{ path: string; children: import('./api').FsEntry[] }>;
+  listFiles(): Promise<{ files: string[]; truncated: boolean }>;
   read(path: string): Promise<{ path: string; content?: string; binary?: boolean; size: number; mtime?: number }>;
   write(path: string, content: string): Promise<{ ok: boolean; size: number; mtime: number }>;
   mkdir(path: string): Promise<{ ok: boolean; path: string }>;

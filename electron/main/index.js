@@ -496,6 +496,7 @@ function registerIpc() {
   };
 
   ipcMain.handle('fs:tree', ok(needRoot((p) => files.tree(root, p))));
+  ipcMain.handle('fs:list-files', ok(needRoot(() => files.listFiles(root))));
   ipcMain.handle('fs:stat-paths', ok(async (p = {}) => {
     // Absolute-path stats for OS drag-drop (may live outside the project).
     const out = [];
@@ -2014,6 +2015,55 @@ async function runUiSmoke() {
   } catch {}
   console.log('[smoke-ui] write-status: ' + writeStatProbe);
   pass = pass && writeStatProbe === 'ok';
+  // Git-less projects: existed-at-open decides new vs modified (switch to
+  // a throwaway non-repo root and back — the hot-switch precedent).
+  let nogitProbe = 'skip';
+  const nogitDir = 'C:\\tmp\\nogit-proj';
+  // Backslashes, template-escaped: resolveIn compares raw strings, so the
+  // restored root must use native separators (forward slashes poison it).
+  const backRoot = (process.env.BARANG_ROOT || 'C:\\Users\\Achi\\Desktop\\Barang').replace(/\\/g, '\\\\');
+  try {
+    await fs.rm(nogitDir, { recursive: true, force: true });
+    await fs.mkdir(nogitDir, { recursive: true });
+    await fs.writeFile(path.join(nogitDir, 'note.txt'), 'hi\\n');
+    nogitProbe = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.openPathFlow !== 'function' || typeof u.debugSetMessages !== 'function') return 'no-fns';
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const ND = 'C:\\\\tmp\\\\nogit-proj';
+      await u.openPathFlow(ND);
+      await sleep(5000);
+      const st = await window.barang.app.state().catch(() => null);
+      if (!st || st.root !== ND) return 'no-switch:' + (st && st.root);
+      const mkWrite = (rel) => ({ type: 'tool', tool: 'write', state: { input: { filePath: ND + '/' + rel } } });
+      // Phase 1: only the pre-existing file — snapshot lands without fresh2.
+      u.debugSetMessages([{ info: { id: 'm_ng1', role: 'assistant' }, parts: [mkWrite('note.txt')] }]);
+      await sleep(2500);
+      // Phase 2: fresh2 created AFTER the snapshot — must read "new".
+      try { await window.barang.fs.write('fresh2.txt', 'new here\\n'); } catch (e) { return 'write-fail'; }
+      u.debugSetMessages([{ info: { id: 'm_ng2', role: 'assistant' }, parts: [mkWrite('note.txt'), mkWrite('fresh2.txt')] }]);
+      await sleep(2500);
+      const rowOf = (rel) => [...document.querySelectorAll('.change-row')]
+        .find((r) => (r.querySelector('.change-path')?.textContent || '') === rel);
+      const rowOld = rowOf('note.txt');
+      const rowNew = rowOf('fresh2.txt');
+      let out = 'pending-check';
+      if (!rowOld || !rowNew) out = 'no-rows';
+      else {
+        const sOld = rowOld.querySelector('.change-stat')?.textContent || '';
+        const sNew = rowNew.querySelector('.change-stat')?.textContent || '';
+        if (sNew.includes('new') && !sNew.includes('+') && sOld.includes('modified')) out = 'ok';
+        else out = 'badges:new=' + sNew + ' old=' + sOld;
+      }
+      await u.openPathFlow('${backRoot}');
+      await sleep(5000);
+      u.debugSetMessages([]);
+      return out;
+    })()`);
+  } catch (e) { nogitProbe = 'error: ' + (e.message || e); }
+  try { await fs.rm(nogitDir, { recursive: true, force: true }); } catch {}
+  console.log('[smoke-ui] nogit-status: ' + nogitProbe);
+  pass = pass && nogitProbe === 'ok';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

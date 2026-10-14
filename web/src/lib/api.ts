@@ -11,6 +11,7 @@ export interface FsEntry {
 
 export const fsApi = {
   tree: (path = '.', depth = 1, all = false) => barang().fs.tree(path, depth, all),
+  listFiles: () => barang().fs.listFiles(),
   read: (path: string) => barang().fs.read(path),
   write: (path: string, content: string) => barang().fs.write(path, content),
   mkdir: (path: string) => barang().fs.mkdir(path),

@@ -1800,6 +1800,14 @@ async function runUiSmoke() {
       await clickEd();
       if (!(await focusOk())) await clickEd();
       if (!(await focusOk())) {
+        // Last resort: direct textarea focus works even when the OS keeps
+        // another window foregrounded (synthetic clicks need foreground).
+        await w.webContents.executeJavaScript(
+          `(() => { document.querySelector('.monaco-editor textarea.inputarea')?.focus(); return true; })()`,
+        ).catch(() => false);
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      if (!(await focusOk())) {
         sessProbe = 'focus-fail';
       } else {
         // A slipped focus can strand a partial marker (char 1 landed, rest
@@ -2084,6 +2092,18 @@ async function runUiSmoke() {
         u.exitAgentic();
         await sleep(500);
       }
+      // Hermetic transcript: the shared smoke session accumulates real
+      // server-side messages across runs (which correctly hides the
+      // empty-state hero) — so this probe works on a fresh empty session
+      // and restores the original afterwards.
+      if (typeof u.activeSessionId !== 'function' || typeof u.createSession !== 'function' ||
+          typeof u.selectSession !== 'function') return 'no-session-fns';
+      const origId = u.activeSessionId();
+      let probeId = '';
+      try {
+        probeId = await u.createSession('agentic smoke');
+      } catch (e) { return 'mk-session-fail'; }
+      if (!probeId || typeof u.debugSetMessages !== 'function') return 'no-probe-session';
       const welcomeBtn = [...document.querySelectorAll('.welcome-actions button')]
         .find((b) => (b.textContent || '').includes('Vibe'));
       if (!welcomeBtn) return 'no-welcome-btn';
@@ -2102,7 +2122,9 @@ async function runUiSmoke() {
       if (!input) return 'no-composer';
       if (!String(input.placeholder || '').includes('/ for commands')) return 'placeholder:' + input.placeholder;
       const hero = document.querySelector('.agentic-hero');
-      if (!hero || hero.classList.contains('hidden')) return 'no-hero';
+      if (!hero || hero.classList.contains('hidden')) {
+        return 'no-hero:msgs=' + document.querySelectorAll('.msg').length;
+      }
       const meta = document.querySelector('.agentic-meta');
       if (!meta || meta.classList.contains('hidden')) return 'no-meta';
       const branch = document.querySelector('.agentic-branch');
@@ -2129,7 +2151,6 @@ async function runUiSmoke() {
       if (u.isAgentic()) return 'no-exit-on-open';
       if (document.body.classList.contains('agentic')) return 'body-stuck';
       if (disp('.sidebar') === 'none') return 'sidebar-stuck';
-      if (localStorage.getItem('barang:agentic') !== null) return 'flag-stuck';
       const vibeBack = [...document.querySelectorAll('.topbar .top-btn')]
         .find((b) => (b.textContent || '').includes('Vibe'));
       if (!vibeBack || vibeBack.classList.contains('hidden')) return 'no-vibe-back-btn';
@@ -2140,6 +2161,14 @@ async function runUiSmoke() {
         if (tail !== 'Default') return 'default-folder:' + rp.slice(-60);
       } catch (e) { return 'default-folder-err:' + (e.message || e); }
       if (typeof u.closeTab === 'function') await u.closeTab('package.json', 1);
+      // Restore the original session and delete the probe one.
+      try {
+        if (probeId) await window.barang.oc('/session/' + probeId, { method: 'DELETE' });
+      } catch {}
+      try {
+        if (origId) await u.selectSession(origId);
+      } catch {}
+      await sleep(600);
       return 'ok';
     })()`);
   } catch (e) { agenticProbe = 'error: ' + (e.message || e); }

@@ -3,7 +3,7 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
+import { connectEvents, agentStore, createSession, selectSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
@@ -915,9 +915,8 @@ async function boot() {
   // centered column with a wordmark empty state + folder/branch row.
   // Any file-open intent exits back to the IDE (editor hook below).
   let agentic = false;
-  const AGENTIC_LS = 'barang:agentic';
-  let composerPlaceholder = '';
   const isAgentic = () => agentic;
+  let composerPlaceholder = '';
 
   const agenticHero = el('div', { class: 'agentic-hero hidden' });
   agenticHero.append(el('div', { class: 'agentic-wordmark' }, 'BARANG'));
@@ -952,9 +951,6 @@ async function boot() {
   function enterAgentic() {
     if (!agentStore.get().root) return;
     agentic = true;
-    try {
-      localStorage.setItem(AGENTIC_LS, '1');
-    } catch { /* ignore */ }
     agentPanel.classList.remove('collapsed');
     paintModeButtons();
     document.body.classList.add('agentic');
@@ -967,9 +963,6 @@ async function boot() {
   function exitAgentic() {
     if (!agentic) return;
     agentic = false;
-    try {
-      localStorage.removeItem(AGENTIC_LS);
-    } catch { /* ignore */ }
     document.body.classList.remove('agentic');
     agentPanel.classList.remove('agentic-empty');
     agenticHero.classList.add('hidden');
@@ -1121,27 +1114,6 @@ async function boot() {
   // Tab session: reopen this project's working set (incl. detached tabs).
   void restoreTabSession().catch(() => {});
   paintModeButtons();
-  // Agentic mode persists across restarts (with a folder: last state wins).
-  // Agentic mode persists across restarts (with a folder: last state wins).
-  void (async () => {
-    try {
-      if (localStorage.getItem(AGENTIC_LS) !== '1') return;
-      if (agentStore.get().root) {
-        enterAgentic();
-        return;
-      }
-      try {
-        const res = await barang().app.defaultFolder();
-        if (res?.root) await openPathFlow(res.root);
-      } catch { /* welcome as usual */ }
-      if (agentStore.get().root) enterAgentic();
-      else {
-        try {
-          localStorage.removeItem(AGENTIC_LS);
-        } catch { /* ignore */ }
-      }
-    } catch { /* welcome as usual */ }
-  })();
   // Agent notifications: Windows toast + taskbar badge + sound when a run
   // finishes, needs approval, or errors. Renderer decides, main toasts.
   armAudioUnlock();
@@ -1311,6 +1283,9 @@ async function boot() {
     openPathFlow,
     debugSetMessages: (msgs: never[]) => agentStore.set({ messages: msgs }),
     debugSetError: (msg: string | null) => agentStore.set({ error: msg }),
+    activeSessionId: () => agentStore.get().activeId,
+    createSession,
+    selectSession,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));

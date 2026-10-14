@@ -105,7 +105,7 @@ const barang = {
     checkUpdates: () => invoke('app:check-updates'),
     /** Download the pending update (long invoke) + spawn-into-it. */
     downloadUpdate: () => invoke('app:download-update'),
-    applyUpdate: (path) => invoke('app:apply-update', { path }),
+    applyUpdate: (path, replace) => invoke('app:apply-update', { path, replace }),
     /** Download progress { received, total, path }. Returns unsubscribe. */
     onUpdateProgress: (cb) => {
       const h = (_ev, payload) => cb(payload ?? {});

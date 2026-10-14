@@ -161,10 +161,11 @@ async function boot() {
   // Self-updater: the button exists only while a newer release is known.
   // Click downloads the portable and restarts into it (dev builds open the
   // release page instead — nothing to restart into). Silent when offline.
-  type UpdateState = { update: boolean; current: string; version?: string; url?: string; packaged?: boolean; error?: string };
+  type UpdateState = { update: boolean; current: string; version?: string; url?: string; packaged?: boolean; error?: string; replaceTarget?: string | null };
   let updateInfo: UpdateState | null = null;
   let updatePhase: 'idle' | 'downloading' | 'ready' | 'error' = 'idle';
   let updatePath = '';
+  let updateReplace = true; // replace my original exe (when discoverable)
   let updateProgress = { received: 0, total: 0 };
   let updateError = '';
   const updatePop = el('div', { class: 'update-pop hidden' });
@@ -196,6 +197,19 @@ async function boot() {
       const go = el('button', { class: 'btn btn-primary btn-sm' }, `Restart into ${updateInfo?.version ?? ''}`) as HTMLButtonElement;
       go.onclick = () => void applyUpdateFlow();
       updatePop.append(go);
+      // Replace-my-original: copy the download over the launched exe once
+      // it quits (otherwise the old file keeps asking for updates forever).
+      if (updateInfo?.replaceTarget) {
+        const row = el('label', { class: 'update-replace' });
+        const box = el('input', { type: 'checkbox' }) as HTMLInputElement;
+        box.checked = updateReplace;
+        box.onchange = () => {
+          updateReplace = box.checked;
+        };
+        const name = updateInfo.replaceTarget.split(/[\\/]/).pop() ?? updateInfo.replaceTarget;
+        row.append(box, el('span', { title: updateInfo.replaceTarget }, `Replace ${name}`));
+        updatePop.append(row);
+      }
     } else if (updatePhase === 'error') {
       updatePop.append(el('p', { class: 'update-pop-text' }, `Download failed: ${updateError}`));
       const retry = el('button', { class: 'btn btn-sm' }, 'Try again') as HTMLButtonElement;
@@ -228,6 +242,15 @@ async function boot() {
     openUpdatePop();
   };
   barang().app.onUpdateProgress((ev) => {
+    if (ev.replaced) {
+      toast(`Updated in place: ${ev.replaced}`, 'info');
+      void refreshUpdateBadge(true);
+      return;
+    }
+    if (ev.replaceError) {
+      toast(`Original file kept (replace failed: ${ev.replaceError}). The new version is running from the download.`, 'error');
+      return;
+    }
     updateProgress = { received: ev.received ?? 0, total: ev.total ?? 0 };
     if (updatePhase === 'downloading' && !updatePop.classList.contains('hidden')) openUpdatePop();
     btnUpdate.title = updateProgress.total > 0
@@ -236,17 +259,19 @@ async function boot() {
   });
   const applyUpdateFlow = async () => {
     const dirty = editorStore.get().tabs.filter((t) => t.dirty).length;
+    const replacing = updateReplace && updateInfo?.replaceTarget ? updateInfo.replaceTarget : '';
     const ok = await confirmDialog({
       title: `Restart into ${updateInfo?.version ?? 'the update'}?`,
       message: dirty > 0
         ? `You have ${dirty} unsaved file${dirty > 1 ? 's' : ''} — they will be lost. Save first, or continue anyway.`
-        : `Barang will close and reopen as ${updateInfo?.version ?? 'the new version'}.`,
+        : `Barang will close and reopen as ${updateInfo?.version ?? 'the new version'}.`
+        + (replacing ? `\n\nYour current file will be replaced:\n${replacing}` : ''),
       confirmLabel: 'Restart & update',
       danger: dirty > 0,
     });
     if (!ok) return;
     try {
-      const res = await barang().app.applyUpdate(updatePath);
+      const res = await barang().app.applyUpdate(updatePath, replacing);
       if (!res.ok) throw new Error('restart rejected');
     } catch (e) {
       toast(`Update failed: ${(e as Error).message}`, 'error');

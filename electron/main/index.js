@@ -10,6 +10,7 @@ import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as files from './files.js';
+import * as updater from './updater.js';
 import { ensureServer, restartServer, stopServer, ocCall, opencodeState, attachPumpHandlers } from './opencodeClient.js';
 import * as term from './terminal.js';
 import * as scm from './git.js';
@@ -337,6 +338,22 @@ function cmpVersions(a, b) {
   return 0;
 }
 
+/** The user's own portable exe, when discoverable (the running process is
+ *  a temp-extracted copy, so process.execPath is useless — electron-builder
+ *  exposes the original via PORTABLE_EXECUTABLE_FILE). Null in dev. */
+function originalExePath() {
+  const cands = [process.env.PORTABLE_EXECUTABLE_FILE, app.isPackaged ? process.execPath : ''];
+  for (const c of cands) {
+    if (!c) continue;
+    try {
+      if (updater.REPLACE_BASENAME.test(path.basename(c)) && existsSync(c)) return c;
+    } catch {
+      /* skip */
+    }
+  }
+  return null;
+}
+
 /** Check slickmagic19/Barang releases for a newer tag. Never throws fatally
  *  (offline/blocked networks just report no update). */
 async function checkForUpdates() {
@@ -358,6 +375,12 @@ async function checkForUpdates() {
     info.update = !!latest && cmpVersions(latest, info.current) > 0;
   } catch (e) {
     info.error = e?.message || String(e);
+  }
+  // Replace-my-file target (null when undiscoverable, e.g. dev).
+  try {
+    info.replaceTarget = info.update ? originalExePath() : null;
+  } catch {
+    info.replaceTarget = null;
   }
   updateCache = { at: now, info };
   return info;
@@ -404,6 +427,31 @@ async function downloadUpdate() {
     return await updateDownload;
   } finally {
     updateDownload = null;
+  }
+}
+
+/** Complete a replace-my-original pending from the previous version's
+ *  apply-update: copy the download over the user's exe (polling until the
+ *  old process releases it), report via the update-progress channel, and
+ *  always consume the marker. Never throws. */
+async function handlePendingReplace() {
+  const tempDir = app.getPath('temp');
+  const marker = await updater.readReplaceMarker(tempDir);
+  if (!marker) return;
+  bootLog('replace-pending', `${marker.source} -> ${marker.target}`);
+  const done = async () => updater.clearReplaceMarker(tempDir);
+  try {
+    const r = await updater.replaceOriginalExe({ source: marker.source, target: marker.target });
+    bootLog('replace-done', `${r.bytes} bytes -> ${marker.target}`);
+    await done();
+    // Temp download served its purpose — remove it (best effort).
+    await fs.unlink(marker.source).catch(() => {});
+    win?.webContents.send('app:update-progress', { received: 1, total: 1, replaced: marker.target });
+  } catch (e) {
+    const msg = e?.message || String(e);
+    bootLog('replace-error', msg);
+    await done();
+    win?.webContents.send('app:update-progress', { received: 0, total: 0, replaceError: msg });
   }
 }
 
@@ -706,10 +754,27 @@ function registerIpc() {
     if (!/Barang-.*-win\.exe$/i.test(path.basename(target))) return { ok: false, error: 'not a Barang update file' };
     const st = await fs.stat(target).catch(() => null);
     if (!st || !st.size) return { ok: false, error: 'download missing — fetch it again' };
+    // Optional "replace my original file": the new app copies the download
+    // over the user's exe once this process lets go (marker file carries
+    // the intent — argv doesn't reliably survive the portable wrapper).
+    const tempDir = app.getPath('temp');
+    const wantReplace = String(p.replace || '');
+    if (wantReplace) {
+      try {
+        updater.validateReplaceArgs(target, wantReplace);
+        await updater.writeReplaceMarker(tempDir, target, wantReplace);
+      } catch (e) {
+        await updater.clearReplaceMarker(tempDir);
+        return { ok: false, error: e?.message || String(e) };
+      }
+    } else {
+      await updater.clearReplaceMarker(tempDir);
+    }
     try {
       const child = spawn(target, [], { detached: true, stdio: 'ignore', windowsHide: true });
       child.unref?.();
     } catch (e) {
+      await updater.clearReplaceMarker(tempDir);
       return { ok: false, error: e?.message || String(e) };
     }
     setTimeout(() => app.quit(), 800);
@@ -3065,6 +3130,9 @@ async function runUiSmoke() {
       }
       const shown = !btn.classList.contains('hidden');
       if (shown !== !!info.update) return 'mismatch:update=' + info.update;
+      // Replace-my-original target: discoverable in packaged builds, null in dev.
+      if (!('replaceTarget' in info)) return 'no-replace-field';
+      if (info.replaceTarget !== null) return 'replace-nonnull-dev:' + info.replaceTarget;
       const eff = document.querySelector('.composer .effort-mini');
       if (!eff) return 'no-effort';
       if (eff.querySelectorAll('option').length < 1) return 'effort-no-opts';
@@ -3716,6 +3784,11 @@ if (!gotLock && !SMOKE && !SMOKE_UI) {
     applyNoMenu();
     createWindow();
     bootLog('window-open');
+    // Pending self-update replace (written by the previous version's
+    // apply-update): copy the download over the user's original exe once
+    // it lets go, then report back over the progress channel. Fire and
+    // forget — boot must never wait on it.
+    void handlePendingReplace().catch((e) => bootLog('replace-failed', e?.message || String(e)));
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });

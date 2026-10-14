@@ -27,7 +27,7 @@ import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTa
 revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds,
 parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup,
 openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab,
-showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText } from './ui/editor';
+showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText, setFileOpenedHandler } from './ui/editor';
 import { initChat, filePartView, stepHistory, pushComposerHist, changeFp, isReviewed, markReviewed, loadReviewedState, scheduleReviewedPersist, openLightbox, closeLightbox } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
@@ -152,11 +152,14 @@ async function boot() {
   btnPalette.append(iconEl('prompt', 14), el('span', {}, 'Palette'));
   const btnAgent = el('button', { class: 'top-btn', title: 'Toggle agent panel (Ctrl+J)' }) as HTMLButtonElement;
   btnAgent.append(iconEl('spark', 14), el('span', {}, 'Agent'));
+  const btnIDE = el('button', { class: 'top-btn hidden', title: 'Back to editor (IDE)' }) as HTMLButtonElement;
+  btnIDE.append(iconEl('file', 14), el('span', {}, 'IDE'));
+  btnIDE.onclick = () => exitAgentic();
   const btnSettings = el('button', { class: 'top-btn settings-btn', title: 'Settings' }) as HTMLButtonElement;
   btnSettings.append(iconEl('gear', 15));
   const btnUpdate = el('button', { class: 'top-btn update-btn hidden', title: 'Check for updates' }) as HTMLButtonElement;
   btnUpdate.append(iconEl('download', 14));
-  topActions.append(openSplit, btnPalette, btnAgent, btnSettings, btnUpdate);
+  topActions.append(openSplit, btnPalette, btnAgent, btnIDE, btnSettings, btnUpdate);
 
   // Self-updater: the button exists only while a newer release is known.
   // Click downloads the portable and restarts into it (dev builds open the
@@ -480,7 +483,11 @@ async function boot() {
   const btnWelcomeOpen = el('button', { class: 'btn btn-primary' }, 'Open folder') as HTMLButtonElement;
   btnWelcomeOpen.prepend(iconEl('folder', 14));
   btnWelcomeOpen.onclick = openFolderFlow;
-  welcomeActions.append(btnWelcomeOpen);
+  const btnWelcomeAgentic = el('button', { class: 'btn', title: 'Chat with the agent, opencode-style — no editor' }) as HTMLButtonElement;
+  btnWelcomeAgentic.prepend(iconEl('spark', 14));
+  btnWelcomeAgentic.append('Agentic Coding');
+  btnWelcomeAgentic.onclick = () => void enterAgenticFlow();
+  welcomeActions.append(btnWelcomeOpen, btnWelcomeAgentic);
   const welcomeRecent = el('div', { class: 'welcome-recent hidden' });
   welcome.querySelector('.welcome-inner')?.append(welcomeActions, welcomeRecent);
 
@@ -794,6 +801,8 @@ async function boot() {
   type SideView = 'explorer' | 'scm' | 'api' | 'search' | 'pomo';
   let searchApi: SearchApi | null = null;
   const setSideView = (v: SideView) => {
+    // Any IDE navigation intent exits agentic mode first.
+    requireIDE();
     explorerHost.classList.toggle('hidden', v !== 'explorer');
     scmHost.classList.toggle('hidden', v !== 'scm');
     apiHost.classList.toggle('hidden', v !== 'api');
@@ -892,7 +901,150 @@ async function boot() {
     } catch { /* recents stay as-is */ }
     await loadSessions().catch((e) => toast(`Sessions: ${(e as Error).message}`, 'error'));
     await restoreTabSession().catch(() => {});
+    void refreshAgenticMeta();
     void ensureSession();
+  }
+
+  // ---- Agentic Coding mode (opencode-style centered chat, no IDE) ----
+  // Same chat stack (sessions, approvals, questions, history, queue), new
+  // posture: sidebar/editor/terminal hide and the agent panel becomes a
+  // centered column with a wordmark empty state + folder/branch row.
+  // Any file-open intent exits back to the IDE (editor hook below).
+  let agentic = false;
+  const AGENTIC_LS = 'barang:agentic';
+  let composerPlaceholder = '';
+  const isAgentic = () => agentic;
+
+  const agenticHero = el('div', { class: 'agentic-hero hidden' });
+  agenticHero.append(el('div', { class: 'agentic-wordmark' }, 'barang'));
+  agentPanel.prepend(agenticHero);
+
+  const agenticMeta = el('div', { class: 'agentic-meta hidden' });
+  const agenticFolderBtn = el('button', { class: 'agentic-folder', title: 'Switch project folder' }) as HTMLButtonElement;
+  const agenticBranch = el('span', { class: 'agentic-branch hidden' });
+  agenticMeta.append(agenticFolderBtn, el('span', { class: 'sep' }, '/'), agenticBranch);
+  // Appended after initChat so it sits below the composer, like opencode.
+  const mountAgenticMeta = () => agentPanel.append(agenticMeta);
+
+  function paintAgenticHero() {
+    if (!agentic) return;
+    const empty = agentStore.get().messages.length === 0;
+    agentPanel.classList.toggle('agentic-empty', empty);
+    agenticHero.classList.toggle('hidden', !empty);
+  }
+
+  function setComposerAgentic(on: boolean) {
+    const input = document.querySelector('.composer-input') as HTMLTextAreaElement | null;
+    if (!input) return;
+    if (on) {
+      if (!composerPlaceholder) composerPlaceholder = input.placeholder;
+      input.placeholder = 'Ask anything, / for commands, @ for context…';
+      input.focus();
+    } else if (composerPlaceholder) {
+      input.placeholder = composerPlaceholder;
+    }
+  }
+
+  function enterAgentic() {
+    if (!agentStore.get().root) return;
+    agentic = true;
+    try {
+      localStorage.setItem(AGENTIC_LS, '1');
+    } catch { /* ignore */ }
+    agentPanel.classList.remove('collapsed');
+    btnIDE.classList.remove('hidden');
+    document.body.classList.add('agentic');
+    setComposerAgentic(true);
+    void refreshAgenticMeta();
+    paintAgenticHero();
+    window.dispatchEvent(new Event('resize'));
+  }
+
+  function exitAgentic() {
+    if (!agentic) return;
+    agentic = false;
+    try {
+      localStorage.removeItem(AGENTIC_LS);
+    } catch { /* ignore */ }
+    document.body.classList.remove('agentic');
+    agentPanel.classList.remove('agentic-empty');
+    agenticHero.classList.add('hidden');
+    btnIDE.classList.add('hidden');
+    setComposerAgentic(false);
+    window.dispatchEvent(new Event('resize'));
+  }
+
+  function requireIDE() {
+    if (agentic) exitAgentic();
+  }
+
+  async function refreshAgenticMeta() {
+    if (!agentic) return;
+    const r = agentStore.get().root || '';
+    agenticMeta.classList.toggle('hidden', !r);
+    if (!r) return;
+    const name = r.split(/[\\/]/).filter(Boolean).pop() || r;
+    agenticFolderBtn.innerHTML = '';
+    agenticFolderBtn.append(iconEl('logo', 13), el('span', {}, name), iconEl('chevD', 12));
+    agenticFolderBtn.title = r;
+    try {
+      const info = (await barang().git('info')) as { branch?: string } | null;
+      const br = info?.branch;
+      if (br) {
+        agenticBranch.innerHTML = '';
+        agenticBranch.append(iconEl('branch', 12), el('span', {}, br));
+        agenticBranch.classList.remove('hidden');
+      } else {
+        agenticBranch.classList.add('hidden');
+      }
+    } catch {
+      agenticBranch.classList.add('hidden');
+    }
+  }
+
+  agenticFolderBtn.onclick = (e) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const here = agentStore.get().root || '';
+    const items: Array<{ label: string; icon: 'folder' | 'folderPlus'; run: () => void }> = appRecents
+      .filter((x) => x !== here)
+      .slice(0, 5)
+      .map((x) => ({
+        label: x.split(/[\\/]/).filter(Boolean).pop() || x,
+        icon: 'folder' as const,
+        run: () => void openPathFlow(x),
+      }));
+    items.push({ label: 'Open folder…', icon: 'folderPlus' as const, run: () => openFolderFlow() });
+    showContextMenu(rect.left, rect.bottom + 4, items);
+  };
+
+  async function enterAgenticFlow() {
+    if (agentStore.get().root) {
+      enterAgentic();
+      return;
+    }
+    // Default folder like opencode: most recent project, else ask.
+    let recents = appRecents;
+    if (!recents.length) {
+      try {
+        recents = (await appState()).recent ?? [];
+      } catch { /* stay welcome */ }
+    }
+    if (recents[0]) {
+      await openPathFlow(recents[0]);
+    } else {
+      try {
+        const res = await barang().app.openFolder().catch((err) => {
+          if (/cancelled/i.test((err as Error).message)) return null;
+          throw err;
+        });
+        if (!res) return;
+        await openPathFlow(res.root);
+      } catch (err) {
+        toast((err as Error).message, 'error');
+        return;
+      }
+    }
+    if (agentStore.get().root) enterAgentic();
   }
 
   initChat(agentPanel, {
@@ -903,6 +1055,11 @@ async function boot() {
       palette.open(prefill ? `> ${prefill}` : '> ');
     },
   });
+  mountAgenticMeta();
+  // Any file landing in the editor exits agentic mode (a hidden editor
+  // opening tabs would strand the user). Suppressed during restores.
+  setFileOpenedHandler(() => requireIDE());
+  agentStore.subscribe(() => paintAgenticHero());
   connectEvents();
   // Live file tree: the desktop watcher pings on agent/external writes so
   // new files appear without tab-switching or manual refresh. Debounced in
@@ -963,6 +1120,25 @@ async function boot() {
   void ensureSession();
   // Tab session: reopen this project's working set (incl. detached tabs).
   void restoreTabSession().catch(() => {});
+  // Agentic mode persists across restarts (with a folder: last state wins).
+  void (async () => {
+    try {
+      if (localStorage.getItem(AGENTIC_LS) !== '1') return;
+      if (agentStore.get().root) {
+        enterAgentic();
+        return;
+      }
+      const recents = appRecents.length ? appRecents : [];
+      if (recents[0]) {
+        await openPathFlow(recents[0]);
+        if (agentStore.get().root) enterAgentic();
+      } else {
+        try {
+          localStorage.removeItem(AGENTIC_LS);
+        } catch { /* ignore */ }
+      }
+    } catch { /* welcome as usual */ }
+  })();
   // Agent notifications: Windows toast + taskbar badge + sound when a run
   // finishes, needs approval, or errors. Renderer decides, main toasts.
   armAudioUnlock();
@@ -1125,6 +1301,9 @@ async function boot() {
     restoreTabSession,
     debugModelText,
     debugDisplayedText,
+    enterAgenticFlow,
+    exitAgentic,
+    isAgentic,
     openPathFlow,
     debugSetMessages: (msgs: never[]) => agentStore.set({ messages: msgs }),
   };
@@ -1132,6 +1311,7 @@ async function boot() {
   void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
 
   const toggleAgent = () => {
+    if (agentic) return; // the panel IS the agentic view — nothing to toggle
     if (!root) {
       toast('Open a folder to use the agent panel.', 'info');
       return;
@@ -1145,12 +1325,27 @@ async function boot() {
     newSession: () => void createSession().catch((e) => toast(e.message, 'error')),
     saveAll: () => void saveAll(),
     toggleAgent,
-    toggleTerminalPanel: () => termApi.toggle(),
-    terminalNew: () => termApi.newTerminal(true),
+    toggleTerminalPanel: () => {
+      if (agentic) {
+        requireIDE();
+        return;
+      }
+      termApi.toggle();
+    },
+    terminalNew: () => {
+      requireIDE();
+      termApi.newTerminal(true);
+    },
     terminalClear: () => termApi.clearActive(),
     terminalKill: () => termApi.killActive(),
-    splitToggle: () => toggleSplit(),
-    focusGroup: (g) => focusGroup(g),
+    splitToggle: () => {
+      requireIDE();
+      toggleSplit();
+    },
+    focusGroup: (g) => {
+      requireIDE();
+      focusGroup(g);
+    },
     closeSplit: () => closeSplitGroup(),
     showView: (v) => setSideView(v),
     boltNew: () => {
@@ -1230,6 +1425,7 @@ async function boot() {
       setSideView('pomo');
     } else if (mod && e.key.toLowerCase() === 's' && !termFocus) {
       e.preventDefault();
+      requireIDE();
       if (e.shiftKey) {
         void saveAll();
       } else {
@@ -1246,18 +1442,22 @@ async function boot() {
       }
     } else if (mod && e.key.toLowerCase() === 'n' && !e.shiftKey && !termFocus) {
       e.preventDefault();
+      requireIDE();
       openUntitled();
     } else if (mod && e.key.toLowerCase() === 'w' && !e.shiftKey && !termFocus) {
       e.preventDefault();
+      requireIDE();
       const st = editorStore.get();
       const act = st.focus === 2 && st.split ? st.active2 : st.active;
       if (act) void closeTab(act);
     } else if (mod && e.key === '\\' && !e.shiftKey) {
       // Split editor right (VSCode Ctrl+\). Backquote is the terminal chord.
       e.preventDefault();
+      requireIDE();
       toggleSplit();
     } else if (mod && (e.key === '1' || e.key === '2') && !e.shiftKey) {
       e.preventDefault();
+      requireIDE();
       void focusGroup(e.key === '2' ? 2 : 1);
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && !isTypingTarget()) {
       e.preventDefault();
@@ -1279,6 +1479,10 @@ async function boot() {
     } else if (mod && e.code === 'Backquote') {
       // VSCode terminal chords: Ctrl+` toggle panel, Ctrl+Shift+` new terminal.
       e.preventDefault();
+      if (agentic) {
+        requireIDE();
+        return;
+      }
       if (e.shiftKey) termApi.newTerminal(true);
       else termApi.toggle();
     } else if (mod && e.key.toLowerCase() === 'j' && !e.shiftKey) {

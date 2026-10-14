@@ -61,6 +61,20 @@ export interface EditorHooks {
 }
 let hooks: EditorHooks | null = null;
 
+// File-opened broadcast (agentic mode exits back to the IDE the moment a
+// file opens — a hidden editor opening tabs would strand the user).
+let fileOpenedHandler: (() => void) | null = null;
+let suppressFileOpened = false;
+
+/** Register the file-opened broadcast (main wires requireIDE here). */
+export function setFileOpenedHandler(handler: (() => void) | null) {
+  fileOpenedHandler = handler;
+}
+
+function emitFileOpened() {
+  if (!suppressFileOpened) fileOpenedHandler?.();
+}
+
 function nameOf(path: string): string {
   return path.split('/').pop() || path;
 }
@@ -657,6 +671,9 @@ function setGroupActive(group: EditorGroup, path: string | null) {
   // that created them; the next revealSearchMatch re-applies fresh).
   clearSearchDecorations();
   editorStore.set(group === 2 ? { active2: path, focus: 2 } : { active: path, focus: 1 });
+  // A file is being shown in the editor (open or activate) — agentic mode
+  // exits back to the IDE. Suppressed during tab-session restores.
+  emitFileOpened();
 }
 
 export async function openFile(path: string, opts?: { focus?: boolean; group?: EditorGroup; silent?: boolean }): Promise<void> {
@@ -1668,6 +1685,16 @@ export async function restoreTabSession(): Promise<void> {
   const root = agentStore.get().root || '';
   if (!root || !editor || !monaco) return;
   if (editorStore.get().tabs.length) return;
+  // Restoring must not look like user navigation (agentic mode stays put).
+  suppressFileOpened = true;
+  try {
+    await restoreTabSessionInner(root);
+  } finally {
+    suppressFileOpened = false;
+  }
+}
+
+async function restoreTabSessionInner(root: string): Promise<void> {
   let snap: TabSession | null = null;
   try {
     snap = JSON.parse(localStorage.getItem(tabSessionKey(root)) ?? 'null') as TabSession | null;

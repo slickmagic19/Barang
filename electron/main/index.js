@@ -2064,6 +2064,68 @@ async function runUiSmoke() {
   try { await fs.rm(nogitDir, { recursive: true, force: true }); } catch {}
   console.log('[smoke-ui] nogit-status: ' + nogitProbe);
   pass = pass && nogitProbe === 'ok';
+  // Agentic Coding mode: centered chat posture (no IDE chrome), hero +
+  // folder/branch meta, composer placeholder, and file-open exits to IDE.
+  let agenticProbe = 'skip';
+  try {
+    agenticProbe = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      const need = ['enterAgenticFlow', 'exitAgentic', 'isAgentic'];
+      for (const f of need) if (!u || typeof u[f] !== 'function') return 'no-fn:' + f;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      // Self-heal: a crashed earlier run may have left the flag/mode on.
+      if (u.isAgentic()) {
+        u.exitAgentic();
+        await sleep(500);
+      }
+      const welcomeBtn = [...document.querySelectorAll('.welcome-actions button')]
+        .find((b) => (b.textContent || '').includes('Agentic Coding'));
+      if (!welcomeBtn) return 'no-welcome-btn';
+      await u.enterAgenticFlow();
+      await sleep(1000);
+      if (!u.isAgentic()) return 'not-entered';
+      if (!document.body.classList.contains('agentic')) return 'no-body-class';
+      const disp = (s) => {
+        const n = document.querySelector(s);
+        return n ? getComputedStyle(n).display : 'missing';
+      };
+      if (disp('.sidebar') !== 'none') return 'sidebar-visible';
+      if (disp('.center') !== 'none') return 'center-visible';
+      if (disp('.agent-wrap') === 'none') return 'panel-hidden';
+      const input = document.querySelector('.composer-input');
+      if (!input) return 'no-composer';
+      if (!String(input.placeholder || '').includes('/ for commands')) return 'placeholder:' + input.placeholder;
+      const hero = document.querySelector('.agentic-hero');
+      if (!hero || hero.classList.contains('hidden')) return 'no-hero';
+      const meta = document.querySelector('.agentic-meta');
+      if (!meta || meta.classList.contains('hidden')) return 'no-meta';
+      const branch = document.querySelector('.agentic-branch');
+      if (!branch || branch.classList.contains('hidden') || !(branch.textContent || '').trim()) return 'no-branch';
+      const ideBtn = [...document.querySelectorAll('.topbar .top-btn')]
+        .find((b) => (b.title || '').includes('Back to editor'));
+      if (!ideBtn || ideBtn.classList.contains('hidden')) return 'no-ide-btn';
+      const folderBtn = document.querySelector('.agentic-folder');
+      if (!folderBtn) return 'no-folder-btn';
+      folderBtn.click();
+      await sleep(500);
+      const menu = document.querySelector('.ctx-menu');
+      const menuText = menu ? (menu.textContent || '') : '';
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await sleep(300);
+      if (!menu || !menuText.includes('Open folder')) return 'menu-bad:' + menuText.slice(0, 80);
+      // Opening a file exits back to the IDE (palette quick-open path).
+      await u.openFile('package.json', { group: 1 });
+      await sleep(800);
+      if (u.isAgentic()) return 'no-exit-on-open';
+      if (document.body.classList.contains('agentic')) return 'body-stuck';
+      if (disp('.sidebar') === 'none') return 'sidebar-stuck';
+      if (localStorage.getItem('barang:agentic') !== null) return 'flag-stuck';
+      if (typeof u.closeTab === 'function') await u.closeTab('package.json', 1);
+      return 'ok';
+    })()`);
+  } catch (e) { agenticProbe = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] agentic-mode: ' + agenticProbe);
+  pass = pass && agenticProbe === 'ok';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

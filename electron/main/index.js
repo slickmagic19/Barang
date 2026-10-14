@@ -730,6 +730,12 @@ function registerIpc() {
     return res ? { ok: true, data: res } : { ok: false, error: 'cancelled' };
   });
   ipcMain.handle('app:open-path', ok((p) => openPath(p.path)));
+  // Default Vibe folder (app-managed, always writable): created on demand.
+  ipcMain.handle('app:default-folder', ok(async () => {
+    const dir = path.join(app.getPath('userData'), 'Default');
+    await fs.mkdir(dir, { recursive: true });
+    return { root: dir };
+  }));
   ipcMain.handle('app:set-restore', async (_ev, p = {}) => {
     restoreProject = p.restore === true;
     await saveState();
@@ -2079,7 +2085,7 @@ async function runUiSmoke() {
         await sleep(500);
       }
       const welcomeBtn = [...document.querySelectorAll('.welcome-actions button')]
-        .find((b) => (b.textContent || '').includes('Agentic Coding'));
+        .find((b) => (b.textContent || '').includes('Vibe'));
       if (!welcomeBtn) return 'no-welcome-btn';
       await u.enterAgenticFlow();
       await sleep(1000);
@@ -2104,6 +2110,10 @@ async function runUiSmoke() {
       const ideBtn = [...document.querySelectorAll('.topbar .top-btn')]
         .find((b) => (b.title || '').includes('Back to editor'));
       if (!ideBtn || ideBtn.classList.contains('hidden')) return 'no-ide-btn';
+      const vibeBtn = [...document.querySelectorAll('.topbar .top-btn')]
+        .find((b) => (b.textContent || '').includes('Vibe'));
+      // Vibe hides while agentic (welcome owns entry there); IDE shows.
+      if (!vibeBtn || !vibeBtn.classList.contains('hidden')) return 'vibe-btn-visible';
       const folderBtn = document.querySelector('.agentic-folder');
       if (!folderBtn) return 'no-folder-btn';
       folderBtn.click();
@@ -2120,6 +2130,15 @@ async function runUiSmoke() {
       if (document.body.classList.contains('agentic')) return 'body-stuck';
       if (disp('.sidebar') === 'none') return 'sidebar-stuck';
       if (localStorage.getItem('barang:agentic') !== null) return 'flag-stuck';
+      const vibeBack = [...document.querySelectorAll('.topbar .top-btn')]
+        .find((b) => (b.textContent || '').includes('Vibe'));
+      if (!vibeBack || vibeBack.classList.contains('hidden')) return 'no-vibe-back-btn';
+      try {
+        const dd = await window.barang.app.defaultFolder();
+        const rp = String((dd && dd.root) || '');
+        const tail = (rp.split('/').pop() || '').split('\\\\').pop() || '';
+        if (tail !== 'Default') return 'default-folder:' + rp.slice(-60);
+      } catch (e) { return 'default-folder-err:' + (e.message || e); }
       if (typeof u.closeTab === 'function') await u.closeTab('package.json', 1);
       return 'ok';
     })()`);

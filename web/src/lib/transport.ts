@@ -74,6 +74,7 @@ export interface BarangBridge {
     }>;
     openFolder(): Promise<{ root: string }>;
     openPath(path: string): Promise<{ root: string }>;
+    defaultFolder(): Promise<{ root: string }>;
     setRestore(restore: boolean): Promise<{ restore: boolean }>;
     checkUpdates(): Promise<{ update: boolean; current: string; version?: string; url?: string; error?: string; packaged?: boolean; asset?: { name: string; url: string; size: number } }>;
     downloadUpdate(): Promise<{ path: string }>;

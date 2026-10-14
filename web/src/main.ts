@@ -155,11 +155,14 @@ async function boot() {
   const btnIDE = el('button', { class: 'top-btn hidden', title: 'Back to editor (IDE)' }) as HTMLButtonElement;
   btnIDE.append(iconEl('file', 14), el('span', {}, 'IDE'));
   btnIDE.onclick = () => exitAgentic();
+  const btnVibe = el('button', { class: 'top-btn hidden', title: 'Vibe with the agent — no editor' }) as HTMLButtonElement;
+  btnVibe.append(iconEl('spark', 14), el('span', {}, 'Vibe'));
+  btnVibe.onclick = () => void enterAgenticFlow();
   const btnSettings = el('button', { class: 'top-btn settings-btn', title: 'Settings' }) as HTMLButtonElement;
   btnSettings.append(iconEl('gear', 15));
   const btnUpdate = el('button', { class: 'top-btn update-btn hidden', title: 'Check for updates' }) as HTMLButtonElement;
   btnUpdate.append(iconEl('download', 14));
-  topActions.append(openSplit, btnPalette, btnAgent, btnIDE, btnSettings, btnUpdate);
+  topActions.append(openSplit, btnPalette, btnAgent, btnVibe, btnIDE, btnSettings, btnUpdate);
 
   // Self-updater: the button exists only while a newer release is known.
   // Click downloads the portable and restarts into it (dev builds open the
@@ -483,9 +486,9 @@ async function boot() {
   const btnWelcomeOpen = el('button', { class: 'btn btn-primary' }, 'Open folder') as HTMLButtonElement;
   btnWelcomeOpen.prepend(iconEl('folder', 14));
   btnWelcomeOpen.onclick = openFolderFlow;
-  const btnWelcomeAgentic = el('button', { class: 'btn', title: 'Chat with the agent, opencode-style — no editor' }) as HTMLButtonElement;
+  const btnWelcomeAgentic = el('button', { class: 'btn', title: 'Vibe with the agent, opencode-style — no editor' }) as HTMLButtonElement;
   btnWelcomeAgentic.prepend(iconEl('spark', 14));
-  btnWelcomeAgentic.append('Agentic Coding');
+  btnWelcomeAgentic.append('Vibe');
   btnWelcomeAgentic.onclick = () => void enterAgenticFlow();
   welcomeActions.append(btnWelcomeOpen, btnWelcomeAgentic);
   const welcomeRecent = el('div', { class: 'welcome-recent hidden' });
@@ -902,6 +905,7 @@ async function boot() {
     await loadSessions().catch((e) => toast(`Sessions: ${(e as Error).message}`, 'error'));
     await restoreTabSession().catch(() => {});
     void refreshAgenticMeta();
+    paintModeButtons();
     void ensureSession();
   }
 
@@ -952,7 +956,7 @@ async function boot() {
       localStorage.setItem(AGENTIC_LS, '1');
     } catch { /* ignore */ }
     agentPanel.classList.remove('collapsed');
-    btnIDE.classList.remove('hidden');
+    paintModeButtons();
     document.body.classList.add('agentic');
     setComposerAgentic(true);
     void refreshAgenticMeta();
@@ -969,13 +973,20 @@ async function boot() {
     document.body.classList.remove('agentic');
     agentPanel.classList.remove('agentic-empty');
     agenticHero.classList.add('hidden');
-    btnIDE.classList.add('hidden');
+    paintModeButtons();
     setComposerAgentic(false);
     window.dispatchEvent(new Event('resize'));
   }
 
   function requireIDE() {
     if (agentic) exitAgentic();
+  }
+
+  /** Topbar IDE/Vibe toggle visibility (Vibe needs an open folder). */
+  function paintModeButtons() {
+    const hasRoot = !!agentStore.get().root;
+    btnVibe.classList.toggle('hidden', agentic || !hasRoot);
+    btnIDE.classList.toggle('hidden', !agentic);
   }
 
   async function refreshAgenticMeta() {
@@ -1022,27 +1033,16 @@ async function boot() {
       enterAgentic();
       return;
     }
-    // Default folder like opencode: most recent project, else ask.
-    let recents = appRecents;
-    if (!recents.length) {
-      try {
-        recents = (await appState()).recent ?? [];
-      } catch { /* stay welcome */ }
-    }
-    if (recents[0]) {
-      await openPathFlow(recents[0]);
-    } else {
-      try {
-        const res = await barang().app.openFolder().catch((err) => {
-          if (/cancelled/i.test((err as Error).message)) return null;
-          throw err;
-        });
-        if (!res) return;
+    // Default folder ("Default", app-managed): no recents detour, no
+    // dialog — Vibe always has somewhere to work.
+    try {
+      const res = await barang().app.defaultFolder();
+      if (res?.root) {
         await openPathFlow(res.root);
-      } catch (err) {
-        toast((err as Error).message, 'error');
-        return;
       }
+    } catch (err) {
+      toast(`Could not open the Default folder: ${(err as Error).message}`, 'error');
+      return;
     }
     if (agentStore.get().root) enterAgentic();
   }
@@ -1120,6 +1120,8 @@ async function boot() {
   void ensureSession();
   // Tab session: reopen this project's working set (incl. detached tabs).
   void restoreTabSession().catch(() => {});
+  paintModeButtons();
+  // Agentic mode persists across restarts (with a folder: last state wins).
   // Agentic mode persists across restarts (with a folder: last state wins).
   void (async () => {
     try {
@@ -1128,11 +1130,12 @@ async function boot() {
         enterAgentic();
         return;
       }
-      const recents = appRecents.length ? appRecents : [];
-      if (recents[0]) {
-        await openPathFlow(recents[0]);
-        if (agentStore.get().root) enterAgentic();
-      } else {
+      try {
+        const res = await barang().app.defaultFolder();
+        if (res?.root) await openPathFlow(res.root);
+      } catch { /* welcome as usual */ }
+      if (agentStore.get().root) enterAgentic();
+      else {
         try {
           localStorage.removeItem(AGENTIC_LS);
         } catch { /* ignore */ }

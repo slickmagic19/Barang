@@ -102,6 +102,7 @@ const barang = {
     state: () => ipcRenderer.invoke('app:state'),
     openFolder: () => invoke('app:open-folder'),
     openPath: (path) => invoke('app:open-path', { path }),
+    defaultFolder: () => invoke('app:default-folder'),
     setRestore: (restore) => invoke('app:set-restore', { restore }),
     checkUpdates: () => invoke('app:check-updates'),
     /** Download the pending update (long invoke) + spawn-into-it. */

@@ -495,3 +495,64 @@ export async function setConfig(cwd, key, value) {
     err(e);
   }
 }
+
+/** Per-path reality for agent whole-file writes: 'new' (untracked),
+ *  {additions, deletions} (tracked, from numstat), 'modified' (tracked and
+ *  dirty per status but no numstat line — e.g. binary), 'same' (tracked and
+ *  clean), 'unknown' (missing or not a repo). Never throws. */
+export async function writeStatus(cwd, paths) {
+  const out = {};
+  try {
+    const g = git(cwd);
+    let isRepo = false;
+    try {
+      isRepo = await g.checkIsRepo();
+    } catch {
+      isRepo = false;
+    }
+    if (!isRepo) return { isRepo: false, files: out };
+    const list = [...new Set((paths ?? []).map(String).filter(Boolean))].slice(0, 200);
+    if (!list.length) return { isRepo: true, files: out };
+    const [st, num] = await Promise.all([
+      g.status().catch(() => null),
+      g.diff(['--numstat', '--', ...list]).catch(() => ''),
+    ]);
+    const statusOf = new Map();
+    for (const f of st?.files ?? []) {
+      statusOf.set(String(f.path).replace(/\\/g, '/'), f.working_dir || '');
+    }
+    const counts = new Map();
+    for (const line of String(num || '').split('\n')) {
+      const m = line.match(/^(\d+)\s+(\d+)\s+(.+)$/);
+      if (!m) continue;
+      let p = m[3].trim();
+      const arrow = p.lastIndexOf('=>');
+      if (arrow >= 0) p = p.slice(arrow + 2).trim();
+      const brace = p.lastIndexOf('}');
+      if (brace >= 0) p = p.slice(brace + 1).trim();
+      p = p.replace(/^["']|["']$/g, '').replace(/\\/g, '/');
+      counts.set(p, { additions: Number(m[1]), deletions: Number(m[2]) });
+    }
+    for (const raw of list) {
+      const p = path.posix.normalize(String(raw).replace(/\\/g, '/').replace(/^\.\//, ''));
+      if (statusOf.get(p) === '?') {
+        out[raw] = 'new';
+        continue;
+      }
+      if (counts.has(p)) {
+        out[raw] = counts.get(p);
+        continue;
+      }
+      const exists = await fs.stat(path.join(cwd, p)).then(() => true).catch(() => false);
+      if (!exists) {
+        out[raw] = 'unknown';
+        continue;
+      }
+      const code = statusOf.get(p) || '';
+      out[raw] = code && code !== ' ' ? 'modified' : 'same';
+    }
+    return { isRepo: true, files: out };
+  } catch {
+    return { isRepo: false, files: out };
+  }
+}

@@ -171,8 +171,9 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
   if (lower === 'file') {
     const view = filePartView(part);
     if (view?.kind === 'image') {
-      const img = el('img', { class: 'msg-img', src: view.url, alt: view.name }) as HTMLImageElement;
+      const img = el('img', { class: 'msg-img', src: view.url, alt: view.name, title: 'Click to expand' }) as HTMLImageElement;
       img.loading = 'lazy';
+      img.onclick = () => openLightbox(view.url, view.name);
       host.append(img);
       if (view.name && view.name !== 'file') host.append(el('div', { class: 'msg-img-cap' }, view.name));
     } else {
@@ -252,6 +253,51 @@ export function filePartView(part: Record<string, unknown>):
   if (isImg) return { kind: 'image', url, name };
   if (name) return { kind: 'file', name };
   return null;
+}
+
+// ---- Image lightbox (Cursor-style) ---------------------------------------
+// Clicking any chat/composer image opens it fullscreen: backdrop, Esc, or
+// the close button dismisses. Single instance — opening another replaces.
+
+let lightboxOverlay: HTMLElement | null = null;
+let lightboxKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+
+/** Dismiss the lightbox if open. Exported for smoke. */
+export function closeLightbox() {
+  if (lightboxKeyHandler) {
+    document.removeEventListener('keydown', lightboxKeyHandler);
+    lightboxKeyHandler = null;
+  }
+  if (lightboxOverlay) {
+    lightboxOverlay.remove();
+    lightboxOverlay = null;
+  }
+}
+
+/** Open an image fullscreen. Exported for smoke. */
+export function openLightbox(src: string, name?: string) {
+  if (!src) return;
+  closeLightbox();
+  const overlay = el('div', { class: 'lightbox-overlay' });
+  const fig = el('figure', { class: 'lightbox-fig' });
+  const img = el('img', { class: 'lightbox-img', src, alt: name || 'image' }) as HTMLImageElement;
+  fig.append(img);
+  if (name) fig.append(el('figcaption', { class: 'lightbox-cap' }, name));
+  const x = el('button', { class: 'icon-btn lightbox-x', title: 'Close (Esc)' }) as HTMLButtonElement;
+  x.append(iconEl('x', 15));
+  overlay.append(fig, x);
+  document.body.append(overlay);
+  requestAnimationFrame(() => overlay.classList.add('open'));
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') closeLightbox();
+  };
+  lightboxKeyHandler = onKey;
+  document.addEventListener('keydown', onKey);
+  x.onclick = () => closeLightbox();
+  overlay.addEventListener('mousedown', (e) => {
+    if (e.target === overlay) closeLightbox();
+  });
+  lightboxOverlay = overlay;
 }
 
 /** History cursor math (opencode-style): idx -1 = current draft at the
@@ -901,7 +947,8 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     attachBar.classList.toggle('hidden', imgAttaches.length === 0);
     imgAttaches.forEach((a, i) => {
       const chip = el('span', { class: 'attach-chip' });
-      const thumb = el('img', { class: 'attach-thumb', src: a.dataUrl, alt: a.filename }) as HTMLImageElement;
+      const thumb = el('img', { class: 'attach-thumb', src: a.dataUrl, alt: a.filename, title: 'Click to expand' }) as HTMLImageElement;
+      thumb.onclick = () => openLightbox(a.dataUrl, a.filename);
       chip.append(thumb, el('span', { class: 'attach-name' }, a.filename));
       const x = el('button', { class: 'attach-x', title: 'Remove attachment' }) as HTMLButtonElement;
       x.append(iconEl('x', 11));
@@ -1427,6 +1474,77 @@ function paintTodos() {
   }
 }
 
+// Write-kind truth (Cursor: "new" only for created files): git-backed
+// per-file status, cached per session. 'unknown' (non-repo, missing)
+// keeps the legacy 'new' badge — best effort, never blocking.
+type WriteStat = 'new' | 'modified' | 'same' | 'unknown' | { a: number; d: number };
+
+const writeStatCache = new Map<string, WriteStat>();
+const writeStatFlight = new Set<string>();
+
+function kickWriteStats(sid: string, rels: string[]) {
+  const missing = [...new Set(rels)].filter((r) => {
+    const k = `${sid}|${r}`;
+    return !writeStatCache.has(k) && !writeStatFlight.has(k);
+  });
+  if (!missing.length) return;
+  for (const r of missing) writeStatFlight.add(`${sid}|${r}`);
+  void (async () => {
+    try {
+      const res = await barang().git('write-status', { paths: missing });
+      const files = ((res as { files?: Record<string, unknown> } | null)?.files ?? {}) as Record<string, unknown>;
+      for (const r of missing) {
+        const v = files[r];
+        let ws: WriteStat = 'unknown';
+        if (v === 'new' || v === 'same' || v === 'modified' || v === 'unknown') ws = v;
+        else if (v && typeof (v as { additions?: unknown }).additions === 'number') {
+          ws = { a: (v as { additions: number }).additions, d: Number((v as { deletions?: unknown }).deletions) || 0 };
+        }
+        writeStatCache.set(`${sid}|${r}`, ws);
+        if (writeStatCache.size > 300) {
+          const first = writeStatCache.keys().next().value;
+          if (first !== undefined) writeStatCache.delete(first);
+        }
+      }
+    } catch {
+      for (const r of missing) writeStatCache.set(`${sid}|${r}`, 'unknown');
+    } finally {
+      for (const r of missing) writeStatFlight.delete(`${sid}|${r}`);
+      paintChanges();
+    }
+  })();
+}
+
+/** Display status for a write-kind row (resolved or legacy). */
+function writeDisplayStatus(ws: WriteStat | undefined): 'added' | 'modified' {
+  if (!ws || ws === 'new' || ws === 'unknown') return 'added';
+  return 'modified';
+}
+
+function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
+  if (!ws) {
+    stat.append(el('span', { class: 'stat-pending' }, '…'));
+    return;
+  }
+  if (ws === 'new' || ws === 'unknown') {
+    stat.append(el('span', { class: 'stat-add' }, 'new'));
+    return;
+  }
+  if (ws === 'same') {
+    stat.append(el('span', { class: 'stat-same' }, 'unchanged'));
+    return;
+  }
+  if (ws === 'modified') {
+    stat.append(el('span', { class: 'stat-mod' }, 'modified'));
+    return;
+  }
+  stat.append(
+    el('span', { class: 'stat-add' }, `+${ws.a}`),
+    document.createTextNode(' '),
+    el('span', { class: 'stat-del' }, `−${ws.d}`),
+  );
+}
+
   function paintChanges() {
     const s = agentStore.get();
     // Run-end edge (computed once: the empty-list early return below must
@@ -1478,15 +1596,19 @@ function paintTodos() {
     // Cap rendered rows (thousands of changed files must not build
     // thousands of DOM rows + icons every paint — counts stay exact).
     const shown = changes.slice(0, CHANGES_CAP);
+    // Resolve write-kind truth in the background (new vs modified).
+    kickWriteStats(sid, shown.filter((d) => d.kind === 'write' && !isAbsolutePath(d.rel)).map((d) => d.rel));
     for (const d of shown) {
-      const st = diffStatus(d);
+      const ws = d.kind === 'write' && !isAbsolutePath(d.rel) ? writeStatCache.get(revKey(sid, d.rel)) : undefined;
+      const dispStatus = d.kind === 'write' ? writeDisplayStatus(ws ?? 'unknown') : d.status;
+      const st = diffStatus({ ...d, status: dispStatus });
       const reviewed = isReviewed(sid, d);
       const wrap = el('div', { class: `change-row-wrap${reviewed ? ' is-reviewed' : ''}` });
       const row = el('div', { class: `change-row ${st.cls}`, title: `${st.label} — click to review` });
       const main = el('button', { class: 'change-main', title: `${st.label} — click to review` }) as HTMLButtonElement;
       const stat = el('span', { class: 'change-stat' });
       if (d.kind === 'write') {
-        stat.append(el('span', { class: 'stat-add' }, 'new'));
+        appendWriteStat(stat, ws ?? 'unknown');
       } else {
         stat.append(
           el('span', { class: 'stat-add' }, `+${d.additions}`),

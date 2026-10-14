@@ -28,7 +28,7 @@ revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDia
 parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup,
 openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab,
 showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText } from './ui/editor';
-import { initChat, filePartView, stepHistory, pushComposerHist, changeFp, isReviewed, markReviewed, loadReviewedState, scheduleReviewedPersist } from './ui/chat';
+import { initChat, filePartView, stepHistory, pushComposerHist, changeFp, isReviewed, markReviewed, loadReviewedState, scheduleReviewedPersist, openLightbox, closeLightbox } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
 import { pomoNext, formatClock, normalizePomoSettings, POMO_DEFAULTS } from './lib/pomodoro';
@@ -1058,6 +1058,8 @@ async function boot() {
     markReviewed,
     loadReviewedState,
     scheduleReviewedPersist,
+    openLightbox,
+    closeLightbox,
     resolveKindSound,
     KIND_DEFAULT_SOUND,
     normalizeNotifSoundSettings,

@@ -678,6 +678,7 @@ function registerIpc() {
   const gitOps = {
     info: (a) => scm.info(cw(a)),
     diff: (a) => scm.fileDiff(cw(a), String(a.path || '')),
+    'write-status': (a) => scm.writeStatus(cw(a), [].concat(a.paths ?? [])),
     stage: (a) => scm.stage(cw(a), [].concat(a.paths ?? [])),
     unstage: (a) => scm.unstage(cw(a), [].concat(a.paths ?? [])),
     discard: (a) => scm.discard(cw(a), [].concat(a.paths ?? [])),
@@ -1434,6 +1435,8 @@ async function runUiSmoke() {
           }
         } catch (e) { focusCreate = 'error: ' + (e.message || e); }
         // Untitled tabs (Ctrl+N) + close (Ctrl+W). Skipped if Monaco never booted.
+        // Closes ALL untitled tabs: a boot-restored scratch from a previous
+        // run's tab session may already be open (by design).
         let untitled = 'skip';
         try {
           if (!document.querySelector('.monaco-editor')) { untitled = 'skip-no-monaco'; }
@@ -1443,8 +1446,12 @@ async function runUiSmoke() {
             const tab = [...document.querySelectorAll('.tabs .tab')].find((b) => (b.textContent || '').includes('Untitled'));
             if (!tab) { untitled = 'no-tab'; }
             else {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true }));
-              await new Promise((rr) => setTimeout(rr, 800));
+              for (let c = 0; c < 8; c++) {
+                const anyUntitled = [...document.querySelectorAll('.tabs .tab')].some((b) => (b.textContent || '').includes('Untitled'));
+                if (!anyUntitled) break;
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true }));
+                await new Promise((rr) => setTimeout(rr, 800));
+              }
               const gone = ![...document.querySelectorAll('.tabs .tab')].some((b) => (b.textContent || '').includes('Untitled'));
               untitled = gone ? 'ok' : 'not-closed';
             }
@@ -1923,6 +1930,90 @@ async function runUiSmoke() {
   } catch {}
   console.log('[smoke-ui] review-hunks: ' + reviewProbe);
   pass = pass && reviewProbe === 'ok';
+  // Image lightbox: a seeded chat image opens fullscreen (same src) and
+  // closes on Escape — Cursor parity for attachment review.
+  let lightboxProbe = 'skip';
+  try {
+    lightboxProbe = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.openLightbox !== 'function' || typeof u.closeLightbox !== 'function') return 'no-lb-fns';
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const png1px = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      u.debugSetMessages([{ info: { id: 'm_lb', role: 'user' }, parts: [
+        { type: 'text', text: 'see attachment' },
+        { type: 'file', mime: 'image/png', filename: 'probe.png', url: png1px },
+      ] }]);
+      await sleep(700);
+      const img = document.querySelector('.msg-img');
+      if (!img) return 'no-img';
+      img.click();
+      await sleep(400);
+      const ov = document.querySelector('.lightbox-overlay');
+      if (!ov) return 'no-overlay';
+      const big = ov.querySelector('.lightbox-img');
+      if (!big || big.getAttribute('src') !== png1px) return 'src-mismatch';
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await sleep(400);
+      if (document.querySelector('.lightbox-overlay')) return 'stuck-open';
+      u.debugSetMessages([]);
+      return 'ok';
+    })()`);
+  } catch (e) { lightboxProbe = 'error: ' + (e.message || e); }
+  try {
+    await w.webContents.executeJavaScript(`(async () => {
+      try { window.__barangTestUtils.debugSetMessages([]); } catch {}
+      try { document.querySelector('.lightbox-overlay')?.remove(); } catch {}
+      return 'cleaned';
+    })()`);
+  } catch {}
+  console.log('[smoke-ui] lightbox: ' + lightboxProbe);
+  pass = pass && lightboxProbe === 'ok';
+  // Write-status truth: an untracked agent file shows "new", a tracked
+  // overwrite shows real +/− counts (never a blanket "new").
+  let writeStatProbe = 'skip';
+  const wsNew = 'sess-status-new.txt';
+  let wsOrig = '';
+  try {
+    wsOrig = await fs.readFile(path.join('C:\\Users\\Achi\\Desktop\\Barang', '.gitattributes'), 'utf8');
+    writeStatProbe = await w.webContents.executeJavaScript(`(async () => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.debugSetMessages !== 'function') return 'no-seed-fn';
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      try { await window.barang.fs.write('${wsNew}', 'hello\\n'); } catch (e) { return 'write-fail'; }
+      try { await window.barang.fs.write('.gitattributes', ${JSON.stringify(wsOrig)} + '# probe\\n'); } catch (e) { return 'dirty-fail'; }
+      const st = await window.barang.app.state().catch(() => null);
+      const root = ((st && st.root) || '').replace(/[/\\\\]+$/, '');
+      const mkWrite = (rel) => ({ type: 'tool', tool: 'write', state: { input: { filePath: root + '/' + rel } } });
+      u.debugSetMessages([{ info: { id: 'm_ws', role: 'assistant' }, parts: [mkWrite('${wsNew}'), mkWrite('.gitattributes')] }]);
+      await sleep(2500);
+      const rowOf = (rel) => [...document.querySelectorAll('.change-row')]
+        .find((r) => (r.querySelector('.change-path')?.textContent || '') === rel);
+      const rowNew = rowOf('${wsNew}');
+      const rowMod = rowOf('.gitattributes');
+      if (!rowNew || !rowMod) return 'no-rows';
+      const statNew = rowNew.querySelector('.change-stat')?.textContent || '';
+      const statMod = rowMod.querySelector('.change-stat')?.textContent || '';
+      if (!statNew.includes('new')) return 'new-badge:' + statNew;
+      if (statNew.includes('+')) return 'new-counts:' + statNew;
+      if (!statMod.includes('+1')) return 'mod-counts:' + statMod;
+      return 'ok';
+    })()`);
+  } catch (e) { writeStatProbe = 'error: ' + (e.message || e); }
+  try {
+    await fs.writeFile(path.join('C:\\Users\\Achi\\Desktop\\Barang', '.gitattributes'), wsOrig);
+  } catch {}
+  try {
+    await w.webContents.executeJavaScript(`(async () => {
+      try {
+        const u = window.__barangTestUtils;
+        if (u) u.debugSetMessages([]);
+        try { await window.barang.fs.remove('${wsNew}'); } catch {}
+      } catch {}
+      return 'cleaned';
+    })()`);
+  } catch {}
+  console.log('[smoke-ui] write-status: ' + writeStatProbe);
+  pass = pass && writeStatProbe === 'ok';
   try {
     const anchor = await w.webContents.executeJavaScript(`(() => {
       const f = [...document.querySelectorAll('.tree-label')].find((b) => !(b.title || '').includes('/') && !b.querySelector('.tw'));

@@ -6,7 +6,8 @@ import {
   agentStore, loadSessions, createSession, selectSession, deleteSession,
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
   refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
-  statusTextFor, messageErrorText, todoProgress, classifyAttachFile,
+  statusTextFor, messageErrorText, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, todoProgress, classifyAttachFile,
+  relayActive, relayRouteFor,
   loadCommands, parseSlashCommand, sendCommand,
   compactSession, shareSession, unshareSession, markQuestionAnswered,
   enqueueFollowUp, queuedFollowUps, removeQueuedFollowUp, drainQueue,
@@ -16,6 +17,7 @@ import { fsApi } from '../lib/api';
 import { barang } from '../lib/transport';
 import { el, md, timeAgo, debounce, roundTripChange, parseUnifiedPatch, applyHunkSubset, sliceWindow, truncateText, copyText } from '../lib/util';
 import { iconEl } from './icons';
+import { RELAY_DISPLAY_NAME } from '../lib/relay';
 import { confirmDialog } from './dialog';
 import { revealInEditor, openDiffTab, isAbsolutePath, writeTabContent, removeTabFile } from './editor';
 
@@ -793,6 +795,19 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
         const eb = el('div', { class: 'msg-runerr' });
         eb.append(iconEl('alert', 13), el('span', {}, runErr));
         wrap.append(eb);
+        // Free-tier gate: the raw 403 sends users down the wrong path
+        // (account/auth/client version). Append what actually helps.
+        if (isFreeTierGateError(runErr)) {
+          const g = el('div', { class: 'msg-runerr is-guide' });
+          g.append(iconEl('info', 13), el('span', {}, freeTierGuidance()));
+          wrap.append(g);
+        }
+        // Retired/unentitled model ID: likewise actionable, different fix.
+        if (isModelAccessError(runErr)) {
+          const g = el('div', { class: 'msg-runerr is-guide' });
+          g.append(iconEl('info', 13), el('span', {}, modelAccessGuidance()));
+          wrap.append(g);
+        }
       }
     }
     if (role === 'user' && m.info?.id && activeId) {
@@ -835,6 +850,16 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     const row = el('div', { class: 'msg-runerr' });
     row.append(iconEl('alert', 13), el('span', {}, error));
     eb.append(row);
+    if (isFreeTierGateError(error)) {
+      const g = el('div', { class: 'msg-runerr is-guide' });
+      g.append(iconEl('info', 13), el('span', {}, freeTierGuidance()));
+      eb.append(g);
+    }
+    if (isModelAccessError(error)) {
+      const g = el('div', { class: 'msg-runerr is-guide' });
+      g.append(iconEl('info', 13), el('span', {}, modelAccessGuidance()));
+      eb.append(g);
+    }
     list.append(eb);
   }
   if (chatKeepScroll) {
@@ -932,7 +957,11 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   const effortMini = el('select', { class: 'effort-mini', title: 'Reasoning effort' }) as HTMLSelectElement;
   const btnSend = el('button', { class: 'btn btn-primary btn-icon', title: 'Send (Enter)' }) as HTMLButtonElement;
   btnSend.append(iconEl('send', 14));
-  sendRow.append(btnAttach, modelMini, effortMini, btnSend);
+  // CLI Relay route badge: visible when this composer send would go through
+  // the official CLI instead of serve (opencode models + relay setting on).
+  const relayBadge = el('span', { class: 'relay-badge hidden', title: '' });
+  relayBadge.append(iconEl('prompt', 12), el('span', {}, RELAY_DISPLAY_NAME));
+  sendRow.append(btnAttach, relayBadge, modelMini, effortMini, btnSend);
   box.append(input, sendRow);
   composer.append(attachBar, queueSec, box, suggest);
 
@@ -1778,6 +1807,15 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
     const s = agentStore.get();
     paintModelMini();
     paintEffortMini();
+    // CLI Relay badge: the route for the currently selected model.
+    const viaRelay = relayRouteFor(s.model);
+    relayBadge.classList.toggle('hidden', !viaRelay);
+    if (viaRelay) {
+      const auto = readSettings().opencodeRelayAuto;
+      relayBadge.title = auto
+        ? `${RELAY_DISPLAY_NAME}: sends go through your local opencode CLI (Zen free models are blocked for serve-driven apps). Auto-approves anything not denied — set deny rules in opencode.json.`
+        : `${RELAY_DISPLAY_NAME}: sends go through your local opencode CLI. Auto-approve is off, so tool runs may stall on permission prompts.`;
+    }
     // sessions
     const cur = sessSel.value;
     sessSel.innerHTML = '';
@@ -1943,7 +1981,9 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
     if (s.busy) {
       busyTxt.textContent = s.status === 'stalled' && s.lastActivity
         ? `Agent stalled — ${s.lastActivity} (Stop, then send again)`
-        : statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
+        : relayActive()
+          ? (s.lastActivity || `${RELAY_DISPLAY_NAME} working…`)
+          : statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
     }
     if (s.error) {
       const errText: string = s.error;

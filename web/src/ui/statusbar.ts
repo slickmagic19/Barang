@@ -1,5 +1,6 @@
 // Bottom status bar: project, opencode link state, session state, cursor.
-import { agentStore, readSettings, sessionUsage, usageCard } from '../lib/agent';
+import { agentStore, readSettings, sessionUsage, usageCard, relayActive, relayRouteFor } from '../lib/agent';
+import { RELAY_DISPLAY_NAME } from '../lib/relay';
 import { pomoStore, formatClock } from '../lib/pomodoro';
 import { editorStore } from './editor';
 import type { GitRepoInfo } from './scm';
@@ -149,7 +150,8 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
 
     sessEl.innerHTML = '';
     sessEl.classList.toggle('is-warn', a.permissions.length > 0);
-    if (a.busy && a.status === 'retry') {
+    if (a.busy && relayActive()) sessEl.append(dot('run'), el('span', {}, `${RELAY_DISPLAY_NAME} working`));
+    else if (a.busy && a.status === 'retry') {
       const n = a.statusInfo?.attempt ?? 0;
       sessEl.append(dot('run'), el('span', {}, n > 0 ? `agent: retrying (attempt ${n})` : 'agent: retrying'));
     } else if (a.busy && a.status === 'stopping') sessEl.append(dot('run'), el('span', {}, 'agent: stopping'));
@@ -160,6 +162,10 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
 
     modelEl.innerHTML = '';
     modelEl.append(iconEl('spark', 12), el('span', {}, a.model ? `${a.model.providerID}/${a.model.modelID}` : 'auto model'));
+    if (relayRouteFor(a.model)) {
+      const tag = el('span', { class: 'relay-tag', title: 'Sends go through your local opencode CLI (CLI Relay)' }, RELAY_DISPLAY_NAME);
+      modelEl.append(tag);
+    }
 
     const dirty = e.tabs.filter((t) => t.dirty).length;
     dirtyEl.innerHTML = '';

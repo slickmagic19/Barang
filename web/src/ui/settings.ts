@@ -11,6 +11,11 @@ import {
   toLiveConfig, wordpressQuickFill, mergeStatuses,
   type McpScope, type McpServerConfig, type McpLive, type McpRowStatus,
 } from '../lib/mcp';
+import {
+  validateProviderEntry, parseModelIds, setProviderEntry, removeProviderEntry, listProviderEntries,
+  type CustomProviderEntry, type ProviderListItem,
+} from '../lib/providers';
+import { parseJsonc } from '../lib/util';
 import { confirmDialog } from './dialog';
 import { appState } from '../lib/api';
 import { barang } from '../lib/transport';
@@ -45,7 +50,7 @@ export function openSettings(hooks: SettingsHooks) {
 
   // Section registry (single source of truth for the nav rail). Every
   // section() call below must use one of these titles.
-  const SECTIONS = ['Model', 'Agent', 'MCP', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
+  const SECTIONS = ['Model', 'Agent', 'MCP', 'Providers', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
   const secSlug = (t: string) => 'sec-' + t.toLowerCase();
   const section = (title: string) => body.append(el('p', { class: 'settings-label', id: secSlug(title) }, title));
   // Toggle switch row (VSCode-style). The real checkbox stays in the DOM
@@ -67,6 +72,10 @@ export function openSettings(hooks: SettingsHooks) {
   const modelSel = el('select', { class: 'model-sel settings-select', title: 'Model' }) as HTMLSelectElement;
   body.append(modelSel);
   body.append(el('p', { class: 'settings-note' }, 'Models come from your opencode login. “Auto” lets opencode choose per task.'));
+  const relayBox = checkRow('Opencode models via CLI Relay');
+  body.append(el('p', { class: 'settings-note' }, 'Sends opencode-provider chats through your local opencode CLI and relays the result back (Zen free models are blocked for serve-driven apps). Off = normal path (fine for paid lanes and other providers).'));
+  const relayAutoBox = checkRow('Relay auto-approve (anything not denied)');
+  body.append(el('p', { class: 'settings-note' }, 'Relayed runs cannot pop approval cards, so non-denied permissions auto-pass. Explicit deny rules are always respected — prefer narrow patterns (rm -rf *, git push --force). Never deny bash/read outright on free models.'));
 
   // --- Agent ---
   section('Agent');
@@ -383,6 +392,175 @@ export function openSettings(hooks: SettingsHooks) {
 
   void refreshMcp().catch(() => {});
 
+  // --- Providers (extra OpenAI-compatible model endpoints) ---
+  section('Providers');
+  body.append(el('p', { class: 'settings-note' }, 'Extra model providers for the picker (OpenAI-compatible: OpenRouter, Groq, Ollama, …). Saved to Barang’s global file — your own configs are never touched. New models appear after an agent-server restart. For OAuth / API-key logins, `opencode auth login` in a terminal is easier.'));
+  const provBox = el('div', { class: 'mcp-box' });
+  body.append(provBox);
+
+  interface ProvState {
+    custom: ProviderListItem[] | null;
+    path: string;
+    error?: string;
+    loading: boolean;
+  }
+  const provState: ProvState = { custom: null, path: '', loading: true };
+
+  async function refreshProviders() {
+    provState.loading = true;
+    paintProviders();
+    try {
+      const res = await barang().mcpConfig('read', { scope: 'managed' });
+      const text = String(res?.text ?? '');
+      provState.path = String(res?.path ?? '');
+      try {
+        if (text.trim()) parseJsonc(text);
+        provState.custom = listProviderEntries(text);
+        provState.error = undefined;
+      } catch (e) {
+        provState.custom = [];
+        provState.error = (e as Error).message;
+      }
+    } catch (e) {
+      provState.custom = [];
+      provState.error = (e as Error).message;
+    }
+    provState.loading = false;
+    paintProviders();
+  }
+
+  function paintProviders() {
+    provBox.innerHTML = '';
+    // Detected providers (every configured layer, read-only here).
+    const seen = new Map<string, number>();
+    for (const m of agentStore.get().providerModels) {
+      seen.set(m.providerID, (seen.get(m.providerID) ?? 0) + 1);
+    }
+    const detected = el('div', { class: 'mcp-group' });
+    detected.append(el('div', { class: 'mcp-group-title' }, 'Detected'));
+    if (!seen.size) {
+      detected.append(el('div', { class: 'scm-none' }, 'No providers reported — is the agent server running?'));
+    } else {
+      for (const [id, n] of [...seen.entries()].sort()) {
+        const row = el('div', { class: 'mcp-row' });
+        const dot = el('span', { class: 'tool-dot is-ok' });
+        const main = el('div', { class: 'mcp-main' });
+        main.append(el('div', { class: 'mcp-name' }, id));
+        main.append(el('div', { class: 'mcp-sub' }, `${n} model${n === 1 ? '' : 's'}`));
+        row.append(dot, main);
+        detected.append(row);
+      }
+    }
+    provBox.append(detected);
+    // Custom providers (Barang's global file) with remove buttons.
+    const custom = el('div', { class: 'mcp-group' });
+    custom.append(el('div', { class: 'mcp-group-title' }, 'Custom (global file)'));
+    if (provState.loading) {
+      custom.append(el('div', { class: 'scm-none' }, 'Loading…'));
+    } else if (provState.error) {
+      custom.append(el('div', { class: 'chat-err' }, `Config unreadable: ${provState.error}`));
+    } else if (!provState.custom?.length) {
+      custom.append(el('div', { class: 'scm-none' }, 'None yet. Add one below.'));
+    } else {
+      for (const p of provState.custom) {
+        const row = el('div', { class: 'mcp-row' });
+        const dot = el('span', { class: 'tool-dot' });
+        const main = el('div', { class: 'mcp-main' });
+        main.append(el('div', { class: 'mcp-name' }, p.id));
+        main.append(el('div', { class: 'mcp-sub' }, `${p.baseURL || '(no endpoint)'} · ${p.models.length} model${p.models.length === 1 ? '' : 's'} · key: ${p.keyKind}`));
+        row.append(dot, main);
+        const acts = el('div', { class: 'mcp-acts' });
+        const bDel = el('button', { class: 'btn btn-sm', title: 'Remove' }, 'Remove') as HTMLButtonElement;
+        bDel.onclick = () => {
+          void (async () => {
+            const ok = await confirmDialog({
+              title: `Remove provider ${p.id}?`,
+              message: 'The entry is deleted from Barang’s global file (a backup is kept next to it). Models vanish after a server restart.',
+              confirmLabel: 'Remove',
+              danger: true,
+            });
+            if (!ok) return;
+            try {
+              const res = await barang().mcpConfig('read', { scope: 'managed' });
+              const next = removeProviderEntry(String(res?.text ?? ''), p.id);
+              await barang().mcpConfig('write', { scope: 'managed', text: next });
+              await refreshProviders();
+              hooks.toast(`Provider ${p.id} removed — restart the agent server to apply.`, 'info');
+            } catch (e) {
+              hooks.toast((e as Error).message, 'error');
+            }
+          })();
+        };
+        acts.append(bDel);
+        row.append(acts);
+        custom.append(row);
+      }
+    }
+    provBox.append(custom);
+    // Add form.
+    const add = el('div', { class: 'mcp-add' });
+    const fId = el('input', { class: 'settings-text', placeholder: 'id, e.g. my-llm' }) as HTMLInputElement;
+    const fUrl = el('input', { class: 'settings-text', placeholder: 'https://…/v1 (OpenAI-compatible base URL)' }) as HTMLInputElement;
+    const fKey = el('input', { class: 'settings-text', placeholder: 'env:NAME or key (optional, plaintext)', type: 'password' }) as HTMLInputElement;
+    const fModels = el('input', { class: 'settings-text', placeholder: 'models, comma separated' }) as HTMLInputElement;
+    const fSave = el('button', { class: 'btn btn-primary btn-sm' }, 'Save provider') as HTMLButtonElement;
+    fSave.onclick = () => {
+      void (async () => {
+        const entry: CustomProviderEntry = {
+          id: fId.value.trim(),
+          baseURL: fUrl.value.trim(),
+          apiKey: fKey.value.trim(),
+          models: parseModelIds(fModels.value),
+        };
+        const errs = validateProviderEntry(entry);
+        if (errs.length) {
+          hooks.toast(errs.join(' '), 'error');
+          return;
+        }
+        try {
+          const res = await barang().mcpConfig('read', { scope: 'managed' });
+          const next = setProviderEntry(String(res?.text ?? ''), entry);
+          await barang().mcpConfig('write', { scope: 'managed', text: next });
+          fId.value = '';
+          fUrl.value = '';
+          fKey.value = '';
+          fModels.value = '';
+          await refreshProviders();
+          hooks.toast(`Provider ${entry.id} saved — restart the agent server to apply.`, 'info');
+        } catch (e) {
+          hooks.toast((e as Error).message, 'error');
+        }
+      })();
+    };
+    add.append(fId, fUrl, fKey, fModels, fSave);
+    provBox.append(add);
+    const bar = el('div', { class: 'mcp-bar' });
+    const btnRestart = el('button', { class: 'btn btn-sm' }, 'Restart agent server') as HTMLButtonElement;
+    btnRestart.title = 'Applies saved provider changes (stops running work)';
+    btnRestart.onclick = () => {
+      void (async () => {
+        const ok = await confirmDialog({
+          title: 'Restart the agent server?',
+          message: 'Saved provider changes apply on restart. Running work will stop.',
+          confirmLabel: 'Restart',
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await barang().app.retryOpencode();
+          hooks.toast('Agent server restarting…', 'info');
+        } catch (e) {
+          hooks.toast(`Restart failed: ${(e as Error).message}`, 'error');
+        }
+      })();
+    };
+    bar.append(btnRestart);
+    provBox.append(bar);
+    if (provState.path) provBox.append(el('p', { class: 'settings-note' }, `Global file: ${provState.path}`));
+  }
+
+  void refreshProviders().catch(() => {});
+
   // --- Chat ---
 
   // --- Chat ---
@@ -607,6 +785,8 @@ export function openSettings(hooks: SettingsHooks) {
       return; // subscribe re-fires paint with consistent state
     }
     freeBox.checked = st0.freeOnly;
+    relayBox.checked = st0.opencodeRelay;
+    relayAutoBox.checked = st0.opencodeRelayAuto;
     usageBox.checked = st0.showUsage;
     fullAutoBox.checked = st0.agentFullAuto;
     reasonBox.checked = st0.showReasoning;
@@ -657,6 +837,18 @@ export function openSettings(hooks: SettingsHooks) {
   };
   modelSel.onchange = () => {
     applyModelSelection(modelSel.value);
+  };
+  relayBox.onchange = () => {
+    commit((s) => { s.opencodeRelay = relayBox.checked; });
+    hooks.toast(relayBox.checked
+      ? 'CLI Relay on — opencode models go through your local CLI.'
+      : 'CLI Relay off — opencode models use serve (free Zen models will 403).', 'info');
+  };
+  relayAutoBox.onchange = () => {
+    commit((s) => { s.opencodeRelayAuto = relayAutoBox.checked; });
+    hooks.toast(relayAutoBox.checked
+      ? 'Relay auto-approve on — anything not denied passes without asking.'
+      : 'Relay auto-approve off — relayed runs may stall on permission prompts.', 'info');
   };
   agentSel.onchange = () => {
     commit((settings) => {

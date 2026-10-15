@@ -91,6 +91,18 @@ const barang = {
   },
   /** Source control: single channel, op dispatch (info/diff/stage/…/log/init). */
   git: (op, args = {}) => invoke('git:run', { op, args }),
+  /** CLI Relay: opencode-provider chats via the official `opencode run` CLI.
+   *  start resolves { runId }; progress/exit arrive on onEvent as
+   *  { runId, kind: 'event'|'heartbeat'|'exit', ... }. */
+  relay: {
+    start: (opts) => invoke('relay:start', opts),
+    abort: (runId) => invoke('relay:abort', { runId }),
+    onEvent: (cb) => {
+      const h = (_ev, payload) => cb(payload ?? {});
+      ipcRenderer.on('relay:event', h);
+      return () => ipcRenderer.removeListener('relay:event', h);
+    },
+  },
   /** MCP config files: raw read/write (renderer merges). */
   mcpConfig: (action, payload = {}) => invoke('mcp:config', { action, ...payload }),
   /** Bolt API client: main-process HTTP (no CORS), cancellable. */

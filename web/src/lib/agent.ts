@@ -4,6 +4,11 @@
 import { oc } from './api';
 import { barang } from './transport';
 import { createStore, debounce, timeAgo } from './util';
+import {
+  shouldRelayRoute, buildRelayArgs, relayProgressLabel, redactSecrets,
+  RELAY_DISPLAY_NAME,
+  type RelayParsed,
+} from './relay';
 
 export interface AgentInfo {
   name: string;
@@ -564,6 +569,8 @@ export function describeActivity(messages: ChatMessage[], permissions: PendingPe
 export function connectEvents() {
   if (eventsConnected) return;
   eventsConnected = true;
+  // Relay completions arrive on their own channel (see sendRelay).
+  ensureRelayEvents();
   // Upstream /event frames forwarded by the desktop main process.
   barang().events.onConn((c) => agentStore.set({ connected: c }));
   barang().events.subscribe((data: string) => {
@@ -648,6 +655,8 @@ export interface BarangSettings {
   modelChosen: boolean; // explicit pick (even Auto) — boot defaults never override
   agent: string | null;
   agentFullAuto: boolean; // auto-approve permission asks (TUI --auto equivalent), default false
+  opencodeRelay: boolean; // CLI Relay: opencode models via the local CLI, default true
+  opencodeRelayAuto: boolean; // relay passes --auto (approve anything not denied), default true
   effort: string | null; // reasoning variant for the active model, null = Default
   freeOnly: boolean;
   showUsage: boolean; // statusbar session cost meter, default true
@@ -690,6 +699,8 @@ const SETTING_DEFAULTS: BarangSettings = {
   modelChosen: false,
   agent: null,
   agentFullAuto: false,
+  opencodeRelay: true,
+  opencodeRelayAuto: true,
   effort: null,
   freeOnly: true,
   showUsage: true,
@@ -834,6 +845,8 @@ export function readSettings(): BarangSettings {
       modelChosen: p.modelChosen === true || !!(p.model?.providerID && p.model?.modelID),
       agent: typeof p.agent === 'string' ? p.agent : null,
       agentFullAuto: p.agentFullAuto === true,
+      opencodeRelay: p.opencodeRelay !== false,
+      opencodeRelayAuto: p.opencodeRelayAuto !== false,
       effort: typeof p.effort === 'string' && p.effort ? p.effort.slice(0, 32) : null,
     };
   } catch {
@@ -848,9 +861,11 @@ export function writeSettings(s: BarangSettings) {
 }
 
 /** Heuristic free-tier detection (opencode exposes no pricing flags).
- *  Matches :free / -free / "free" tokens and Muse Spark (free family). */
+ *  Matches :free / -free / "free" tokens, Muse Spark (free family), and
+ *  Google's documented no-cost models (flash-lite, gemma) — both verified
+ *  live through serve+prompt_async while anonymous Zen free models 403. */
 export function isFreeModel(providerID: string, modelID: string): boolean {
-  return /free|muse-spark/i.test(`${providerID}/${modelID}`);
+  return /free|muse-spark|gemini-flash-lite|gemma-/i.test(`${providerID}/${modelID}`);
 }
 
 /** Default model chain: Muse Spark free family first, then MiMo free
@@ -1033,6 +1048,50 @@ export function messageErrorText(err: unknown): string | null {
   }
   if (typeof d.statusCode === 'number') return `${msg || 'Provider request failed.'} (HTTP ${d.statusCode})`;
   return msg || null;
+}
+
+/** True when the provider refuses the model itself ("Model access is
+ *  disabled"): a retired ID (e.g. opencode/muse-spark-1.2), a paid lane with
+ *  no subscription, or no quota — not a Barang bug and not retryable. Pure. */
+export function isModelAccessError(text: unknown): boolean {
+  return /model access is disabled/i.test(String(text ?? ''));
+}
+
+/** What to do about a model-access rejection. Verified live: muse-spark-1.2
+ *  is not entitled (use muse-spark-1.3-contributor-free for Zen free, gated
+ *  in serve UIs), while google/gemini-flash-lite-latest and openrouter :free
+ *  models answer through the same agent. Pure. */
+export function modelAccessGuidance(): string {
+  return (
+    'That model ID is not available on your account (e.g. opencode/muse-spark-1.2 is retired — ' +
+    'use muse-spark-1.3-contributor-free for Zen free, still gated in third-party UIs). ' +
+    'Verified working with the same agent just now: google/gemini-flash-lite-latest or an ' +
+    'openrouter :free model — switch the composer model picker, no reinstall needed.'
+  );
+}
+
+/** True when text is OpenCode Zen's free-tier client gate
+ *  ("FreeTierError … only be used from within OpenCode"). Enforced in
+ *  OpenCode's cloud for serve-driven traffic — anonymous AND logged-in
+ *  (verified live) — not in Barang or the bundled CLI. Downgrading Barang
+ *  cannot dodge it, and retrying only repeats the 403 (already classified
+ *  fatal, never retried). Pure. */
+export function isFreeTierGateError(text: unknown): boolean {
+  return /only be used from within OpenCode|FreeTierError/i.test(String(text ?? ''));
+}
+
+/** What to do about a free-tier gate rejection. Verified live: the same free
+ *  model answers from `opencode run` and other providers answer from Barang,
+ *  so the working move is switching the composer model — Barang never spoofs
+ *  client headers to bypass the gate. Pure. */
+export function freeTierGuidance(): string {
+  return (
+    'Upstream free-tier gate (opencode.ai Zen blocks anonymous serve traffic, not a Barang bug — ' +
+    'the same model works from `opencode run`, and other providers work from Barang). ' +
+    'Fastest fix: switch the composer model to google/gemini-flash-lite-latest or an ' +
+    'openrouter :free model (both verified working with the build agent just now) — no reinstall needed. ' +
+    'Also check opencode.json permission rules: "bash"/"read"/"*": "deny" trips the same 403 — use "ask".'
+  );
 }
 
 export async function refreshActive() {
@@ -1325,6 +1384,11 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   }
   const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
   const variant = resolveSendVariant(sel.model ?? null, readSettings().effort, s.providerModels);
+  // CLI Relay route: opencode-provider chats go through the official CLI
+  // (single spawn, no retries — a retry would duplicate the turn).
+  if (shouldRelayRoute(sel.model ?? null, readSettings().opencodeRelay)) {
+    return sendRelay(body, files, sel, variant, id);
+  }
   // Opencode-style submission: prompt_async returns 204 immediately and the
   // run streams over events — the composer never wedges on a blocking POST,
   // and run-level retries happen server-side (surfaced as 'Agent retrying').
@@ -1371,6 +1435,165 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   }
   await loadSessions().catch(() => {});
   return true;
+}
+
+// --- CLI Relay (opencode models via the official CLI) ---------------------
+
+export interface RelayRunRef {
+  runId: string;
+  sessionID: string;
+  startedAt: number;
+}
+
+let relayRun: RelayRunRef | null = null;
+let relayUnsub: (() => void) | null = null;
+
+/** True while a relayed CLI run is in flight (Stop button target). Pure-ish. */
+export function relayActive(): boolean {
+  return relayRun !== null;
+}
+
+/** Which route the composer send-row badge should show for this model. Pure. */
+export function relayRouteFor(model: { providerID: string; modelID: string } | null): boolean {
+  try {
+    return shouldRelayRoute(model, readSettings().opencodeRelay);
+  } catch {
+    return false;
+  }
+}
+
+function ensureRelayEvents() {
+  if (relayUnsub) return;
+  try {
+    relayUnsub = barang().relay.onEvent((ev) => {
+      if (!relayRun || !ev || ev.runId !== relayRun.runId) return;
+      if (ev.kind === 'event' && ev.event) {
+        const parsed: RelayParsed = { kind: 'event', ...ev.event };
+        const label = relayProgressLabel(parsed);
+        if (label) agentStore.set({ lastActivity: `${RELAY_DISPLAY_NAME}: ${label}` });
+        bumpProgress();
+      } else if (ev.kind === 'heartbeat') {
+        bumpProgress();
+      } else if (ev.kind === 'exit') {
+        void finishRelay({
+          code: typeof ev.code === 'number' ? ev.code : null,
+          timedOut: ev.timedOut === true,
+          sessionID: typeof ev.sessionID === 'string' ? ev.sessionID : null,
+          stderrTail: typeof ev.stderrTail === 'string' ? ev.stderrTail : '',
+        });
+      }
+    });
+  } catch {
+    relayUnsub = null; // bridge missing (browser tab) — relay unusable anyway
+  }
+}
+
+interface RelayExit {
+  code: number | null;
+  timedOut: boolean;
+  sessionID: string | null;
+  stderrTail: string;
+}
+
+/** Completion of a relayed run: adopt the session when still on it, refresh
+ *  the transcript from the shared store, then drain queued follow-ups. */
+async function finishRelay(exit: RelayExit) {
+  const run = relayRun;
+  relayRun = null;
+  if (!run) return;
+  let ok = exit.code === 0 && !exit.timedOut;
+  let errText: string | null = null;
+  if (exit.timedOut) {
+    ok = false;
+    errText = `${RELAY_DISPLAY_NAME} timed out after 15 minutes — the run was stopped. Shorten the task or split it up.`;
+  } else if (!ok) {
+    const tail = redactSecrets(exit.stderrTail).trim().split('\n').slice(-6).join('\n').slice(0, 600);
+    errText = tail
+      ? `${RELAY_DISPLAY_NAME} failed (exit ${exit.code ?? '?'}): ${tail}`
+      : `${RELAY_DISPLAY_NAME} failed (exit ${exit.code ?? 'unknown'}). Retry, or switch models.`;
+  }
+  await loadSessions().catch(() => {});
+  // Adopt the continued session only when the user hasn't navigated away
+  // mid-run — never yank them out of another session.
+  const stillThere = agentStore.get().activeId === run.sessionID;
+  const sid = exit.sessionID || run.sessionID;
+  if (sid && stillThere && agentStore.get().sessions.some((x) => x.id === sid)) {
+    if (agentStore.get().activeId !== sid) agentStore.set({ activeId: sid });
+  }
+  agentStore.set({
+    busy: false,
+    status: ok ? 'idle' : 'error',
+    statusInfo: null,
+    error: errText,
+  });
+  bumpProgress();
+  await refreshActive().catch(() => {});
+  if (ok) {
+    const view = agentStore.get().activeId;
+    if (view) await drainQueue(view).catch(() => {});
+  }
+}
+
+/** Send via the CLI Relay: one spawn, no retries (a retry would append a
+ *  duplicate turn). Completion/errors flow through finishRelay. */
+async function sendRelay(
+  body: string,
+  files: OutgoingFile[],
+  sel: SendSelection,
+  variant: string | undefined,
+  sessionID: string,
+): Promise<boolean> {
+  const settings = readSettings();
+  ensureRelayEvents();
+  if (relayRun) {
+    enqueueFollowUp(sessionID, body, files);
+    return true;
+  }
+  if (!sel.model) {
+    agentStore.set({ error: 'Pick a model first (composer model picker).', busy: false, status: 'idle', statusInfo: null });
+    return false;
+  }
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `Sending via ${RELAY_DISPLAY_NAME}…` });
+  lastSubmitAt = Date.now();
+  clearSessionQuestions(sessionID); // a fresh run supersedes any dead waits
+  clearSessionPermissions(sessionID);
+  bumpProgress();
+  // Pre-validate renderer-side for an early, clear error (main re-validates
+  // authoritatively before spawning).
+  try {
+    buildRelayArgs({
+      message: body,
+      model: sel.model!,
+      agent: sel.agent,
+      sessionID,
+      title: body.slice(0, 48) || 'Relay',
+      variant,
+      files: [],
+      auto: settings.opencodeRelayAuto,
+    });
+  } catch (e) {
+    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
+    return false;
+  }
+  try {
+    const { runId } = await barang().relay.start({
+      message: body,
+      model: { providerID: sel.model!.providerID, modelID: sel.model!.modelID },
+      ...(sel.agent ? { agent: sel.agent } : {}),
+      sessionID,
+      title: body.slice(0, 48) || 'Relay',
+      ...(variant ? { variant } : {}),
+      files: [],
+      images: files.map((f) => ({ filename: f.filename, mime: f.mime, dataUrl: f.url })),
+      auto: settings.opencodeRelayAuto,
+    });
+    relayRun = { runId, sessionID, startedAt: Date.now() };
+    await loadSessions().catch(() => {});
+    return true;
+  } catch (e) {
+    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
+    return false;
+  }
 }
 
 /** Follow-ups queued while a run is busy (opencode behavior: Enter never
@@ -1474,6 +1697,24 @@ export function consumeQuietStop(): boolean {
 export async function abortActive() {
   const s = agentStore.get();
   if (!s.activeId) return;
+  // A relayed CLI run dies by process kill, not /abort: stop it first so
+  // the turn can't keep spending quota after the button press.
+  if (relayRun) {
+    if (s.busy) quietNextStop();
+    const run = relayRun;
+    relayRun = null;
+    agentStore.set({ status: 'stopping', lastActivity: `Stopping ${RELAY_DISPLAY_NAME} run…` });
+    try {
+      await barang().relay.abort(run.runId);
+    } catch { /* already dead — fall through to refresh */ }
+    await new Promise((r) => setTimeout(r, 1200));
+    // The process is definitively dead (we killed it), so always release
+    // the composer — unlike serve-abort there is nothing to verify.
+    agentStore.set({ busy: false, status: 'idle', statusInfo: null });
+    await loadSessions().catch(() => {});
+    await refreshActive().catch(() => {});
+    return;
+  }
   // A stop is never a completion: silence the 'done' edge it produces
   // (answering a question stops-then-sends — without this the stop alone
   // chimes, then the answer run chimes again). One-shot, time-boxed.

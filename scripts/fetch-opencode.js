@@ -1,8 +1,8 @@
 // Vendors the opencode CLI binary into vendor/ so the installer ships it and
 // Barang works out of the box (no separate opencode install needed).
 // Source: opencode's own per-platform npm packages (same ones `opencode-ai`
-// uses), e.g. opencode-windows-x64@1.18.33 -> package bin/opencode(.exe).
-// Usage: node scripts/fetch-opencode.js [--version 1.18.33] [--platform win32] [--arch x64]
+// uses), e.g. opencode-windows-x64@1.19.0 -> package bin/opencode(.exe).
+// Usage: node scripts/fetch-opencode.js [--version 1.19.0] [--platform win32] [--arch x64]
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -17,7 +17,7 @@ const pick = (flag, fallback) => {
   const i = args.indexOf(flag);
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback;
 };
-const VERSION = pick('--version', process.env.BARANG_OPENCODE_VERSION || '1.18.33');
+const VERSION = pick('--version', process.env.BARANG_OPENCODE_VERSION || '1.19.0');
 const PLATFORM = pick('--platform', os.platform()); // win32 | darwin | linux
 const ARCH = pick('--arch', os.arch()); // x64 | arm64
 

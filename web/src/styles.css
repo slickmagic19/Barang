@@ -552,6 +552,10 @@ body.agentic .agent-wrap.agentic-empty { justify-content: center; }
 }
 body.agentic .agent-wrap.agentic-empty .sess-section,
 body.agentic .agent-wrap.agentic-empty .chat-list { display: none; }
+/* Vibe posture: the project folder/branch row shows on a fresh session
+ * (context for where the chat will work) and hides once the conversation
+ * exists — opencode-clean transcript, like the empty-state rules above. */
+body.agentic .agent-wrap:not(.agentic-empty) .agentic-meta { display: none; }
 /* Centered composer posture: undocked card with presence. */
 body.agentic .composer { border-top: none; padding: 6px 18px 0; background: transparent; }
 body.agentic .composer-box {
@@ -680,6 +684,27 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
   background: #f7768e10; border: 1px solid #f7768e4d; color: var(--red); font-size: 12px; line-height: 1.5;
 }
 .msg-runerr .ic { margin-top: 1px; flex: none; }
+/* Guidance follow-up to a run error (e.g. the upstream free-tier gate):
+ *  informational, not another red alert. */
+.msg-runerr.is-guide {
+  background: var(--accent-dim); border-color: var(--accent-line); color: var(--text);
+}
+/* CLI Relay route markers (composer badge + statusbar tag): informational,
+ * accent-tinted, never red. */
+.relay-badge {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .4px;
+  color: var(--accent); background: var(--accent-dim);
+  border: 1px solid var(--accent-line); border-radius: 999px;
+  padding: 3px 9px; white-space: nowrap;
+}
+.relay-badge.hidden { display: none; }
+.relay-tag {
+  font-size: 10px; font-weight: 700; letter-spacing: .4px;
+  color: var(--accent); background: var(--accent-dim);
+  border: 1px solid var(--accent-line); border-radius: 999px;
+  padding: 1px 7px; margin-left: 6px; white-space: nowrap;
+}
 .msg { display: flex; flex-direction: column; gap: 6px; max-width: 100%; }
 .msg-meta {
   display: flex; align-items: center; gap: 6px;

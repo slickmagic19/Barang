@@ -52,6 +52,30 @@ export interface BarangBridge {
     write(text: string): Promise<{ ok: boolean }>;
   };
   git(op: string, args?: Record<string, unknown>): Promise<any>;
+  relay: {
+    start(opts: {
+      message: string;
+      model: { providerID: string; modelID: string };
+      agent?: string;
+      sessionID?: string;
+      title?: string;
+      variant?: string;
+      files?: string[];
+      images?: Array<{ filename: string; mime: string; dataUrl: string }>;
+      auto: boolean;
+    }): Promise<{ runId: string }>;
+    abort(runId: string): Promise<{ aborted: boolean }>;
+    onEvent(cb: (ev: {
+      runId: string;
+      kind: 'event' | 'heartbeat' | 'exit';
+      event?: { type: string; sessionID?: string; text?: string; tool?: string; toolTitle?: string; toolStatus?: string; finishReason?: string };
+      code?: number | null;
+      signal?: string | null;
+      timedOut?: boolean;
+      sessionID?: string | null;
+      stderrTail?: string;
+    }) => void): () => void;
+  };
   mcpConfig(action: 'read' | 'write', payload?: { scope?: 'managed' | 'project'; text?: string }): Promise<any>;
   api: {
     send(req: { reqId: string; method: string; url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<{

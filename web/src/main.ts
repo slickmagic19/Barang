@@ -7,7 +7,14 @@ import { connectEvents, agentStore, createSession, selectSession, loadMeta, load
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
-pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop } from './lib/agent';
+pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, relayActive, relayRouteFor } from './lib/agent';
+import {
+  shouldRelayRoute, buildRelayArgs, parseRelayLine, relayProgressLabel, redactSecrets, RELAY_DISPLAY_NAME,
+} from './lib/relay';
+import {
+  validateProviderEntry, parseModelIds, normalizeProviderKey, providerToLiveConfig,
+  setProviderEntry, removeProviderEntry, listProviderEntries,
+} from './lib/providers';
 import { sliceWindow, truncateText, parseUnifiedPatch, applyHunkSubset } from './lib/util';
 import { watchAgentNotifications, playNotificationSound, resolveKindSound, KIND_DEFAULT_SOUND, debugAudioState, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
@@ -1037,7 +1044,14 @@ async function boot() {
       toast(`Could not open the Default folder: ${(err as Error).message}`, 'error');
       return;
     }
-    if (agentStore.get().root) enterAgentic();
+    if (!agentStore.get().root) return;
+    enterAgentic();
+    // Start screen → always a fresh session (never resume a stale one).
+    try {
+      await createSession();
+    } catch (e) {
+      toast(`New session failed: ${(e as Error).message}`, 'error');
+    }
   }
 
   initChat(agentPanel, {
@@ -1251,6 +1265,25 @@ async function boot() {
     wordpressQuickFill,
     wordpressEndpoint,
     mergeStatuses,
+    isFreeTierGateError,
+    freeTierGuidance,
+    isModelAccessError,
+    modelAccessGuidance,
+    relayActive,
+    relayRouteFor,
+    shouldRelayRoute,
+    buildRelayArgs,
+    parseRelayLine,
+    relayProgressLabel,
+    redactSecrets,
+    RELAY_DISPLAY_NAME,
+    validateProviderEntry,
+    parseModelIds,
+    normalizeProviderKey,
+    providerToLiveConfig,
+    setProviderEntry,
+    removeProviderEntry,
+    listProviderEntries,
     filePartView,
     stepHistory,
     pushComposerHist,

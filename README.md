@@ -33,7 +33,7 @@ npm run dist            # → release/win-unpacked/ (folder build)
 ```
 
 `npm run fetch:opencode` pins the CLI (`scripts/fetch-opencode.js`,
-default 1.18.33, override with `--version` / `BARANG_OPENCODE_VERSION`).
+default 1.19.0, override with `--version` / `BARANG_OPENCODE_VERSION`).
 `vendor/` is git-ignored and refreshed on every `dist` build.
 
 > First launch of the unsigned `.exe` may pause on Windows SmartScreen —

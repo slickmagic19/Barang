@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import * as files from './files.js';
 import * as updater from './updater.js';
 import { ensureServer, restartServer, stopServer, ocCall, opencodeState, attachPumpHandlers } from './opencodeClient.js';
+import { startRelay, abortRelay, shutdownRelays } from './relay.js';
 import * as term from './terminal.js';
 import * as scm from './git.js';
 import * as api from './api.js';
@@ -717,6 +718,14 @@ function registerIpc() {
       return { ok: false, error: e?.message || String(e) };
     }
   });
+
+  // CLI Relay: opencode-provider chats via the official `opencode run` CLI.
+  // Renderer sends validated fields; main builds argv (authoritative) and
+  // streams progress as 'relay:event' broadcasts ({ runId, kind, ... }).
+  ipcMain.handle('relay:start', ok(async (p = {}) => {
+    return startRelay(p, { root, broadcast: (ch, payload) => broadcast(ch, payload) });
+  }));
+  ipcMain.handle('relay:abort', ok(async (p = {}) => ({ aborted: abortRelay(p.runId) })));
 
   ipcMain.handle('app:state', () => ({
     root,
@@ -4104,6 +4113,7 @@ if (!gotLock && !SMOKE && !SMOKE_UI) {
   });
   app.on('before-quit', () => {
     term.killAll(); // shells die with the window (VSCode behavior)
+    shutdownRelays(); // relayed `opencode run` children die too
     stopServer(); // tree-kill the owned `opencode serve`
   });
 }

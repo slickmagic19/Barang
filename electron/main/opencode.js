@@ -87,9 +87,11 @@ async function resolveCommand() {
   // Home-level installs (opencode docs mention ~/.opencode/bin).
   candidates.push(path.join(os.homedir(), '.opencode', 'bin', exe));
   for (const c of candidates) {
+    if (!c) continue; // no resourcesPath in this runtime — never resolve CWD
     try {
       const abs = path.resolve(c);
-      await fs.access(abs);
+      const st = await fs.stat(abs);
+      if (!st.isFile()) continue; // a matching directory is not a binary
       return abs;
     } catch {
       /* try next */

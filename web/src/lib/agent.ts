@@ -860,6 +860,14 @@ export function writeSettings(s: BarangSettings) {
   } catch { /* private mode etc. */ }
 }
 
+/** Identity key for a model list (labels joined). Provider metadata
+ *  refreshes can swap the list 1:1 (same length, different IDs) — keying
+ *  rebuilds on identity (not length) keeps pickers from going stale/blank.
+ *  Pure. */
+export function modelListKey(models: Array<{ label: string }>): string {
+  return (models ?? []).map((m) => String(m?.label ?? '')).join('\n');
+}
+
 /** Heuristic free-tier detection (opencode exposes no pricing flags).
  *  Matches :free / -free / "free" tokens, Muse Spark (free family), and
  *  Google's documented no-cost models (flash-lite, gemma) — both verified
@@ -953,6 +961,59 @@ export async function loadSessions() {
   else if (activeId) await refreshStatus(activeId);
 }
 
+/** Derive a session title from the first prompt (opencode convention:
+ *  truncated prompt, else the image name). Null when there is nothing to
+ *  name it with. Pure. */
+export function derivePromptTitle(body: string, files: OutgoingFile[]): string | null {
+  const line = String(body ?? '').split('\n')[0].trim().slice(0, 48).trim();
+  if (line) return line;
+  const f = (files ?? [])[0];
+  if (f?.filename) return `Image ${f.filename}`.slice(0, 48);
+  return null;
+}
+
+/** True for server placeholder titles ("New session - <ISO>", empty).
+ *  Only these are ever auto-renamed — a real title is never touched. Pure. */
+export function isUntitledSessionTitle(title: unknown): boolean {
+  const t = String(title ?? '').trim();
+  return t === '' || /^new session( -|$)/i.test(t);
+}
+
+/** Display title: server title unless placeholder (then the active
+ *  session's first user message, else Untitled). Pure. */
+export function sessionDisplayTitle(
+  s: { title?: string } | null | undefined,
+  messages: ChatMessage[],
+): string {
+  const server = String(s?.title ?? '').trim();
+  if (server && !isUntitledSessionTitle(server)) return server;
+  for (const m of messages ?? []) {
+    if (String(m?.info?.role ?? '').toLowerCase() !== 'user') continue;
+    const text = (m?.parts ?? [])
+      .filter((p) => p?.type === 'text')
+      .map((p) => String(p?.text ?? ''))
+      .join('\n')
+      .split('\n')[0]
+      .trim();
+    if (text) return text.slice(0, 48);
+  }
+  return server || 'Untitled';
+}
+
+/** Rename an untitled session from its first prompt (the title agent only
+ *  covers working models — free-model sessions kept "New session" forever).
+ *  Best-effort and silent; the title agent may still overwrite later. */
+async function renameUntitledSession(id: string, title: string | null) {
+  if (!id || !title) return;
+  try {
+    const cur = agentStore.get().sessions.find((x) => x.id === id);
+    if (!cur || !isUntitledSessionTitle(cur.title)) return;
+    await oc.patch(`/session/${id}`, { title });
+    await loadSessions().catch(() => {});
+  } catch {
+    /* non-fatal: the dropdown fallback still shows something sane */
+  }
+}
 /** First-run UX decision (pure, smoke-tested): with a project open and the
  *  agent online but zero sessions, boot straight into a fresh session
  *  instead of stranding the user on an empty skeletal panel. */
@@ -1434,6 +1495,9 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
     return false;
   }
   await loadSessions().catch(() => {});
+  // First prompt names an untitled session (the title agent only covers
+  // working models — without this, free-model chats stay "New session").
+  await renameUntitledSession(id, derivePromptTitle(body, files));
   return true;
 }
 
@@ -1447,6 +1511,7 @@ export interface RelayRunRef {
 
 let relayRun: RelayRunRef | null = null;
 let relayUnsub: (() => void) | null = null;
+let relayTitle: string | null = null; // first-prompt title for rename-on-done
 
 /** True while a relayed CLI run is in flight (Stop button target). Pure-ish. */
 export function relayActive(): boolean {
@@ -1531,8 +1596,15 @@ async function finishRelay(exit: RelayExit) {
   });
   bumpProgress();
   if (ok) {
+    // First prompt names an untitled session (title agent is gated on free
+    // models — without this, relayed chats stay "New session").
+    const sid = exit.sessionID || run.sessionID;
+    await renameUntitledSession(sid, relayTitle);
+    relayTitle = null;
     const view = agentStore.get().activeId;
     if (view) await drainQueue(view).catch(() => {});
+  } else {
+    relayTitle = null;
   }
 }
 
@@ -1555,6 +1627,7 @@ async function sendRelay(
     agentStore.set({ error: 'Pick a model first (composer model picker).', busy: false, status: 'idle', statusInfo: null });
     return false;
   }
+  relayTitle = derivePromptTitle(body, files);
   agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `Sending via ${RELAY_DISPLAY_NAME}…` });
   lastSubmitAt = Date.now();
   clearSessionQuestions(sessionID); // a fresh run supersedes any dead waits

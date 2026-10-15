@@ -37,6 +37,9 @@ declare const __BARANG_COMMIT__: string | undefined;
 const FONT_SIZES = [12, 13, 14, 15, 16];
 
 export function openSettings(hooks: SettingsHooks) {
+  // Single instance: a second modal would duplicate section IDs and break
+  // tab ranges (global lookups hit the first modal's labels).
+  if (document.querySelector('.settings-overlay')) return;
   const overlay = el('div', { class: 'settings-overlay' });
   const dialog = el('div', { class: 'settings-modal', role: 'dialog', 'aria-label': 'Settings' });
   const head = el('div', { class: 'settings-head' });
@@ -684,37 +687,72 @@ export function openSettings(hooks: SettingsHooks) {
   resetRow.append(btnResetLayout);
   body.append(resetRow);
 
-  // Nav rail (VSCode-style): click scrolls, scroll-spy highlights.
+  // Nav rail as tab pages (one section visible at a time — scannable like
+  // VSCode's settings UI, no endless scroll). Each section's flat nodes are
+  // grouped into a real page container holding direct references — no index
+  // or lookup arithmetic that can desync between clicks.
   const content = el('div', { class: 'settings-content' });
-  const nav = el('nav', { class: 'settings-nav', 'aria-label': 'Settings sections' });
+  const nav = el('nav', { class: 'settings-nav', role: 'tablist', 'aria-label': 'Settings sections' });
   const navBtns = new Map<string, HTMLButtonElement>();
+  const pageEls = new Map<string, HTMLElement>();
+  const setActiveNav = (t: string) => {
+    for (const [name, b] of navBtns) {
+      b.classList.toggle('active', name === t);
+      b.setAttribute('aria-selected', name === t ? 'true' : 'false');
+    }
+  };
+  const showPage = (t: string) => {
+    // Hide by identity: everything under body that isn't the active page
+    // div stays hidden — even nodes appended after grouping (none expected)
+    // can never leak across tabs.
+    const active = pageEls.get(t) ?? null;
+    for (const k of [...body.children]) {
+      if (k instanceof HTMLElement) k.classList.toggle('hidden', k !== active);
+    }
+    body.scrollTop = 0;
+    setActiveNav(t);
+  };
+  const groupPages = () => {
+    // Snapshot first: moving nodes while iterating a live list corrupts it.
+    const kids = [...body.children] as HTMLElement[];
+    let cur: HTMLElement | null = null;
+    for (const k of kids) {
+      if (k.classList.contains('settings-label') && k.id.startsWith('sec-')) {
+        const t = SECTIONS.find((x) => secSlug(x) === k.id);
+        cur = null;
+        if (t) {
+          let page = pageEls.get(t);
+          if (!page) {
+            page = el('div', { class: 'settings-page' });
+            page.dataset.section = t;
+            pageEls.set(t, page);
+          }
+          page.append(k);
+          cur = page;
+        }
+        continue;
+      }
+      if (cur) cur.append(k);
+      // Nodes before the first label stay put (none expected).
+    }
+    // Pages in section order; every section gets one even if empty.
+    for (const t of SECTIONS) {
+      let page = pageEls.get(t);
+      if (!page) {
+        page = el('div', { class: 'settings-page' });
+        page.dataset.section = t;
+        pageEls.set(t, page);
+      }
+      body.append(page);
+    }
+  };
   for (const t of SECTIONS) {
-    const b = el('button', { class: 'settings-nav-item' }, t) as HTMLButtonElement;
-    b.onclick = () => {
-      setActiveNav(t);
-      document.getElementById(secSlug(t))?.scrollIntoView({ block: 'start' });
-    };
+    const b = el('button', { class: 'settings-nav-item', role: 'tab' }) as HTMLButtonElement;
+    b.textContent = t;
+    b.onclick = () => showPage(t);
     nav.append(b);
     navBtns.set(t, b);
   }
-  const setActiveNav = (t: string) => {
-    for (const [name, b] of navBtns) b.classList.toggle('active', name === t);
-  };
-  let spyQueued = false;
-  body.addEventListener('scroll', () => {
-    if (spyQueued) return;
-    spyQueued = true;
-    requestAnimationFrame(() => {
-      spyQueued = false;
-      const top = body.getBoundingClientRect().top;
-      let cur = SECTIONS[0];
-      for (const t of SECTIONS) {
-        const s = document.getElementById(secSlug(t));
-        if (s && s.getBoundingClientRect().top - top <= 28) cur = t;
-      }
-      setActiveNav(cur);
-    });
-  });
   setActiveNav(SECTIONS[0]);
   content.append(nav, body);
   dialog.append(content);
@@ -904,7 +942,8 @@ export function openSettings(hooks: SettingsHooks) {
     }
     for (const c of customs) {
       const row = el('div', { class: 'settings-row' });
-      row.append(el('span', { class: 'settings-row-label' }, c.name));
+      const name = el('span', { class: 'settings-row-label sound-row-name' }, c.name);
+      const acts = el('div', { class: 'sound-acts' });
       const btnPlay = el('button', { class: 'btn btn-sm', title: `Preview ${c.name}` }, 'Play') as HTMLButtonElement;
       btnPlay.onclick = () => {
         const s = readSettings();
@@ -914,7 +953,8 @@ export function openSettings(hooks: SettingsHooks) {
       };
       const btnDel = el('button', { class: 'btn btn-sm', title: `Remove ${c.name}` }, 'Remove') as HTMLButtonElement;
       btnDel.onclick = () => void removeCustomSound(c.id, c.name);
-      row.append(btnPlay, btnDel);
+      acts.append(btnPlay, btnDel);
+      row.append(name, acts);
       customList.append(row);
     }
   };
@@ -1044,4 +1084,8 @@ export function openSettings(hooks: SettingsHooks) {
   agentStore.subscribe(paint);
   void loadMeta().then(paint).catch((e) => hooks.toast(`opencode metadata: ${e.message}`, 'error'));
   paint();
+  // Group AFTER every section (About is built last) — anything left loose
+  // in body would show on every tab.
+  groupPages();
+  showPage(SECTIONS[0]); // tabbed: first page visible, rest hidden
 }

@@ -7,7 +7,7 @@ import {
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
   refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
   statusTextFor, messageErrorText, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, todoProgress, classifyAttachFile,
-  relayActive, relayRouteFor,
+  relayActive, relayRouteFor, modelListKey, sessionDisplayTitle,
   loadCommands, parseSlashCommand, sendCommand,
   compactSession, shareSession, unshareSession, markQuestionAnswered,
   enqueueFollowUp, queuedFollowUps, removeQueuedFollowUp, drainQueue,
@@ -1102,7 +1102,11 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   const paintModelMini = () => {
     const s = agentStore.get();
     const models = listSelectableModels();
-    if (modelMini.dataset.count !== String(models.length + 1)) {
+    // Identity key (not length): provider metadata refreshes can swap the
+    // list 1:1 (same count, different IDs) — a stale option list then shows
+    // a blank for the picked model. Fresh-download symptom exactly.
+    const key = modelListKey(models);
+    if (modelMini.dataset.key !== key) {
       modelMini.innerHTML = '';
       modelMini.append(el('option', { value: '' }, 'Auto') as HTMLOptionElement);
       let lastProv = '';
@@ -1115,7 +1119,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
         }
         (modelMini.lastElementChild as HTMLOptGroupElement)?.append(el('option', { value: m.label }, m.modelID) as HTMLOptionElement);
       }
-      modelMini.dataset.count = String(models.length + 1);
+      modelMini.dataset.key = key;
     }
     const cur = s.model ? `${s.model.providerID}/${s.model.modelID}` : '';
     modelMini.value = cur;
@@ -1820,7 +1824,8 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
     const cur = sessSel.value;
     sessSel.innerHTML = '';
     for (const sess of s.sessions) {
-      const o = el('option', { value: sess.id }, `${sess.title || 'Untitled'} — ${sess.time?.updated ? timeAgo(sess.time.updated) : ''}`) as HTMLOptionElement;
+      const name = sessionDisplayTitle(sess, sess.id === s.activeId ? s.messages : []);
+      const o = el('option', { value: sess.id }, `${name} — ${sess.time?.updated ? timeAgo(sess.time.updated) : ''}`) as HTMLOptionElement;
       sessSel.append(o);
     }
     if (s.activeId) sessSel.value = s.activeId;

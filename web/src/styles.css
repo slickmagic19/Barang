@@ -1471,4 +1471,14 @@ button.status-item:hover { color: var(--text); }
   display: flex; flex-direction: column; gap: 7px;
   border: 1px solid var(--border); border-radius: 9px; padding: 11px 12px;
 }
+/* Form controls fill the card (the base .settings-text is a fixed 190px). */
+.mcp-add .settings-text, .mcp-wp .settings-text,
+.mcp-add select, .mcp-wp select, .mcp-add textarea, .mcp-wp textarea {
+  width: 100%; box-sizing: border-box;
+}
+/* Form buttons keep their natural width (column flex would stretch them). */
+.mcp-add .btn { align-self: flex-start; }
+/* Custom sound rows: name truncates, actions stay pinned right. */
+.sound-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sound-acts { display: flex; gap: 6px; flex: none; }
 .mcp-area { min-height: 54px; resize: vertical; font-family: var(--mono); font-size: 11.5px; }

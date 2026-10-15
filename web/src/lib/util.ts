@@ -301,3 +301,13 @@ export function truncateText(s: string, max: number): { text: string; truncated:
   if (s.length <= max) return { text: s, truncated: false };
   return { text: s.slice(0, max), truncated: true };
 }
+
+/** Tab-page child range for flat sectioned content: [start, end) of children
+ *  belonging to page `page`, given the sorted child indexes of each section
+ *  label. Missing label -> empty range (never show everything). Pure. */
+export function tabPageRange(labelIdx: readonly number[], page: number, kidCount: number): [number, number] {
+  const start = Number.isInteger(page) && page >= 0 && page < labelIdx.length ? labelIdx[page] : -1;
+  if (start < 0) return [0, 0];
+  const next = page + 1 < labelIdx.length && labelIdx[page + 1] >= 0 ? labelIdx[page + 1] : kidCount;
+  return [start, Math.max(start, Math.min(kidCount, next))];
+}

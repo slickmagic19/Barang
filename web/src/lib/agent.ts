@@ -1520,6 +1520,9 @@ async function finishRelay(exit: RelayExit) {
   if (sid && stillThere && agentStore.get().sessions.some((x) => x.id === sid)) {
     if (agentStore.get().activeId !== sid) agentStore.set({ activeId: sid });
   }
+  // Refresh first: refreshActive recomputes the store error from the
+  // transcript and would clobber the relay failure below.
+  await refreshActive().catch(() => {});
   agentStore.set({
     busy: false,
     status: ok ? 'idle' : 'error',
@@ -1527,7 +1530,6 @@ async function finishRelay(exit: RelayExit) {
     error: errText,
   });
   bumpProgress();
-  await refreshActive().catch(() => {});
   if (ok) {
     const view = agentStore.get().activeId;
     if (view) await drainQueue(view).catch(() => {});
@@ -1557,6 +1559,21 @@ async function sendRelay(
   lastSubmitAt = Date.now();
   clearSessionQuestions(sessionID); // a fresh run supersedes any dead waits
   clearSessionPermissions(sessionID);
+  // Optimistic user bubble: relayed runs surface nothing until they finish,
+  // so paint the sent message immediately (serve reconverges on refresh —
+  // refreshActive replaces the list with server truth, dropping this).
+  agentStore.set({
+    messages: [
+      ...agentStore.get().messages,
+      {
+        info: { id: `local_${Date.now().toString(36)}`, role: 'user', time: { created: Date.now() } },
+        parts: [
+          ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
+          ...(body ? [{ type: 'text', text: body }] : []),
+        ],
+      } as ChatMessage,
+    ],
+  });
   bumpProgress();
   // Pre-validate renderer-side for an early, clear error (main re-validates
   // authoritatively before spawning).

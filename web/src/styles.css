@@ -556,8 +556,9 @@ body.agentic .agent-wrap.agentic-empty .chat-list { display: none; }
  * (context for where the chat will work) and hides once the conversation
  * exists — opencode-clean transcript, like the empty-state rules above. */
 body.agentic .agent-wrap:not(.agentic-empty) .agentic-meta { display: none; }
-/* Centered composer posture: undocked card with presence. */
-body.agentic .composer { border-top: none; padding: 6px 18px 0; background: transparent; }
+/* Centered composer posture: undocked card with presence. Bottom breathing
+ * room so the card never kisses the status bar (meta row hidden mid-chat). */
+body.agentic .composer { border-top: none; padding: 6px 18px 14px; background: transparent; }
 body.agentic .composer-box {
   border-radius: 14px; padding: 8px 8px 6px 16px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, .45);
@@ -565,6 +566,8 @@ body.agentic .composer-box {
 body.agentic .composer-input { font-size: 13.5px; padding: 10px 10px 4px 0; }
 .agentic-meta { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 12px 14px; color: var(--text-dim); font-size: 12px; }
 .agentic-meta.hidden { display: none; }
+/* Vibe-only chrome: never in IDE (sidebar + status bar already show context). */
+body:not(.agentic) .agentic-meta { display: none; }
 .agentic-meta .sep { color: var(--text-faint); }
 .agentic-folder {
   display: flex; align-items: center; gap: 7px; background: #ffffff06;

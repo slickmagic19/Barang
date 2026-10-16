@@ -214,6 +214,7 @@ interface AgentState {
   permissions: PendingPermission[];
   questions: PendingQuestion[]; // agent question-tool waits (event-sourced)
   lastActivity: string; // human summary of what the run is doing (stall row)
+  relayStuck: RelayStuck | null; // quiet-tool escalation (Stop & continue offer)
   connected: boolean;
   error: string | null;
 }
@@ -234,6 +235,7 @@ export const agentStore = createStore<AgentState>({
   permissions: [],
   questions: [],
   lastActivity: '',
+  relayStuck: null,
   connected: false,
   error: null,
 });
@@ -1021,12 +1023,24 @@ export function shouldAutoCreateSession(root: string, opencodeOk: boolean, sessi
   return root !== '' && opencodeOk && sessionCount === 0 && !creating;
 }
 
+/** In-flight session creation shared by concurrent callers (Vibe auto-create
+ *  racing a fast Enter must yield ONE session, not two). First title wins. */
+let createFlight: Promise<string> | null = null;
+
 export async function createSession(title?: string): Promise<string> {
-  const { value: created } = await withSendRetries(() => oc.post<SessionInfo>('/session', title ? { title } : {}));
-  await loadSessions();
-  agentStore.set({ activeId: created.id, messages: [], todos: [], permissions: [], busy: false, error: null });
-  await refreshActive();
-  return created.id;
+  if (createFlight) return createFlight;
+  createFlight = (async () => {
+    const { value: created } = await withSendRetries(() => oc.post<SessionInfo>('/session', title ? { title } : {}));
+    await loadSessions();
+    agentStore.set({ activeId: created.id, messages: [], todos: [], permissions: [], busy: false, error: null });
+    await refreshActive();
+    return created.id;
+  })();
+  try {
+    return await createFlight;
+  } finally {
+    createFlight = null;
+  }
 }
 
 export async function selectSession(id: string) {
@@ -1051,6 +1065,9 @@ export async function deleteSession(id: string) {
 }
 
 export async function refreshStatus(sessionId: string) {
+  // A relayed CLI run is invisible to the serve status endpoint (missing
+  // entry = idle there) — never let it clobber the relay's busy state.
+  if (relayRun && relayRun.sessionID === sessionId) return;
   try {
     const st = await oc.get<Record<string, RunStatusInfo>>('/session/status');
     // Switched mid-flight — a stale session's busy flag must not leak in.
@@ -1425,6 +1442,71 @@ export function findUserMessage(messages: ChatMessage[], messageID: string, body
   return false;
 }
 
+/** Normalize echo text for comparison: the server stores a cleaned copy
+ *  (surrounding quotes stripped, whitespace collapsed) while the composer
+ *  echoes what was typed — exact compare then misses and the bubble
+ *  appears twice until completion replaces everything. Pure. */
+export function normEchoText(t: string): string {
+  let s = String(t ?? '').trim().replace(/\s+/g, ' ');
+  const q = s.match(/^(['"`‘’“”])([\s\S]*)\1$/);
+  if (q) s = q[2].trim();
+  return s;
+}
+
+/** Loose echo check for the relay poller: same recency rules as
+ *  findUserMessage, but matches on normalized text. Display-only (never
+ *  gates a retry — a false positive here only skips re-painting a bubble
+ *  the next refresh replaces anyway). Pure. */
+export function findUserMessageLoose(messages: ChatMessage[], body: string): boolean {
+  const want = normEchoText(body);
+  if (!want) return false;
+  const now = Date.now();
+  for (const m of messages ?? []) {
+    if (String(m?.info?.role ?? '').toLowerCase() !== 'user') continue;
+    const created = Number(m?.info?.time?.created ?? 0);
+    if (!(created > 0) || now - created >= 180000) continue;
+    const text = (m?.parts ?? []).filter((p) => p?.type === 'text').map((p) => String(p?.text ?? '')).join('\n');
+    if (text && normEchoText(text) === want) return true;
+  }
+  return false;
+}
+
+export interface RelayEchoGuard {
+  sessionID: string;
+  since: number;
+  body: string;
+}
+
+/** Active relay echo guard (null when no relay run owns the composer).
+ *  While set, the transcript may hold transitional partial echoes of the
+ *  just-sent message — the renderer hides those (see isTransientRelayEcho)
+ *  so slow runs don't look duplicated. Pure-ish. */
+export function relayEchoGuard(): RelayEchoGuard | null {
+  if (!relayRun) return null;
+  return { sessionID: relayRun.sessionID, since: relayRun.startedAt, body: relayBody ?? '' };
+}
+
+/** True for a transitional partial echo: a server user-message created
+ *  after the relay started that isn't the full sent text (opencode builds
+ *  the message incrementally — file part, tool chatter, then the prompt).
+ *  The optimistic bubble (local id, full text) is never transient, and
+ *  nothing outside the relay session is affected. Pure. */
+export function isTransientRelayEcho(
+  m: ChatMessage,
+  guard: RelayEchoGuard | null,
+  activeId: string | null,
+): boolean {
+  if (!guard || !m || typeof m !== 'object') return false;
+  if (guard.sessionID !== activeId) return false;
+  const info = (m.info ?? {}) as { id?: unknown; role?: unknown; time?: { created?: unknown } };
+  if (String(info.id ?? '').startsWith('local_')) return false;
+  if (String(info.role ?? '').toLowerCase() !== 'user') return false;
+  const created = Number(info.time?.created ?? 0);
+  if (!(created > 0) || created < guard.since - 2000) return false;
+  if (guard.body && findUserMessageLoose([m], guard.body)) return false;
+  return true;
+}
+
 export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): Promise<boolean> {
   const s = agentStore.get();
   const body = text.trim();
@@ -1510,8 +1592,129 @@ export interface RelayRunRef {
 }
 
 let relayRun: RelayRunRef | null = null;
+let relayStarting = false; // spawn accepted but runId unknown yet (same-tick double send)
+let relayArmedAt = 0; // when the current spawn attempt began (double-fire window)
 let relayUnsub: (() => void) | null = null;
 let relayTitle: string | null = null; // first-prompt title for rename-on-done
+let relayBody: string | null = null; // prompt text for echo-keep while polling
+let relayFiles: OutgoingFile[] = [];
+let relayOptimisticId: string | null = null; // our bubble's id: never re-append it
+let relayPoll: ReturnType<typeof setInterval> | null = null;
+const RELAY_POLL_MS = 10000;
+let lastRelayOutputAt = 0; // any CLI output (event or heartbeat line)
+let lastRelayTranscriptAt = 0; // last transcript-signature change
+let lastRelayTranscriptSig = '';
+let lastRelayTool: string | null = null;
+
+function relayTranscriptSig(): string {
+  const s = agentStore.get();
+  const todos = (s.todos ?? []).map((t) => `${t.id}:${t.status}`).join(',');
+  const lastMsg = s.messages.length ? String(s.messages[s.messages.length - 1]?.info?.id ?? s.messages.length) : '';
+  return `${s.messages.length}|${todos}|${lastMsg}`;
+}
+
+/** Optimistic user bubble (painted at send; server truth replaces it). Pure. */
+function localUserMessage(body: string, files: OutgoingFile[]): ChatMessage {
+  return {
+    info: { id: `local_${Date.now().toString(36)}`, role: 'user', time: { created: Date.now() } },
+    parts: [
+      ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
+      ...(body ? [{ type: 'text', text: body }] : []),
+    ],
+  } as ChatMessage;
+}
+
+function stopRelayPoll() {
+  if (relayPoll) {
+    clearInterval(relayPoll);
+    relayPoll = null;
+  }
+}
+
+/** Mid-run transcript sync: relayed runs stream nothing over serve events,
+ *  so poll the shared store — progress (messages, todos, changes) lands
+ *  smoothly instead of all-at-once at completion. Read-only; the echo-keep
+ *  re-pins the optimistic bubble until the server echoes it (no flicker). */
+function startRelayPoll() {
+  stopRelayPoll();
+  relayPoll = setInterval(() => {
+    const run = relayRun;
+    if (!run) {
+      stopRelayPoll();
+      return;
+    }
+    void refreshActive()
+      .then(() => {
+        const s = agentStore.get();
+        if (!relayRun || agentStore.get().activeId !== run.sessionID) return;
+        // Never paint the bubble twice: ours is already there (by id), or
+        // the server echo arrived (loose text match).
+        const hasOurs = !!relayOptimisticId && s.messages.some((m) => m?.info?.id === relayOptimisticId);
+        if (relayBody && !hasOurs && !findUserMessageLoose(s.messages, relayBody)) {
+          const again = localUserMessage(relayBody, relayFiles);
+          relayOptimisticId = String(again.info?.id ?? null);
+          agentStore.set({ messages: [...s.messages, again] });
+        }
+        // Stuck escalation: output-quiet AND transcript-static past the
+        // threshold. Either clock moving means progress — this only ever
+        // surfaces UI (Stop & continue); it never kills anything.
+        const now = Date.now();
+        const sig = relayTranscriptSig();
+        if (sig !== lastRelayTranscriptSig) {
+          lastRelayTranscriptSig = sig;
+          lastRelayTranscriptAt = now;
+          if (agentStore.get().relayStuck) agentStore.set({ relayStuck: null });
+        }
+        const cur = agentStore.get();
+        if (!cur.relayStuck && decideRelayStuck(lastRelayOutputAt, lastRelayTranscriptAt, now)) {
+          const mins = Math.max(1, Math.round((now - lastRelayOutputAt) / 60000));
+          const tool = lastRelayTool ? `Tool '${lastRelayTool}'` : 'The running step';
+          agentStore.set({
+            relayStuck: { tool: lastRelayTool, since: lastRelayOutputAt },
+            lastActivity: `${tool} quiet ${mins} min — process alive`,
+          });
+        } else if (cur.relayStuck) {
+          const mins = Math.max(1, Math.round((now - cur.relayStuck.since) / 60000));
+          const tool = cur.relayStuck.tool ? `Tool '${cur.relayStuck.tool}'` : 'The running step';
+          agentStore.set({ lastActivity: `${tool} quiet ${mins} min — process alive` });
+        }
+      })
+      .catch(() => {});
+  }, RELAY_POLL_MS);
+}
+
+/** Quiet-tool threshold for relay stuck detection: no CLI output AND no
+ *  transcript change for this long means the turn isn't progressing (a
+ *  healthy npm install still emits output or advances todos/messages).
+ *  Detection only ever surfaces UI — it never kills anything. */
+export const RELAY_STUCK_MS = 5 * 60 * 1000;
+
+export interface RelayStuck {
+  tool: string | null;
+  since: number; // last-output timestamp the quiet stretch started at
+}
+
+/** Pure stuck decision (unit-tested): output-silent AND transcript-static
+ *  past the threshold. Either clock moving means progress. */
+export function decideRelayStuck(
+  lastOutputAt: number,
+  lastTranscriptAt: number,
+  nowMs: number,
+  thresholdMs = RELAY_STUCK_MS,
+): boolean {
+  if (!(nowMs > 0) || !(thresholdMs > 0)) return false;
+  return nowMs - Math.max(lastOutputAt, 0) > thresholdMs
+    && nowMs - Math.max(lastTranscriptAt, 0) > thresholdMs;
+}
+
+/** Continuation turn after a stuck tool is stopped: resumes from the shared
+ *  transcript instead of asking the user to retype. Pure. */
+export function stuckContinueText(tool: string | null, quietMs: number): string {
+  const mins = Math.max(1, Math.round(quietMs / 60000));
+  const what = tool ? `tool '${tool}'` : 'the running step';
+  return `Continue: the previous turn was stopped after ${what} produced no output for ${mins} min. ` +
+    `Pick up from the last completed state — do not restart finished work.`;
+}
 
 /** True while a relayed CLI run is in flight (Stop button target). Pure-ish. */
 export function relayActive(): boolean {
@@ -1534,10 +1737,19 @@ function ensureRelayEvents() {
       if (!relayRun || !ev || ev.runId !== relayRun.runId) return;
       if (ev.kind === 'event' && ev.event) {
         const parsed: RelayParsed = { kind: 'event', ...ev.event };
+        lastRelayOutputAt = Date.now();
+        if (parsed.tool) lastRelayTool = parsed.tool;
+        if (agentStore.get().relayStuck) agentStore.set({ relayStuck: null });
         const label = relayProgressLabel(parsed);
         if (label) agentStore.set({ lastActivity: `${RELAY_DISPLAY_NAME}: ${label}` });
         bumpProgress();
       } else if (ev.kind === 'heartbeat') {
+        lastRelayOutputAt = Date.now();
+        if (agentStore.get().relayStuck) agentStore.set({ relayStuck: null });
+        bumpProgress();
+      } else if (ev.kind === 'alive') {
+        // Relay process alive but quiet (long tool call): reset the stall
+        // clock so a healthy run is never asked to Stop + resend.
         bumpProgress();
       } else if (ev.kind === 'exit') {
         void finishRelay({
@@ -1565,12 +1777,19 @@ interface RelayExit {
 async function finishRelay(exit: RelayExit) {
   const run = relayRun;
   relayRun = null;
+  stopRelayPoll();
+  relayBody = null;
+  relayFiles = [];
+  relayOptimisticId = null;
   if (!run) return;
+  agentStore.set({ relayStuck: null });
   let ok = exit.code === 0 && !exit.timedOut;
   let errText: string | null = null;
   if (exit.timedOut) {
+    // Defensive only: the relay backend sets no time cap (runs end on
+    // process exit or user stop).
     ok = false;
-    errText = `${RELAY_DISPLAY_NAME} timed out after 15 minutes — the run was stopped. Shorten the task or split it up.`;
+    errText = `${RELAY_DISPLAY_NAME} run was stopped by a timeout. Retry, or split the task up.`;
   } else if (!ok) {
     const tail = redactSecrets(exit.stderrTail).trim().split('\n').slice(-6).join('\n').slice(0, 600);
     errText = tail
@@ -1619,12 +1838,33 @@ async function sendRelay(
 ): Promise<boolean> {
   const settings = readSettings();
   ensureRelayEvents();
-  if (relayRun) {
+  if (relayRun || relayStarting) {
+    // Same-tick double-fire (Enter repeat / Enter+click with identical text):
+    // drop it — the turn is already going. Anything else queues normally.
+    if (body === relayBody && Date.now() - (relayRun?.startedAt ?? relayArmedAt) < 5000) return true;
     enqueueFollowUp(sessionID, body, files);
     return true;
   }
   if (!sel.model) {
     agentStore.set({ error: 'Pick a model first (composer model picker).', busy: false, status: 'idle', statusInfo: null });
+    return false;
+  }
+  // Pre-validate renderer-side for an early, clear error (main re-validates
+  // authoritatively before spawning) — before painting anything, so a
+  // rejection leaves no phantom bubble or wedged busy state.
+  try {
+    buildRelayArgs({
+      message: body,
+      model: sel.model,
+      agent: sel.agent,
+      sessionID,
+      title: body.slice(0, 48) || 'Relay',
+      variant,
+      files: [],
+      auto: settings.opencodeRelayAuto,
+    });
+  } catch (e) {
+    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'idle', statusInfo: null });
     return false;
   }
   relayTitle = derivePromptTitle(body, files);
@@ -1635,37 +1875,17 @@ async function sendRelay(
   // Optimistic user bubble: relayed runs surface nothing until they finish,
   // so paint the sent message immediately (serve reconverges on refresh —
   // refreshActive replaces the list with server truth, dropping this).
+  relayBody = body;
+  relayFiles = files;
+  const optimistic = localUserMessage(body, files);
+  relayOptimisticId = String(optimistic.info?.id ?? null);
   agentStore.set({
-    messages: [
-      ...agentStore.get().messages,
-      {
-        info: { id: `local_${Date.now().toString(36)}`, role: 'user', time: { created: Date.now() } },
-        parts: [
-          ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
-          ...(body ? [{ type: 'text', text: body }] : []),
-        ],
-      } as ChatMessage,
-    ],
+    messages: [...agentStore.get().messages, optimistic],
   });
   bumpProgress();
-  // Pre-validate renderer-side for an early, clear error (main re-validates
-  // authoritatively before spawning).
   try {
-    buildRelayArgs({
-      message: body,
-      model: sel.model!,
-      agent: sel.agent,
-      sessionID,
-      title: body.slice(0, 48) || 'Relay',
-      variant,
-      files: [],
-      auto: settings.opencodeRelayAuto,
-    });
-  } catch (e) {
-    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
-    return false;
-  }
-  try {
+    relayStarting = true;
+    relayArmedAt = Date.now();
     const { runId } = await barang().relay.start({
       message: body,
       model: { providerID: sel.model!.providerID, modelID: sel.model!.modelID },
@@ -1678,10 +1898,27 @@ async function sendRelay(
       auto: settings.opencodeRelayAuto,
     });
     relayRun = { runId, sessionID, startedAt: Date.now() };
+    relayStarting = false;
+    lastRelayOutputAt = Date.now();
+    lastRelayTranscriptAt = Date.now();
+    lastRelayTranscriptSig = relayTranscriptSig();
+    lastRelayTool = null;
+    agentStore.set({ relayStuck: null });
+    startRelayPoll();
     await loadSessions().catch(() => {});
     return true;
   } catch (e) {
-    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
+    relayStarting = false;
+    // Spawn never happened: retract the optimistic bubble (nothing was
+    // stored server-side) instead of leaving a phantom message.
+    const oid = optimistic.info?.id;
+    agentStore.set({
+      messages: agentStore.get().messages.filter((m) => m?.info?.id !== oid),
+      error: (e as Error)?.message ?? String(e),
+      busy: false,
+      status: 'error',
+      statusInfo: null,
+    });
     return false;
   }
 }
@@ -1793,7 +2030,11 @@ export async function abortActive() {
     if (s.busy) quietNextStop();
     const run = relayRun;
     relayRun = null;
-    agentStore.set({ status: 'stopping', lastActivity: `Stopping ${RELAY_DISPLAY_NAME} run…` });
+    stopRelayPoll();
+    relayBody = null;
+    relayFiles = [];
+    relayOptimisticId = null;
+    agentStore.set({ status: 'stopping', lastActivity: `Stopping ${RELAY_DISPLAY_NAME} run…`, relayStuck: null });
     try {
       await barang().relay.abort(run.runId);
     } catch { /* already dead — fall through to refresh */ }

@@ -7,7 +7,7 @@ import { connectEvents, agentStore, createSession, selectSession, loadMeta, load
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
-pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, relayActive, relayRouteFor, modelListKey, derivePromptTitle, isUntitledSessionTitle, sessionDisplayTitle } from './lib/agent';
+pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, relayActive, relayRouteFor, modelListKey, derivePromptTitle, isUntitledSessionTitle, sessionDisplayTitle, decideRelayStuck, stuckContinueText, normEchoText, findUserMessageLoose, relayEchoGuard, isTransientRelayEcho } from './lib/agent';
 import {
   shouldRelayRoute, buildRelayArgs, parseRelayLine, relayProgressLabel, redactSecrets, RELAY_DISPLAY_NAME,
 } from './lib/relay';
@@ -1276,6 +1276,12 @@ async function boot() {
     derivePromptTitle,
     isUntitledSessionTitle,
     sessionDisplayTitle,
+    decideRelayStuck,
+    stuckContinueText,
+    normEchoText,
+    findUserMessageLoose,
+    relayEchoGuard,
+    isTransientRelayEcho,
     shouldRelayRoute,
     buildRelayArgs,
     parseRelayLine,

@@ -2,12 +2,13 @@
 // `opencode run` CLI (serve-driven Zen free calls are gated upstream; the
 // official CLI path passes — verified live). Spawns are shell-free argv
 // arrays against the resolved CLI binary, rooted at the open project.
-// One active run is guarded renderer-side; main additionally refuses a
-// second concurrent run to avoid duplicate billed turns.
+// Runs end when the process ends (or the user stops it) — there is
+// deliberately no time cap: long agentic work (installs, dev servers)
+// must not be killed mid-flight. One active run is guarded renderer-side;
+// main additionally refuses a second concurrent run to avoid duplicate turns.
 import { spawn } from 'node:child_process';
 import { findOpencode, isDirectBinary, tryStop, isWin } from './opencode.js';
 
-export const RELAY_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_STDERR_TAIL = 8192;
 const MAX_EVENT_LINES = 400; // forwarded per run (chatty tool streams stay bounded)
 
@@ -97,10 +98,10 @@ async function buildArgv({ message, model, agent, sessionID, title, variant, fil
 
 /**
  * Start one relayed run. `hooks.broadcast(event)` forwards
- * { runId, kind, ... } to renderer windows (kinds: event/exit).
+ * { runId, kind, ... } to renderer windows (kinds: event/alive/exit).
  * Only one run at a time (renderer also gates; this is the backstop).
  */
-export async function startRelay(args, { root, broadcast, timeoutMs = RELAY_DEFAULT_TIMEOUT_MS } = {}) {
+export async function startRelay(args, { root, broadcast } = {}) {
   if (!root) fail('No folder open');
   for (const [id, r] of runs) {
     if (!r.done) fail(`A CLI relay run is already active (${id})`);
@@ -185,6 +186,11 @@ export async function startRelay(args, { root, broadcast, timeoutMs = RELAY_DEFA
   const finish = (code, signal, timedOut) => {
     if (rec.done) return;
     rec.done = true;
+    try {
+      clearInterval(rec.aliveTimer);
+    } catch {
+      /* noop */
+    }
     runs.delete(runId);
     void cleanupStaged();
     send({ kind: 'exit', code, signal: signal || null, timedOut: !!timedOut, sessionID: rec.sessionID, stderrTail: errTail });
@@ -194,13 +200,18 @@ export async function startRelay(args, { root, broadcast, timeoutMs = RELAY_DEFA
     finish(null, null, false);
   });
   child.on('exit', (code, signal) => finish(code, signal, false));
-  const ms = Math.max(10_000, Math.min(30 * 60 * 1000, Number(timeoutMs) || RELAY_DEFAULT_TIMEOUT_MS));
-  setTimeout(() => {
-    if (!rec.done) {
-      tryStop(child);
-      finish(null, null, true);
-    }
-  }, ms).unref?.();
+  // Liveness heartbeat: a relayed run can go quiet for minutes (long tool
+  // calls) while perfectly healthy. The renderer's stall detector must not
+  // demand a resend for that — aliveness resets its clock. There is
+  // deliberately no time cap: the run ends on process exit or user stop.
+  try {
+    rec.aliveTimer = setInterval(() => {
+      if (!rec.done) send({ kind: 'alive', pid: child.pid || null });
+    }, 15000);
+    rec.aliveTimer.unref?.();
+  } catch {
+    /* heartbeats are best-effort */
+  }
   return { runId };
 }
 

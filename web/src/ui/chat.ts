@@ -7,7 +7,7 @@ import {
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
   refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
   statusTextFor, messageErrorText, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, todoProgress, classifyAttachFile,
-  relayActive, relayRouteFor, modelListKey, sessionDisplayTitle,
+  relayActive, relayRouteFor, modelListKey, sessionDisplayTitle, stuckContinueText, relayEchoGuard, isTransientRelayEcho,
   loadCommands, parseSlashCommand, sendCommand,
   compactSession, shareSession, unshareSession, markQuestionAnswered,
   enqueueFollowUp, queuedFollowUps, removeQueuedFollowUp, drainQueue,
@@ -774,7 +774,13 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     list.append(more);
   }
   const shownRunErrors = new Set<string>();
+  // Relay echo guard: while a relay run owns this session, the server holds
+  // transitional partial echoes (file staged, tool chatter, then the prompt)
+  // that look like duplicated chats/images mid-run. Hide those; the
+  // optimistic bubble carries the message until completion replaces all.
+  const echoGuard = relayEchoGuard();
   for (const m of visible) {
+    if (isTransientRelayEcho(m, echoGuard, activeId)) continue;
     const role = String(m.info?.role ?? 'assistant').toLowerCase();
     const parts = (m.parts ?? []).filter(
       (p) => (showReasoning || !isReasoningPart(p as { type?: unknown })) &&
@@ -900,7 +906,24 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   const btnAbort = el('button', { class: 'btn btn-danger btn-sm' }, 'Stop') as HTMLButtonElement;
   btnAbort.prepend(iconEl('stop', 11));
   btnAbort.onclick = () => void abortActive();
-  busyRow.append(el('span', { class: 'spinner' }), busyTxt, btnAbort);
+  // Stuck-tool recovery: stop the wedged run and auto-continue from its
+  // last state — no retyping. Only offered while stuck is flagged.
+  const btnContinue = el('button', { class: 'btn btn-sm hidden', title: 'Stop this run and continue from its last completed state' }, 'Stop & continue') as HTMLButtonElement;
+  btnContinue.onclick = () => {
+    void (async () => {
+      const stuck = agentStore.get().relayStuck;
+      const quietMs = stuck ? Date.now() - stuck.since : 0;
+      btnContinue.toggleAttribute('disabled', true);
+      try {
+        await abortActive();
+        const ok = await sendMessage(stuckContinueText(stuck?.tool ?? null, quietMs));
+        if (!ok && !agentStore.get().error) hooks.toast('Could not continue — try sending manually.', 'error');
+      } finally {
+        btnContinue.toggleAttribute('disabled', false);
+      }
+    })();
+  };
+  busyRow.append(el('span', { class: 'spinner' }), busyTxt, btnAbort, btnContinue);
 
   // Agent todo checklist (server-owned; read-only — the agent manages it).
   const todosSec = el('div', { class: 'todos-sec hidden' });
@@ -1256,7 +1279,20 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     },
   };
 
+  let sendArmed = false;
   const doSend = async () => {
+    // Double-fire guard: Enter-key repeat and Enter+click races land here in
+    // the same tick — the second send would duplicate the turn (or queue a
+    // phantom copy). The text stays intact for an intentional resend.
+    if (sendArmed) return;
+    sendArmed = true;
+    try {
+      await doSendInner();
+    } finally {
+      sendArmed = false;
+    }
+  };
+  const doSendInner = async () => {
     const v = input.value;
     if (!v.trim() && !imgAttaches.length) return;
     const busy = agentStore.get().busy;
@@ -1983,6 +2019,7 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
     // messages / busy / error
     renderMessages(list, hooks);
     busyRow.classList.toggle('hidden', !s.busy);
+    btnContinue.classList.toggle('hidden', !(s.busy && s.relayStuck));
     if (s.busy) {
       busyTxt.textContent = s.status === 'stalled' && s.lastActivity
         ? `Agent stalled — ${s.lastActivity} (Stop, then send again)`
@@ -1990,18 +2027,19 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
           ? (s.lastActivity || `${RELAY_DISPLAY_NAME} working…`)
           : statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
     }
-    if (s.error) {
-      const errText: string = s.error;
-      errBox.innerHTML = '';
-      errBox.append(iconEl('alert', 14), el('span', {}, errText));
-      // Vibe: any inline run-error row already carries the failure — a
-      // second shouty box is pure duplication (Cursor shows it once).
-      // Presence-based (not text-matched): truncations and reformats must
-      // never resurrect the echo.
-      const dup = document.body.classList.contains('agentic') &&
-        !!list.querySelector('.msg-runerr');
-      errBox.classList.toggle('hidden', dup);
-    } else errBox.classList.add('hidden');
+  if (s.error) {
+    const errText: string = s.error;
+    errBox.innerHTML = '';
+    errBox.append(iconEl('alert', 14), el('span', {}, errText));
+    // One voice: when the transcript already renders this exact failure
+    // inline, a second shouty box is pure duplication (Cursor shows it
+    // once). A different inline error does NOT suppress this box.
+    let dup = false;
+    list.querySelectorAll('.msg-runerr').forEach((n) => {
+      if (!dup && (n.textContent || '').trim() === errText) dup = true;
+    });
+    errBox.classList.toggle('hidden', dup);
+  } else errBox.classList.add('hidden');
     paintQueue(s.activeId, s.busy);
     paintSendBtn();
   };

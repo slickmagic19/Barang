@@ -67,7 +67,7 @@ export interface BarangBridge {
     abort(runId: string): Promise<{ aborted: boolean }>;
     onEvent(cb: (ev: {
       runId: string;
-      kind: 'event' | 'heartbeat' | 'exit';
+      kind: 'event' | 'heartbeat' | 'alive' | 'exit';
       event?: { type: string; sessionID?: string; text?: string; tool?: string; toolTitle?: string; toolStatus?: string; finishReason?: string };
       code?: number | null;
       signal?: string | null;

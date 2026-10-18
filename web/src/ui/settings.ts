@@ -594,7 +594,7 @@ export function openSettings(hooks: SettingsHooks) {
   const notifDoneBox = checkRow('When a run finishes');
   const notifApprovalBox = checkRow('When approval is needed');
   const notifQuestionBox = checkRow('When the agent asks a question');
-  const notifErrorBox = checkRow('When a run errors');
+  const notifErrorBox = checkRow('When a run errors or goes quiet (stuck)');
   const notifNativeBox = checkRow('Windows toast when Barang is in the background');
   const notifTaskbarBox = checkRow('Taskbar badge + flashing when in the background');
   const notifToastBox = checkRow('In-app toast when Barang is focused');

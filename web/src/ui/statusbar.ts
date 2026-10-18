@@ -1,5 +1,5 @@
 // Bottom status bar: project, opencode link state, session state, cursor.
-import { agentStore, readSettings, sessionUsage, usageCard, relayActive, relayRouteFor } from '../lib/agent';
+import { agentStore, readSettings, sessionUsage, usageCard, relayActive, relayRouteFor, relayQuietMs, formatQuiet, RELAY_QUIET_NOTICE_MS } from '../lib/agent';
 import { RELAY_DISPLAY_NAME } from '../lib/relay';
 import { pomoStore, formatClock } from '../lib/pomodoro';
 import { editorStore } from './editor';
@@ -150,7 +150,14 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
 
     sessEl.innerHTML = '';
     sessEl.classList.toggle('is-warn', a.permissions.length > 0);
-    if (a.busy && relayActive()) sessEl.append(dot('run'), el('span', {}, `${RELAY_DISPLAY_NAME} working`));
+    if (a.busy && relayActive()) {
+      // Quiet-timer: once the run has been silent past the notice window,
+      // the ticking seconds prove liveness (heartbeat) — "running" vs
+      // "frozen" is readable straight off the status bar.
+      const q = relayQuietMs() ?? 0;
+      const quiet = q >= RELAY_QUIET_NOTICE_MS ? ` — quiet ${formatQuiet(q)}` : '';
+      sessEl.append(dot('run'), el('span', {}, `${RELAY_DISPLAY_NAME} working${quiet}`));
+    }
     else if (a.busy && a.status === 'retry') {
       const n = a.statusInfo?.attempt ?? 0;
       sessEl.append(dot('run'), el('span', {}, n > 0 ? `agent: retrying (attempt ${n})` : 'agent: retrying'));

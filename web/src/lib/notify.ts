@@ -5,7 +5,7 @@
 import { agentStore } from './agent';
 import { barang } from './transport';
 
-export type NotifyKind = 'done' | 'approval' | 'error' | 'question';
+export type NotifyKind = 'done' | 'approval' | 'error' | 'question' | 'stuck';
 
 export interface BuiltinSound {
   id: string;
@@ -32,6 +32,7 @@ export interface AgentSnap {
   perms: number;
   questions: number;
   activeId: string | null;
+  stuck: boolean;
 }
 
 /** Pure edge detector (unit-verified in smoke): prev -> next yields at most one event. */
@@ -39,6 +40,9 @@ export function decideAgentNotification(prev: AgentSnap, next: AgentSnap): Notif
   if (next.root !== prev.root) return null; // project switch, not a run edge
   if (next.activeId !== prev.activeId && next.activeId !== null && prev.activeId !== null) return null; // session switch
   if (next.error && next.error !== prev.error) return 'error';
+  // Run went output-quiet past the stuck threshold while still busy: the
+  // run may be wedged, and the user is usually not watching anymore.
+  if (next.stuck && !prev.stuck) return 'stuck';
   // Permission and question waits get their own sounds. Questions win ties:
   // they block on reading either way, and a question usually explains the
   // approval that rode in with it.
@@ -54,7 +58,7 @@ export function decideAgentNotification(prev: AgentSnap, next: AgentSnap): Notif
 
 export function snapAgent(): AgentSnap {
   const a = agentStore.get();
-  return { root: a.root, busy: a.busy, error: a.error, perms: a.permissions.length, questions: a.questions.length, activeId: a.activeId };
+  return { root: a.root, busy: a.busy, error: a.error, perms: a.permissions.length, questions: a.questions.length, activeId: a.activeId, stuck: !!a.relayStuck };
 }
 
 export function watchAgentNotifications(onEvent: (kind: NotifyKind) => void): () => void {
@@ -156,6 +160,7 @@ export const KIND_DEFAULT_SOUND: Record<NotifyKind, string> = {
   approval: 'approval',
   error: 'error',
   question: 'question',
+  stuck: 'alert',
 };
 
 /** Resolve one kind's pick (builtin id or 'custom:<vaultId>') to a playable

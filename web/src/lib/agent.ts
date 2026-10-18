@@ -1456,15 +1456,26 @@ export function normEchoText(t: string): string {
 /** Loose echo check for the relay poller: same recency rules as
  *  findUserMessage, but matches on normalized text. Display-only (never
  *  gates a retry — a false positive here only skips re-painting a bubble
- *  the next refresh replaces anyway). Pure. */
-export function findUserMessageLoose(messages: ChatMessage[], body: string): boolean {
+ *  the next refresh replaces anyway). Pure.
+ *
+ *  minCreatedMs: when > 0, accept any matching message created at/after
+ *  that time (5s slack for clock ticks) and skip the 180s recency rule.
+ *  The poller passes the relay run's start: on a long quiet tool call the
+ *  echo sits in the transcript for far longer than 180s, and treating it
+ *  as "not there" would re-append the optimistic bubble every tick —
+ *  which both duplicates the bubble AND keeps resetting the stuck clock
+ *  so Stop & continue could never surface. */
+export function findUserMessageLoose(messages: ChatMessage[], body: string, minCreatedMs = 0): boolean {
   const want = normEchoText(body);
   if (!want) return false;
   const now = Date.now();
   for (const m of messages ?? []) {
     if (String(m?.info?.role ?? '').toLowerCase() !== 'user') continue;
     const created = Number(m?.info?.time?.created ?? 0);
-    if (!(created > 0) || now - created >= 180000) continue;
+    if (!(created > 0)) continue;
+    if (minCreatedMs > 0) {
+      if (created < minCreatedMs - 5000) continue;
+    } else if (now - created >= 180000) continue;
     const text = (m?.parts ?? []).filter((p) => p?.type === 'text').map((p) => String(p?.text ?? '')).join('\n');
     if (text && normEchoText(text) === want) return true;
   }
@@ -1490,7 +1501,13 @@ export function relayEchoGuard(): RelayEchoGuard | null {
  *  after the relay started that isn't the full sent text (opencode builds
  *  the message incrementally — file part, tool chatter, then the prompt).
  *  The optimistic bubble (local id, full text) is never transient, and
- *  nothing outside the relay session is affected. Pure. */
+ *  nothing outside the relay session is affected.
+ *
+ *  The full-text check is scoped to the RUN (guard.since), not the generic
+ *  180s window: a long quiet tool keeps the echo older than 180s, and the
+ *  default window would then misclassify the completed echo as partial —
+ *  hiding the user's own message mid-run and (via the poller's old
+ *  re-append) re-pinning the bubble below the streaming response. Pure. */
 export function isTransientRelayEcho(
   m: ChatMessage,
   guard: RelayEchoGuard | null,
@@ -1503,7 +1520,10 @@ export function isTransientRelayEcho(
   if (String(info.role ?? '').toLowerCase() !== 'user') return false;
   const created = Number(info.time?.created ?? 0);
   if (!(created > 0) || created < guard.since - 2000) return false;
-  if (guard.body && findUserMessageLoose([m], guard.body)) return false;
+  // No prompt text to match against (file-only send): never hide the echo —
+  // nothing about it is "partial" from the renderer's perspective.
+  if (!guard.body) return false;
+  if (findUserMessageLoose([m], guard.body, guard.since)) return false;
   return true;
 }
 
@@ -1613,10 +1633,14 @@ function relayTranscriptSig(): string {
   return `${s.messages.length}|${todos}|${lastMsg}`;
 }
 
-/** Optimistic user bubble (painted at send; server truth replaces it). Pure. */
-function localUserMessage(body: string, files: OutgoingFile[]): ChatMessage {
+/** Optimistic user bubble (painted at send; server truth replaces it).
+ *  id: pass the run's stable optimistic id so re-pins every poll tick keep
+ *  the same identity (a fresh id per tick would churn the transcript
+ *  signature and mask stuck detection). Pure. */
+function localUserMessage(body: string, files: OutgoingFile[], id?: string): ChatMessage {
+  const now = Date.now();
   return {
-    info: { id: `local_${Date.now().toString(36)}`, role: 'user', time: { created: Date.now() } },
+    info: { id: id || `local_${now.toString(36)}`, role: 'user', time: { created: now } },
     parts: [
       ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
       ...(body ? [{ type: 'text', text: body }] : []),
@@ -1624,10 +1648,48 @@ function localUserMessage(body: string, files: OutgoingFile[]): ChatMessage {
   } as ChatMessage;
 }
 
+/** Place a bubble just above the current turn's server messages: any
+ *  trailing messages created at/after the relay started (partial echo,
+ *  streaming assistant parts). Keeps the user's message ABOVE the live
+ *  response even when the server echo hasn't landed yet — appending at the
+ *  very end would paint it below the agent's streaming text. Pure. */
+export function insertBeforeCurrentTurn(messages: ChatMessage[], bubble: ChatMessage, sinceMs: number): ChatMessage[] {
+  let idx = messages.length;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const created = Number(messages[i]?.info?.time?.created ?? 0);
+    if (!(created >= sinceMs - 5000)) break;
+    idx = i;
+  }
+  return [...messages.slice(0, idx), bubble, ...messages.slice(idx)];
+}
+
 function stopRelayPoll() {
   if (relayPoll) {
     clearInterval(relayPoll);
     relayPoll = null;
+  }
+}
+
+/** Stuck escalation: output-quiet AND transcript-static past the
+ *  threshold. Either clock moving means progress — this only ever surfaces
+ *  UI (Stop & continue + a notification); it never kills anything. Runs on
+ *  every poll tick AND after each refresh so a failing serve poll can
+ *  never mask a wedged run. */
+function evalRelayStuck(now: number) {
+  const sig = relayTranscriptSig();
+  if (sig !== lastRelayTranscriptSig) {
+    lastRelayTranscriptSig = sig;
+    lastRelayTranscriptAt = now;
+    if (agentStore.get().relayStuck) agentStore.set({ relayStuck: null });
+  }
+  const cur = agentStore.get();
+  if (!cur.relayStuck && decideRelayStuck(lastRelayOutputAt, lastRelayTranscriptAt, now)) {
+    agentStore.set({
+      relayStuck: { tool: lastRelayTool, since: lastRelayOutputAt },
+      lastActivity: relayQuietText(lastRelayTool, now - lastRelayOutputAt),
+    });
+  } else if (cur.relayStuck) {
+    agentStore.set({ lastActivity: relayQuietText(cur.relayStuck.tool, now - cur.relayStuck.since) });
   }
 }
 
@@ -1643,6 +1705,9 @@ function startRelayPoll() {
       stopRelayPoll();
       return;
     }
+    // Pre-refresh pass: uses the store as-is so stuck detection keeps
+    // working even while refreshActive() is failing (server hiccup).
+    evalRelayStuck(Date.now());
     void refreshActive()
       .then(() => {
         const s = agentStore.get();
@@ -1650,34 +1715,14 @@ function startRelayPoll() {
         // Never paint the bubble twice: ours is already there (by id), or
         // the server echo arrived (loose text match).
         const hasOurs = !!relayOptimisticId && s.messages.some((m) => m?.info?.id === relayOptimisticId);
-        if (relayBody && !hasOurs && !findUserMessageLoose(s.messages, relayBody)) {
-          const again = localUserMessage(relayBody, relayFiles);
+        if (relayBody && !hasOurs && !findUserMessageLoose(s.messages, relayBody, run.startedAt)) {
+          const again = localUserMessage(relayBody, relayFiles, relayOptimisticId ?? undefined);
           relayOptimisticId = String(again.info?.id ?? null);
-          agentStore.set({ messages: [...s.messages, again] });
+          agentStore.set({ messages: insertBeforeCurrentTurn(s.messages, again, run.startedAt) });
         }
-        // Stuck escalation: output-quiet AND transcript-static past the
-        // threshold. Either clock moving means progress — this only ever
-        // surfaces UI (Stop & continue); it never kills anything.
-        const now = Date.now();
-        const sig = relayTranscriptSig();
-        if (sig !== lastRelayTranscriptSig) {
-          lastRelayTranscriptSig = sig;
-          lastRelayTranscriptAt = now;
-          if (agentStore.get().relayStuck) agentStore.set({ relayStuck: null });
-        }
-        const cur = agentStore.get();
-        if (!cur.relayStuck && decideRelayStuck(lastRelayOutputAt, lastRelayTranscriptAt, now)) {
-          const mins = Math.max(1, Math.round((now - lastRelayOutputAt) / 60000));
-          const tool = lastRelayTool ? `Tool '${lastRelayTool}'` : 'The running step';
-          agentStore.set({
-            relayStuck: { tool: lastRelayTool, since: lastRelayOutputAt },
-            lastActivity: `${tool} quiet ${mins} min — process alive`,
-          });
-        } else if (cur.relayStuck) {
-          const mins = Math.max(1, Math.round((now - cur.relayStuck.since) / 60000));
-          const tool = cur.relayStuck.tool ? `Tool '${cur.relayStuck.tool}'` : 'The running step';
-          agentStore.set({ lastActivity: `${tool} quiet ${mins} min — process alive` });
-        }
+        // Post-refresh pass: catches transcript movement the pre-pass
+        // couldn't see (and clears a just-raised flag if progress landed).
+        evalRelayStuck(Date.now());
       })
       .catch(() => {});
   }, RELAY_POLL_MS);
@@ -1688,6 +1733,13 @@ function startRelayPoll() {
  *  healthy npm install still emits output or advances todos/messages).
  *  Detection only ever surfaces UI — it never kills anything. */
 export const RELAY_STUCK_MS = 5 * 60 * 1000;
+
+/** After this much silence the busy row starts showing a ticking quiet
+ *  timer (driven by the 15s liveness heartbeat). One heartbeat of silence
+ *  is enough: slow models (deepseek reasoning turns) go quiet for 20-60s
+ *  between steps routinely, and the user should never have to guess
+ *  "still working" vs "frozen". */
+export const RELAY_QUIET_NOTICE_MS = 15 * 1000;
 
 export interface RelayStuck {
   tool: string | null;
@@ -1714,6 +1766,34 @@ export function stuckContinueText(tool: string | null, quietMs: number): string 
   const what = tool ? `tool '${tool}'` : 'the running step';
   return `Continue: the previous turn was stopped after ${what} produced no output for ${mins} min. ` +
     `Pick up from the last completed state — do not restart finished work.`;
+}
+
+/** Compact elapsed-time label for quiet stretches ('45s', '2m 05s', '1h 02m'). Pure. */
+export function formatQuiet(quietMs: number): string {
+  const s = Math.max(0, Math.round(quietMs / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return rs > 0 ? `${m}m ${String(rs).padStart(2, '0')}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h}h ${String(rm).padStart(2, '0')}m` : `${h}h`;
+}
+
+/** Liveness line for a quiet relayed run (process alive, no output for
+ *  quietMs). The ticking clock is what lets the user tell "still working"
+ *  from "frozen" — the process pings every 15s, so the text keeps moving
+ *  while the run is healthy. Pure. */
+export function relayQuietText(tool: string | null, quietMs: number): string {
+  const what = tool ? `Tool '${tool}'` : 'The running step';
+  return `${what} quiet ${formatQuiet(quietMs)} — process alive`;
+}
+
+/** Quiet stretch (ms) of the in-flight relayed run, or null when idle.
+ *  Recomputed at paint time so every repaint shows fresh seconds. */
+export function relayQuietMs(): number | null {
+  if (!relayRun) return null;
+  return Math.max(0, Date.now() - lastRelayOutputAt);
 }
 
 /** True while a relayed CLI run is in flight (Stop button target). Pure-ish. */
@@ -1748,9 +1828,15 @@ function ensureRelayEvents() {
         if (agentStore.get().relayStuck) agentStore.set({ relayStuck: null });
         bumpProgress();
       } else if (ev.kind === 'alive') {
-        // Relay process alive but quiet (long tool call): reset the stall
-        // clock so a healthy run is never asked to Stop + resend.
+        // Relay process alive but quiet (long tool call). Do NOT reset the
+        // output clock (it tracks real progress only) — instead tick the
+        // visible quiet timer so a healthy-but-silent run reads as "still
+        // alive" instead of frozen.
         bumpProgress();
+        const quietMs = Date.now() - lastRelayOutputAt;
+        if (quietMs >= RELAY_QUIET_NOTICE_MS) {
+          agentStore.set({ lastActivity: relayQuietText(lastRelayTool, quietMs) });
+        }
       } else if (ev.kind === 'exit') {
         void finishRelay({
           code: typeof ev.code === 'number' ? ev.code : null,

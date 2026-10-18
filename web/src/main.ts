@@ -7,7 +7,7 @@ import { connectEvents, agentStore, createSession, selectSession, loadMeta, load
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
-pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, relayActive, relayRouteFor, modelListKey, derivePromptTitle, isUntitledSessionTitle, sessionDisplayTitle, decideRelayStuck, stuckContinueText, normEchoText, findUserMessageLoose, relayEchoGuard, isTransientRelayEcho } from './lib/agent';
+pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, relayActive, relayRouteFor, modelListKey, derivePromptTitle, isUntitledSessionTitle, sessionDisplayTitle, decideRelayStuck, stuckContinueText, formatQuiet, relayQuietText, relayQuietMs, RELAY_QUIET_NOTICE_MS, RELAY_STUCK_MS, normEchoText, findUserMessageLoose, insertBeforeCurrentTurn, relayEchoGuard, isTransientRelayEcho } from './lib/agent';
 import {
   shouldRelayRoute, buildRelayArgs, parseRelayLine, relayProgressLabel, redactSecrets, RELAY_DISPLAY_NAME,
 } from './lib/relay';
@@ -1141,13 +1141,23 @@ async function boot() {
     if (kind === 'approval' && !s.notifOnApproval) return;
     if (kind === 'question' && !s.notifOnQuestion) return;
     if (kind === 'error' && !s.notifOnError) return;
+    // Stuck rides the error toggle: same "something needs you" urgency.
+    if (kind === 'stuck' && !s.notifOnError) return;
     const title = agentStore.get().error && kind === 'error'
       ? 'Barang — agent error'
+      : kind === 'stuck' ? 'Barang — run gone quiet'
       : kind === 'approval' ? 'Barang — approval needed'
       : kind === 'question' ? 'Barang — question waiting'
       : 'Barang — agent finished';
     const body = kind === 'error'
       ? (agentStore.get().error ?? 'The run failed.').slice(0, 200)
+    : kind === 'stuck'
+      ? (() => {
+        const st = agentStore.get().relayStuck;
+        const mins = st ? Math.max(1, Math.round((Date.now() - st.since) / 60000)) : 5;
+        const what = st?.tool ? `Tool '${st.tool}'` : 'The running step';
+        return `${what} produced no output for ${mins} min. Stop & continue resumes from the last completed step.`;
+      })()
     : kind === 'approval'
       ? (() => {
         const bits: string[] = [];
@@ -1278,8 +1288,14 @@ async function boot() {
     sessionDisplayTitle,
     decideRelayStuck,
     stuckContinueText,
+    formatQuiet,
+    relayQuietText,
+    relayQuietMs,
+    RELAY_QUIET_NOTICE_MS,
+    RELAY_STUCK_MS,
     normEchoText,
     findUserMessageLoose,
+    insertBeforeCurrentTurn,
     relayEchoGuard,
     isTransientRelayEcho,
     shouldRelayRoute,

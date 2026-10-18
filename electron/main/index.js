@@ -2461,17 +2461,20 @@ async function runUiSmoke() {
         [{ ...idle }, { ...idle, questions: 1 }, 'question'],
         [{ ...idle, busy: true }, { ...idle, questions: 1 }, 'question'],
         [{ ...idle, busy: true }, { ...idle, perms: 1, questions: 1 }, 'question'],
+        [{ ...idle, busy: true }, { ...idle, busy: true, stuck: true }, 'stuck'],
+        [{ ...idle, busy: true, stuck: true }, { ...idle, busy: true, stuck: true }, null],
+        [{ ...idle, busy: true, stuck: true }, { ...idle, busy: false, stuck: false }, 'done'],
       ];
       const bad = [];
       cases.forEach(([a, b, want], i) => {
         const got = d(a, b);
         if (got !== want) bad.push(i + ':' + got + '!==' + want);
       });
-      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-15';
+      return bad.length ? 'FAIL:' + bad.join(';') : 'ok-18';
     })()`);
   } catch (e) { notifDecide = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] notif-decide: ' + notifDecide);
-  pass = pass && notifDecide === 'ok-15';
+  pass = pass && notifDecide === 'ok-18';
   let notifIpc = 'skip';
   try {
     notifIpc = await w.webContents.executeJavaScript(`(async () => {
@@ -2670,6 +2673,64 @@ async function runUiSmoke() {
         if (ds(0, 119000, true, 'busy') !== false) bad.push('stall-soon');
         if (ds(0, 999999, true, 'retry') !== false) bad.push('stall-retry');
         if (ds(0, 999999, false, 'busy') !== false) bad.push('stall-idle');
+      }
+      // CLI Relay liveness display: ticking quiet text + stuck clock.
+      if (typeof u.formatQuiet !== 'function' || typeof u.relayQuietText !== 'function') bad.push('no-quiet-fns');
+      else {
+        if (u.formatQuiet(45000) !== '45s') bad.push('quiet-secs');
+        if (u.formatQuiet(60000) !== '1m') bad.push('quiet-min');
+        if (u.formatQuiet(125000) !== '2m 05s') bad.push('quiet-min-secs');
+        if (u.formatQuiet(3720000) !== '1h 02m') bad.push('quiet-hour');
+        if (u.relayQuietText('bash', 45000) !== "Tool 'bash' quiet 45s — process alive") bad.push('quiet-text');
+        if (u.relayQuietText(null, 45000) !== 'The running step quiet 45s — process alive') bad.push('quiet-text-step');
+      }
+      if (u.RELAY_QUIET_NOTICE_MS !== 15000 || u.RELAY_STUCK_MS !== 300000) bad.push('quiet-thresholds');
+      if (typeof u.relayQuietMs !== 'function' || u.relayQuietMs() !== null) bad.push('quiet-idle-null');
+      // Loose echo match: default 180s recency, run-scoped window for the
+      // relay poller (long quiet tools keep the echo well past 180s).
+      const fl = u.findUserMessageLoose;
+      if (typeof fl !== 'function') bad.push('no-loose-fn');
+      else {
+        const nowMs = Date.now();
+        const mk = (created, text) => ({ info: { id: 'm_' + created, role: 'user', time: { created } }, parts: [{ type: 'text', text }] });
+        if (fl([mk(nowMs - 200000, 'hi')], 'hi') !== false) bad.push('loose-recency-default');
+        if (fl([mk(nowMs - 200000, 'hi')], 'hi', nowMs - 300000) !== true) bad.push('loose-run-window');
+        if (fl([mk(1, 'hi')], 'hi', nowMs - 300000) !== false) bad.push('loose-before-window');
+        if (fl([mk(nowMs - 1000, '"hi there"')], 'hi there') !== true) bad.push('loose-normalize');
+        // Echo guard: a completed echo stays VISIBLE for the whole run even
+        // when older than 180s (long quiet tools); only partial echoes hide.
+        const te = u.isTransientRelayEcho;
+        if (typeof te !== 'function') bad.push('no-transient-fn');
+        else {
+          const since = nowMs - 600000;
+          const guard = { sessionID: 'ses_g', since, body: 'do the thing' };
+          if (te(mk(since + 1000, 'do the thing'), guard, 'ses_g') !== false) bad.push('echo-old-complete-visible');
+          if (te(mk(since + 1000, 'partial'), guard, 'ses_g') !== true) bad.push('echo-partial-hidden');
+          if (te(mk(since - 60000, 'do the thing'), guard, 'ses_g') !== false) bad.push('echo-pre-run-visible');
+          if (te(mk(since + 1000, 'x'), { sessionID: 'ses_g', since, body: '' }, 'ses_g') !== false) bad.push('echo-file-only-visible');
+          if (te(mk(since + 1000, 'do the thing'), guard, 'ses_other') !== false) bad.push('echo-other-session');
+        }
+        // Optimistic bubble placement: inserted above current-turn messages.
+        const ins = u.insertBeforeCurrentTurn;
+        if (typeof ins !== 'function') bad.push('no-insert-fn');
+        else {
+          const since2 = nowMs - 10000;
+          const bub = { info: { id: 'local_x', role: 'user', time: { created: nowMs } }, parts: [] };
+          const prev = mk(since2 - 50000, 'old');
+          const resp = { info: { id: 'msg_a', role: 'assistant', time: { created: since2 + 1000 } }, parts: [] };
+          const out = ins([prev, resp], bub, since2);
+          if (out.length !== 3 || out[0] !== prev || out[1] !== bub || out[2] !== resp) bad.push('insert-before-turn');
+          const out2 = ins([prev], bub, since2);
+          if (out2[1] !== bub) bad.push('insert-append');
+        }
+      }
+      const drs = u.decideRelayStuck;
+      if (typeof drs !== 'function') bad.push('no-relay-stuck-fn');
+      else {
+        if (drs(0, 0, 301000) !== true) bad.push('relay-stuck-yes');
+        if (drs(0, 0, 300000) !== false) bad.push('relay-stuck-edge');
+        if (drs(250000, 0, 301000) !== false) bad.push('relay-stuck-output-live');
+        if (drs(0, 250000, 301000) !== false) bad.push('relay-stuck-transcript-live');
       }
       // Permission events: real 1.18 server shape (permission.asked) + newer.
       const pf = u.permissionFromEvent;
@@ -3186,7 +3247,7 @@ async function runUiSmoke() {
     })()`);
   } catch (e) { settingsUi = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] settings-ui: ' + settingsUi);
-  pass = pass && /nav=11 navOk=ok tog=ok/.test(settingsUi) && /snd=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
+  pass = pass && /nav=12 navOk=ok tog=ok/.test(settingsUi) && /snd=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
   // Bolt E2E (local stub server above — no internet): pure helpers, then a
   // real UI flow — new request, POST JSON + header, send, save, project
   // mirror, history. Hermetic: localStorage + mirror file snapshotted first.

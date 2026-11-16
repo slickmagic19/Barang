@@ -1,8 +1,8 @@
 {
   "name": "barang",
-  "version": "0.22.5",
+  "version": "0.22.6",
   "private": true,
-  "description": "Barang — super-lightweight desktop code editor (Sublime speed) with opencode agents (Cursor brains). No auth/BYOK: it drives your local opencode CLI.",
+  "description": "Barang — super-lightweight desktop code editor (Sublime speed) with Kilo Code agents (Cursor brains). No auth/BYOK: it drives your local Kilo Code CLI (free models by default).",
   "type": "module",
   "main": "electron/main/index.js",
   "engines": {
@@ -14,9 +14,9 @@
     "dev:web": "npm --prefix web run dev",
     "start": "electron .",
     "build": "node scripts/sync-logo.js && npm --prefix web run build",
-    "fetch:opencode": "node scripts/fetch-opencode.js",
-    "dist": "npm run fetch:opencode && npm run build && electron-builder --dir",
-    "dist:portable": "npm run fetch:opencode && npm run build && electron-builder --win portable",
+    "fetch:kilo": "node scripts/fetch-kilo.js",
+    "dist": "npm run fetch:kilo && npm run build && electron-builder --dir",
+    "dist:portable": "npm run fetch:kilo && npm run build && electron-builder --win portable",
     "smoke": "electron . --smoke",
     "smoke:ui": "electron . --smoke-ui"
   },

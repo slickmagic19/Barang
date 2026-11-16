@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as files from './files.js';
 import * as updater from './updater.js';
-import { ensureServer, restartServer, stopServer, ocCall, opencodeState, attachPumpHandlers } from './opencodeClient.js';
+import { ensureServer, restartServer, stopServer, ocCall, kiloState, attachPumpHandlers } from './kiloClient.js';
 import { startRelay, abortRelay, shutdownRelays } from './relay.js';
 import * as term from './terminal.js';
 import * as scm from './git.js';
@@ -149,7 +149,7 @@ function watchProject(dir) {
   }
 }
 
-async function bootOpencode() {
+async function bootKilo() {
   // With no project open, the agent server idles in a scratch dir inside
   // userData (never in the app folder or Documents).
   const cwd = root || path.join(app.getPath('userData'), 'scratch');
@@ -162,11 +162,11 @@ async function bootOpencode() {
   await ensureServer(cwd, { onLog: (line) => console.log(line.trimEnd()), extraEnv: await mcpEnv() });
 }
 
-/** Barang-managed MCP config file (global scope). opencode merges it over
+/** Barang-managed MCP config file (global scope). Kilo Code merges it over
  *  every other layer, so Barang never edits the user's own config files
- *  for global servers. Respects a user-set OPENCODE_CONFIG. */
+ *  for global servers. Respects a user-set KILO_CONFIG. */
 function managedMcpPath() {
-  return path.join(app.getPath('userData'), 'opencode-mcp.json');
+  return path.join(app.getPath('userData'), 'kilo-mcp.json');
 }
 
 async function ensureManagedMcp() {
@@ -176,17 +176,18 @@ async function ensureManagedMcp() {
     try {
       await fs.mkdir(path.dirname(p), { recursive: true });
     } catch { /* noop */ }
-    await fs.writeFile(p, '{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {}\n}\n').catch(() => {});
+    await fs.writeFile(p, '{\n  "$schema": "https://app.kilo.ai/config.json",\n  "mcp": {}\n}\n').catch(() => {});
   }
   return p;
 }
 
-/** Extra env for the opencode server: point it at our managed MCP file
- *  unless the user already overrides config discovery themselves. */
+/** Extra env for the kilo server: point it at our managed MCP file unless
+ *  the user already overrides config discovery themselves. Kilo Code reads
+ *  KILO_CONFIG (its OpenCode-fork rename of OPENCODE_CONFIG). */
 async function mcpEnv() {
-  if (process.env.OPENCODE_CONFIG) return {};
+  if (process.env.KILO_CONFIG || process.env.OPENCODE_CONFIG) return {};
   try {
-    return { OPENCODE_CONFIG: await ensureManagedMcp() };
+    return { KILO_CONFIG: await ensureManagedMcp() };
   } catch {
     return {};
   }
@@ -731,7 +732,7 @@ function registerIpc() {
     root,
     recent: recents,
     restore: restoreProject,
-    opencode: opencodeState(),
+    opencode: kiloState(),
     versions: { app: app.getVersion(), electron: process.versions.electron },
   }));
   ipcMain.handle('app:open-folder', async () => {
@@ -898,8 +899,8 @@ async function runMainSmoke() {
     fn()
       .then((detail) => results.push({ name, pass: true, detail }))
       .catch((e) => results.push({ name, pass: false, detail: e.message }));
-  await check('opencode-server', async () => {
-    const s = opencodeState();
+  await check('kilo-server', async () => {
+    const s = kiloState();
     if (!s.running) throw new Error('server not running');
     return `${s.version} @ ${s.base}`;
   });
@@ -1225,13 +1226,13 @@ async function runUiSmoke() {
         // reload (evaluate surviving proves it) and fast (<5s, not ~15s+).
         let hotSwitch = 'skip', switchMs = -1;
         try {
-          const tmp = 'C:\\\\Users\\\\Achi\\\\AppData\\\\Local\\\\Temp\\\\opencode';
+          const tmp = 'C:\\\\Users\\\\Achi\\\\AppData\\\\Local\\\\Temp\\\\kilo';
           const home = 'C:\\\\Users\\\\Achi\\\\Desktop\\\\Barang';
           const t0 = performance.now();
           await window.barang.app.openPath(tmp);
           for (let i = 0; i < 25; i++) {
             await new Promise((r) => setTimeout(r, 200));
-            if (document.querySelector('.side-title')?.textContent === 'opencode') {
+            if (document.querySelector('.side-title')?.textContent === 'kilo') {
               switchMs = Math.round(performance.now() - t0);
               break;
             }
@@ -2593,20 +2594,35 @@ async function runUiSmoke() {
       const lbl = (m) => (m ? m.providerID + '/' + m.modelID : null);
       const pool = [
         { providerID: 'openrouter', modelID: 'poolside/laguna-s-2.1:free' },
-        { providerID: 'openrouter', modelID: 'meta/muse-spark-1.3' },
-        { providerID: 'opencode', modelID: 'mimo-v2.6-flash-free' },
-        { providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-flash' },
-        { providerID: 'opencode', modelID: 'muse-spark-1.3-contributor-free' },
+        { providerID: 'kilo', modelID: 'kilo-auto/free' },
+        { providerID: 'kilo', modelID: 'kilo-auto/efficient' },
         { providerID: 'openai', modelID: 'gpt-5' },
       ];
-      if (lbl(pm(pool)) !== 'opencode/muse-spark-1.3-contributor-free') bad.push('model-spark');
-      if (lbl(pm(pool.filter((m) => !/muse-spark/i.test(m.modelID)))) !== 'opencode/mimo-v2.6-flash-free') bad.push('model-mimo');
+      // Kilo's curated free router wins whenever it is present.
+      if (lbl(pm(pool)) !== 'kilo/kilo-auto/free') bad.push('model-autofree');
+      // Without the auto router, another free kilo model is preferred.
+      if (lbl(pm([
+        { providerID: 'kilo', modelID: 'z-ai/glm-5.3-flash:free' },
+        { providerID: 'openrouter', modelID: 'poolside/laguna-s-2.1:free' },
+      ])) !== 'kilo/z-ai/glm-5.3-flash:free') bad.push('model-kilo-free');
+      // No free kilo model -> fall back to the first free model in the catalog.
+      if (lbl(pm(pool.filter((m) => m.modelID !== 'kilo-auto/free'))) !== 'openrouter/poolside/laguna-s-2.1:free') bad.push('model-fallback');
       if (lbl(pm([{ providerID: 'openai', modelID: 'gpt-5' }])) !== null) bad.push('model-auto');
       if (lbl(pm([{ providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-pro' }])) !== null) bad.push('model-paid-mimo');
       if (lbl(pm([
-        { providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-flash' },
+        { providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-flash:free' },
         { providerID: 'openrouter', modelID: 'meta/muse-spark-1.3' },
-      ])) !== 'openrouter/meta/muse-spark-1.3') bad.push('model-or-spark');
+      ])) !== 'openrouter/xiaomi/mimo-v2.6-flash:free') bad.push('model-or-free');
+      // Free-only filter shows ONLY free Kilo Code models (never other providers).
+      if (typeof u.isFreeKiloModel !== 'function') bad.push('no-isfreekilo');
+      else {
+        if (u.isFreeKiloModel({ providerID: 'kilo', modelID: 'kilo-auto/free' }) !== true) bad.push('freekilo-auto');
+        if (u.isFreeKiloModel({ providerID: 'kilo', modelID: 'z-ai/glm-5.3-flash:free' }) !== true) bad.push('freekilo-free');
+        if (u.isFreeKiloModel({ providerID: 'kilo', modelID: 'kilo-auto/efficient' }) !== false) bad.push('freekilo-paid');
+        if (u.isFreeKiloModel({ providerID: 'openrouter', modelID: 'x:free' }) !== false) bad.push('freekilo-non-kilo');
+      }
+      // CLI Relay is off by default (serve is the normal path now).
+      if (typeof u.readSettings === 'function' && u.readSettings().opencodeRelay !== false) bad.push('relay-default-off');
       // Send retry classification: fatal first (no duplicate re-POSTs).
       const t = u.isRetryableSendError;
       if (typeof t !== 'function') bad.push('no-retry-fn');
@@ -2617,7 +2633,7 @@ async function runUiSmoke() {
         if (t('service unavailable, overloaded, try again later') !== true) bad.push('retry-overload');
         if (t('fetch failed: connection refused') !== true) bad.push('retry-conn');
         if (t('401 unauthorized: invalid api key') !== false) bad.push('retry-auth');
-        if (t('unknown model opencode/muse-spark-1.2-old') !== false) bad.push('retry-model');
+        if (t('unknown model kilo/muse-spark-1.2-old') !== false) bad.push('retry-model');
         if (t('') !== false) bad.push('retry-empty');
         let n = 0;
         const r = await u.withSendRetries(async () => { n++; if (n < 3) throw new Error('500 internal error'); return 'ok'; }, { sleep: () => Promise.resolve(), initialDelayMs: 1, maxDelayMs: 1 });
@@ -2642,11 +2658,11 @@ async function runUiSmoke() {
       const rm = u.resolveSendModel;
       if (typeof rm !== 'function') bad.push('no-rm-fn');
       else {
-        const cat = [{ providerID: 'opencode', modelID: 'mimo-v2.6-flash-free' }];
-        if ((rm({ providerID: 'opencode', modelID: 'muse-spark-1.3-old' }, cat, ['build'], 'build').model || {}).modelID !== 'mimo-v2.6-flash-free') bad.push('sendmodel-fallback');
+        const cat = [{ providerID: 'kilo', modelID: 'mimo-v2.6-flash-free' }];
+        if ((rm({ providerID: 'kilo', modelID: 'muse-spark-1.3-old' }, cat, ['build'], 'build').model || {}).modelID !== 'mimo-v2.6-flash-free') bad.push('sendmodel-fallback');
         if (rm(null, cat, ['build'], 'build').agent !== 'build') bad.push('sendmodel-agent');
         if (rm(null, cat, ['build'], 'ghost').agent !== undefined) bad.push('sendmodel-ghost-agent');
-        if (rm({ providerID: 'opencode', modelID: 'mimo-v2.6-flash-free' }, [], [], 'build').agent !== 'build') bad.push('sendmodel-passthru');
+        if (rm({ providerID: 'kilo', modelID: 'mimo-v2.6-flash-free' }, [], [], 'build').agent !== 'build') bad.push('sendmodel-passthru');
       }
       // Opencode-style run state: server retry, stall, errors, permissions.
       const st = u.statusTextFor;
@@ -2886,7 +2902,7 @@ async function runUiSmoke() {
       const td = u.isTransportDown;
       if (typeof td !== 'function') bad.push('no-td-fn');
       else {
-        if (td('opencode upstream failed: fetch failed') !== true) bad.push('td-fetch');
+        if (td('kilo upstream failed: fetch failed') !== true) bad.push('td-fetch');
         if (td('HTTP 500') !== false) bad.push('td-http');
         if (td('invalid parameters') !== false) bad.push('td-fatal');
       }
@@ -3500,8 +3516,8 @@ async function runUiSmoke() {
       const u = window.__barangTestUtils;
       if (!u || typeof u.resolveSendVariant !== 'function') return 'no-variant-fn';
       const bad = [];
-      const cat = [{ providerID: 'opencode', modelID: 'spark', variants: ['low', 'high'] }, { providerID: 'x', modelID: 'y' }];
-      const m = { providerID: 'opencode', modelID: 'spark' };
+      const cat = [{ providerID: 'kilo', modelID: 'spark', variants: ['low', 'high'] }, { providerID: 'x', modelID: 'y' }];
+      const m = { providerID: 'kilo', modelID: 'spark' };
       if (u.resolveSendVariant(m, 'low', cat) !== 'low') bad.push('v-hit');
       if (u.resolveSendVariant(m, 'medium', cat) !== undefined) bad.push('v-miss');
       if (u.resolveSendVariant(m, null, cat) !== undefined) bad.push('v-null');
@@ -3883,7 +3899,7 @@ async function runUiSmoke() {
       } finally {
         try {
           if (orig) await window.barang.mcpConfig('write', { scope: 'managed', text: orig });
-          else await window.barang.mcpConfig('write', { scope: 'managed', text: '{"$schema":"https://opencode.ai/config.json","mcp":{}}' });
+          else await window.barang.mcpConfig('write', { scope: 'managed', text: '{"$schema":"https://app.kilo.ai/config.json","mcp":{}}' });
         } catch {}
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       }
@@ -4127,7 +4143,7 @@ if (!gotLock && !SMOKE && !SMOKE_UI) {
     if (SMOKE || SMOKE_UI) {
       // Smoke harnesses need the server up first (probes assert against it).
       try {
-        await bootOpencode();
+        await bootKilo();
         bootLog('opencode-ready', JSON.stringify(opencodeState()));
       } catch (e) {
         bootLog('opencode-failed', e.message);
@@ -4156,7 +4172,7 @@ if (!gotLock && !SMOKE && !SMOKE_UI) {
     // AV scan + cold Bun start (up to a minute of blank screen). Now the
     // window opens first and the server follows; the UI already handles
     // offline (banner) and flips online on opencode:ready.
-    void bootOpencode().then(
+    void bootKilo().then(
       () => {
         bootLog('opencode-ready', JSON.stringify(opencodeState()));
         broadcast('opencode:ready', { root });

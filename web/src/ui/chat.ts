@@ -1146,7 +1146,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     }
     const cur = s.model ? `${s.model.providerID}/${s.model.modelID}` : '';
     modelMini.value = cur;
-    modelMini.title = s.model ? `Model: ${cur}` : 'Model: auto (opencode default)';
+    modelMini.title = s.model ? `Model: ${cur}` : 'Model: auto (Kilo Code default)';
   };
   modelMini.onchange = () => applyModelSelection(modelMini.value);
 
@@ -1853,8 +1853,8 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
     if (viaRelay) {
       const auto = readSettings().opencodeRelayAuto;
       relayBadge.title = auto
-        ? `${RELAY_DISPLAY_NAME}: sends go through your local opencode CLI (Zen free models are blocked for serve-driven apps). Auto-approves anything not denied — set deny rules in opencode.json.`
-        : `${RELAY_DISPLAY_NAME}: sends go through your local opencode CLI. Auto-approve is off, so tool runs may stall on permission prompts.`;
+        ? `${RELAY_DISPLAY_NAME}: sends go through your local kilo CLI. Auto-approves anything not denied — set deny rules in opencode.json.`
+        : `${RELAY_DISPLAY_NAME}: sends go through your local kilo CLI. Auto-approve is off, so tool runs may stall on permission prompts.`;
     }
     // sessions
     const cur = sessSel.value;

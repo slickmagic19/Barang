@@ -1,9 +1,9 @@
 // Settings modal (topbar gear): everything adjustable in Barang.
-// Sections: Model (free-only filter, Muse Spark default), Agent, Chat
+// Sections: Model (free Kilo Code models filter), Agent, Chat
 // (reasoning visibility), Editor (font, minimap), Sessions (delete confirm),
 // Layout (panel reset). Persisted to localStorage, applied immediately.
 import {
-  agentStore, loadMeta, readSettings, writeSettings, isFreeModel, pickDefaultModel,
+  agentStore, loadMeta, readSettings, writeSettings, isFreeKiloModel, pickDefaultModel,
   setAgent, listSelectableModels, applyModelSelection,
 } from '../lib/agent';
 import {
@@ -71,12 +71,12 @@ export function openSettings(hooks: SettingsHooks) {
 
   // --- Model ---
   section('Model');
-  const freeBox = checkRow('Free models only');
+  const freeBox = checkRow('Free Kilo Code models only');
   const modelSel = el('select', { class: 'model-sel settings-select', title: 'Model' }) as HTMLSelectElement;
   body.append(modelSel);
-  body.append(el('p', { class: 'settings-note' }, 'Models come from your opencode login. “Auto” lets opencode choose per task.'));
-  const relayBox = checkRow('Opencode models via CLI Relay');
-  body.append(el('p', { class: 'settings-note' }, 'Sends opencode-provider chats through your local opencode CLI and relays the result back (Zen free models are blocked for serve-driven apps). Off = normal path (fine for paid lanes and other providers).'));
+  body.append(el('p', { class: 'settings-note' }, 'Models come from your Kilo Code login. “Auto” lets Kilo Code choose per task.'));
+  const relayBox = checkRow('Kilo Code models via CLI Relay');
+  body.append(el('p', { class: 'settings-note' }, 'Off by default — Kilo Code chats go through the normal serve path (fast, streams). Turn on only to route them through your local `kilo run` CLI.'));
   const relayAutoBox = checkRow('Relay auto-approve (anything not denied)');
   body.append(el('p', { class: 'settings-note' }, 'Relayed runs cannot pop approval cards, so non-denied permissions auto-pass. Explicit deny rules are always respected — prefer narrow patterns (rm -rf *, git push --force). Never deny bash/read outright on free models.'));
 
@@ -86,7 +86,7 @@ export function openSettings(hooks: SettingsHooks) {
   body.append(agentSel);
   const usageBox = checkRow('Show session cost meter');
   const fullAutoBox = checkRow('Full permissions (auto-approve agent requests)');
-  body.append(el('p', { class: 'settings-note' }, 'Like opencode --auto: permission prompts are approved and remembered automatically. Explicit deny rules still apply.'));
+  body.append(el('p', { class: 'settings-note' }, 'Like kilo run --auto: permission prompts are approved and remembered automatically. Explicit deny rules still apply.'));
 
   // --- MCP (Model Context Protocol servers for the agent) ---
   section('MCP');
@@ -390,14 +390,14 @@ export function openSettings(hooks: SettingsHooks) {
     };
     add.append(fName, fType, fUrl, fCmd, fToken, fOAuth, fHeaders, fEnv, fScope, fSave);
     mcpBox.append(add);
-    mcpBox.append(el('p', { class: 'settings-note' }, 'OAuth servers need one browser approval — easiest via the opencode TUI (`/connect`) once; Bearer tokens connect immediately.'));
+    mcpBox.append(el('p', { class: 'settings-note' }, 'OAuth servers need one browser approval — easiest via the kilo TUI (`/connect`) once; Bearer tokens connect immediately.'));
   }
 
   void refreshMcp().catch(() => {});
 
   // --- Providers (extra OpenAI-compatible model endpoints) ---
   section('Providers');
-  body.append(el('p', { class: 'settings-note' }, 'Extra model providers for the picker (OpenAI-compatible: OpenRouter, Groq, Ollama, …). Saved to Barang’s global file — your own configs are never touched. New models appear after an agent-server restart. For OAuth / API-key logins, `opencode auth login` in a terminal is easier.'));
+  body.append(el('p', { class: 'settings-note' }, 'Extra model providers for the picker (OpenAI-compatible: OpenRouter, Groq, Ollama, …). Saved to Barang’s global file — your own configs are never touched. New models appear after an agent-server restart. For OAuth / API-key logins, `kilo auth login` in a terminal is easier.'));
   const provBox = el('div', { class: 'mcp-box' });
   body.append(provBox);
 
@@ -785,7 +785,7 @@ export function openSettings(hooks: SettingsHooks) {
     const s = agentStore.get();
     const list = listSelectableModels();
     modelSel.innerHTML = '';
-    modelSel.append(el('option', { value: '' }, 'Auto (opencode default)') as HTMLOptionElement);
+    modelSel.append(el('option', { value: '' }, 'Auto (Kilo Code default)') as HTMLOptionElement);
     let lastProv = '';
     for (const m of list) {
       if (m.providerID !== lastProv) {
@@ -815,8 +815,8 @@ export function openSettings(hooks: SettingsHooks) {
     // (e.g. provider list changed since it was picked).
     const s0 = agentStore.get();
     const st0 = readSettings();
-    if (st0.freeOnly && s0.model && !isFreeModel(s0.model.providerID, s0.model.modelID)) {
-      const d = pickDefaultModel(s0.providerModels.filter((m) => isFreeModel(m.providerID, m.modelID)));
+    if (st0.freeOnly && s0.model && !isFreeKiloModel(s0.model)) {
+      const d = pickDefaultModel(s0.providerModels.filter((m) => isFreeKiloModel(m)));
       st0.model = d;
       writeSettings(st0);
       agentStore.set({ model: d });
@@ -865,11 +865,11 @@ export function openSettings(hooks: SettingsHooks) {
       // Enabling the filter with a paid model active would leave the UI and
       // the agent disagreeing — switch to the free default instead.
       const cur = agentStore.get().model;
-      if (settings.freeOnly && cur && !isFreeModel(cur.providerID, cur.modelID)) {
-        const d = pickDefaultModel(agentStore.get().providerModels.filter((m) => isFreeModel(m.providerID, m.modelID)));
+      if (settings.freeOnly && cur && !isFreeKiloModel(cur)) {
+        const d = pickDefaultModel(agentStore.get().providerModels.filter((m) => isFreeKiloModel(m)));
         settings.model = d;
         agentStore.set({ model: d });
-        hooks.toast(d ? `Switched to ${d.providerID}/${d.modelID} (free models only).` : 'Switched to Auto (free models only).', 'info');
+        hooks.toast(d ? `Switched to ${d.providerID}/${d.modelID} (free Kilo Code models only).` : 'Switched to Auto (free Kilo Code models only).', 'info');
       }
     });
   };
@@ -879,8 +879,8 @@ export function openSettings(hooks: SettingsHooks) {
   relayBox.onchange = () => {
     commit((s) => { s.opencodeRelay = relayBox.checked; });
     hooks.toast(relayBox.checked
-      ? 'CLI Relay on — opencode models go through your local CLI.'
-      : 'CLI Relay off — opencode models use serve (free Zen models will 403).', 'info');
+      ? 'CLI Relay on — Kilo Code models go through your local CLI.'
+      : 'CLI Relay off — Kilo Code models use serve.', 'info');
   };
   relayAutoBox.onchange = () => {
     commit((s) => { s.opencodeRelayAuto = relayAutoBox.checked; });
@@ -1068,21 +1068,21 @@ export function openSettings(hooks: SettingsHooks) {
   about.append(updateRow);
   const credit = el('p', { class: 'about-text' });
   credit.append('Agent engine by ');
-  const link = el('a', { href: 'https://opencode.ai', target: '_blank', rel: 'noreferrer' }, 'opencode');
+  const link = el('a', { href: 'https://kilo.ai', target: '_blank', rel: 'noreferrer' }, 'Kilo Code');
   credit.append(link, '.');
   about.append(credit);
   body.append(about);
   void appState()
     .then((s) => {
       const commit = typeof __BARANG_COMMIT__ !== 'undefined' ? __BARANG_COMMIT__ : 'dev';
-      aboutVer.textContent = `v${s.versions.app} · ${commit} · opencode ${s.opencode.version ?? s.opencode.cli ?? ''}`.trim();
+      aboutVer.textContent = `v${s.versions.app} · ${commit} · Kilo Code ${s.opencode.version ?? s.opencode.cli ?? ''}`.trim();
     })
     .catch(() => {
       aboutVer.textContent = '';
     });
 
   agentStore.subscribe(paint);
-  void loadMeta().then(paint).catch((e) => hooks.toast(`opencode metadata: ${e.message}`, 'error'));
+  void loadMeta().then(paint).catch((e) => hooks.toast(`Kilo Code metadata: ${e.message}`, 'error'));
   paint();
   // Group AFTER every section (About is built last) — anything left loose
   // in body would show on every tab.

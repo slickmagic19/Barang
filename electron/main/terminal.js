@@ -20,8 +20,10 @@ export function defaultShell() {
 
 function childEnv() {
   const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
-  // The bridge injects opencode credentials for its own server calls — child
-  // shells must not inherit them.
+  // The app injects kilo server credentials for its own calls — child shells
+  // must not inherit them.
+  delete env.KILO_SERVER_PASSWORD;
+  delete env.KILO_SERVER_USERNAME;
   delete env.OPENCODE_SERVER_PASSWORD;
   return env;
 }

@@ -4,7 +4,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { isWin } from './opencode.js';
+import { isWin } from './kilo.js';
 
 const MAX_READ = 1024 * 1024; // 1MB
 const SKIP_DIRS = new Set([

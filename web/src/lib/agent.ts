@@ -657,8 +657,8 @@ export interface BarangSettings {
   modelChosen: boolean; // explicit pick (even Auto) — boot defaults never override
   agent: string | null;
   agentFullAuto: boolean; // auto-approve permission asks (TUI --auto equivalent), default false
-  opencodeRelay: boolean; // CLI Relay: opencode models via the local CLI, default true
-  opencodeRelayAuto: boolean; // relay passes --auto (approve anything not denied), default true
+  opencodeRelay: boolean; // CLI Relay: route Kilo Code models via the local CLI, default false (serve is used)
+  opencodeRelayAuto: boolean; // relay passes --auto (approve anything not denied), default false
   effort: string | null; // reasoning variant for the active model, null = Default
   freeOnly: boolean;
   showUsage: boolean; // statusbar session cost meter, default true
@@ -701,8 +701,8 @@ const SETTING_DEFAULTS: BarangSettings = {
   modelChosen: false,
   agent: null,
   agentFullAuto: false,
-  opencodeRelay: true,
-  opencodeRelayAuto: true,
+  opencodeRelay: false,
+  opencodeRelayAuto: false,
   effort: null,
   freeOnly: true,
   showUsage: true,
@@ -847,8 +847,8 @@ export function readSettings(): BarangSettings {
       modelChosen: p.modelChosen === true || !!(p.model?.providerID && p.model?.modelID),
       agent: typeof p.agent === 'string' ? p.agent : null,
       agentFullAuto: p.agentFullAuto === true,
-      opencodeRelay: p.opencodeRelay !== false,
-      opencodeRelayAuto: p.opencodeRelayAuto !== false,
+      opencodeRelay: p.opencodeRelay === true,
+      opencodeRelayAuto: p.opencodeRelayAuto === true,
       effort: typeof p.effort === 'string' && p.effort ? p.effort.slice(0, 32) : null,
     };
   } catch {
@@ -870,24 +870,23 @@ export function modelListKey(models: Array<{ label: string }>): string {
   return (models ?? []).map((m) => String(m?.label ?? '')).join('\n');
 }
 
-/** Heuristic free-tier detection (opencode exposes no pricing flags).
- *  Matches :free / -free / "free" tokens, Muse Spark (free family), and
- *  Google's documented no-cost models (flash-lite, gemma) — both verified
- *  live through serve+prompt_async while anonymous Zen free models 403. */
+/** Heuristic free-tier detection (Kilo exposes no pricing flags).
+ *  Matches :free / -free / "free" tokens, Kilo's `kilo-auto/free` router,
+ *  and other documented no-cost families — verified live through the kilo
+ *  serve + run paths while anonymous. */
 export function isFreeModel(providerID: string, modelID: string): boolean {
-  return /free|muse-spark|gemini-flash-lite|gemma-/i.test(`${providerID}/${modelID}`);
+  return /free|kilo-auto\/free|nemotron|muse-spark|gemini-flash-lite|gemma-/i.test(`${providerID}/${modelID}`);
 }
 
-/** Default model chain: Muse Spark free family first, then MiMo free
- *  family (opencode provider preferred for both), else auto (null).
- *  Only free models are ever auto-picked — paid models need an explicit pick.
- *  Family regexes (not pinned versions) so 1.3 -> 1.4 renames keep working. */
+/** Default model chain: Kilo Code's `kilo-auto/free` router first (free,
+ *  no credits, no config), then any free model from the `kilo` provider,
+ *  then any other free model, else auto (null). Only free models are ever
+ *  auto-picked — paid models need an explicit pick. */
 export function pickDefaultModel(models: Array<{ providerID: string; modelID: string }>): { providerID: string; modelID: string } | null {
-  const pool = models.filter((m) => isFreeModel(m.providerID, m.modelID));
-  const inProv = (re: RegExp) =>
-    pool.find((m) => m.providerID === 'opencode' && re.test(m.modelID)) ??
-    pool.find((m) => re.test(`${m.providerID}/${m.modelID}`));
-  const pick = inProv(/muse-spark/i) ?? inProv(/mimo/i);
+  const free = (models ?? []).filter((m) => isFreeModel(m.providerID, m.modelID));
+  if (!free.length) return null;
+  const autoFree = free.find((m) => m.providerID === 'kilo' && m.modelID === 'kilo-auto/free');
+  const pick = autoFree ?? free.find((m) => m.providerID === 'kilo') ?? free[0];
   return pick ? { providerID: pick.providerID, modelID: pick.modelID } : null;
 }
 
@@ -2354,11 +2353,17 @@ export interface SelectableModel {
   variants?: string[];
 }
 
-/** Model list honoring the free-only setting (shared by Settings + composer). */
+/** Free models of Kilo Code only — the "Free models only" filter. */
+export function isFreeKiloModel(m: { providerID: string; modelID: string }): boolean {
+  return m.providerID === 'kilo' && isFreeModel(m.providerID, m.modelID);
+}
+
+/** Model list honoring the free-only setting (shared by Settings + composer).
+ *  When free-only is on, only free Kilo Code models are shown. */
 export function listSelectableModels(): SelectableModel[] {
   const { providerModels } = agentStore.get();
   const { freeOnly } = readSettings();
-  return freeOnly ? providerModels.filter((m) => isFreeModel(m.providerID, m.modelID)) : providerModels;
+  return freeOnly ? providerModels.filter((m) => isFreeKiloModel(m)) : providerModels;
 }
 
 /** Apply a model dropdown value ('' = auto): persists + updates the store.

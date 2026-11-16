@@ -142,9 +142,9 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
     }
     ocEl.innerHTML = '';
     if (info.opencodeOk) {
-      ocEl.append(dot('ok'), el('span', {}, `opencode ${info.opencodeVersion ?? ''}`.trim()));
+      ocEl.append(dot('ok'), el('span', {}, `kilo ${info.opencodeVersion ?? ''}`.trim()));
     } else {
-      ocEl.append(dot('bad'), el('span', {}, 'opencode offline'));
+      ocEl.append(dot('bad'), el('span', {}, 'kilo offline'));
     }
     ocEl.classList.toggle('is-busy', a.busy);
 
@@ -170,7 +170,7 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
     modelEl.innerHTML = '';
     modelEl.append(iconEl('spark', 12), el('span', {}, a.model ? `${a.model.providerID}/${a.model.modelID}` : 'auto model'));
     if (relayRouteFor(a.model)) {
-      const tag = el('span', { class: 'relay-tag', title: 'Sends go through your local opencode CLI (CLI Relay)' }, RELAY_DISPLAY_NAME);
+      const tag = el('span', { class: 'relay-tag', title: 'Sends go through your local kilo CLI (CLI Relay)' }, RELAY_DISPLAY_NAME);
       modelEl.append(tag);
     }
 

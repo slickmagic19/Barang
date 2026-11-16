@@ -7,7 +7,7 @@
 // must not be killed mid-flight. One active run is guarded renderer-side;
 // main additionally refuses a second concurrent run to avoid duplicate turns.
 import { spawn } from 'node:child_process';
-import { findOpencode, isDirectBinary, tryStop, isWin } from './opencode.js';
+import { findKilo, isDirectBinary, tryStop, isWin } from './kilo.js';
 
 const MAX_STDERR_TAIL = 8192;
 const MAX_EVENT_LINES = 400; // forwarded per run (chatty tool streams stay bounded)
@@ -113,7 +113,7 @@ export async function startRelay(args, { root, broadcast } = {}) {
   } catch {
     fail('Project folder is gone');
   }
-  const found = await findOpencode();
+  const found = await findKilo();
   const { argv, imageDir } = await buildArgv(args);
   const direct = isDirectBinary(found.command);
   const runId = `relay_${Date.now().toString(36)}_${(++seq).toString(36)}`;

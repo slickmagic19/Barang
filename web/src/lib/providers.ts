@@ -102,7 +102,7 @@ export function setProviderEntry(fileText: string, entry: CustomProviderEntry): 
   if (errs.length) throw new Error(errs[0]);
   const { config, providers } = parseProvidersFile(fileText);
   const next: Record<string, unknown> = { ...config };
-  if (!next.$schema) next.$schema = 'https://opencode.ai/config.json';
+  if (!next.$schema) next.$schema = 'https://app.kilo.ai/config.json';
   next.providers = { ...providers, [entry.id.trim()]: providerToLiveConfig(entry) };
   return JSON.stringify(next, null, 2) + '\n';
 }

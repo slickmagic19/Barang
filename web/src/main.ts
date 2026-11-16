@@ -3,7 +3,8 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, selectSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, pickDefaultModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
+import { connectEvents, agentStore, createSession, selectSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession,
+          pickDefaultModel, isFreeKiloModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
@@ -574,12 +575,12 @@ async function boot() {
     toast(`Desktop backend unreachable: ${(e as Error).message}`, 'error');
   }
   if (!opencodeOk) {
-    // The CLI ships inside Barang (vendor/opencode) — this banner means the
+    // The CLI ships inside Barang (vendor/kilo) — this banner means the
     // bundled server failed to start (slow first boot, AV lock), not that
-    // anything needs installing. It hides itself on opencode:ready.
+    // anything needs installing. It hides itself on kilo:ready.
     ocBanner.append(
       iconEl('alert', 14),
-      el('span', {}, 'Agent offline — the bundled opencode failed to start. Editing still works.'),
+      el('span', {}, 'Agent offline — the bundled Kilo Code failed to start. Editing still works.'),
     );
     const btnRetryOc = el('button', { class: 'btn btn-sm' }, 'Retry') as HTMLButtonElement;
     btnRetryOc.onclick = () => {
@@ -1196,6 +1197,8 @@ async function boot() {
     tabPageRange,
     shouldAutoCreateSession,
     pickDefaultModel,
+    isFreeKiloModel,
+    readSettings,
     substituteVars,
     buildUrl,
     parseUrlParams,
@@ -1348,7 +1351,7 @@ async function boot() {
     selectSession,
   };
   // Model/agent catalog + free-model defaults (Muse Spark when available).
-  void loadMeta().catch((e) => toast(`opencode metadata: ${e.message}`, 'error'));
+  void loadMeta().catch((e) => toast(`Kilo Code metadata: ${e.message}`, 'error'));
 
   const toggleAgent = () => {
     if (agentic) return; // the panel IS the agentic view — nothing to toggle
@@ -1563,7 +1566,7 @@ async function boot() {
   }, 400);
   agentStore.subscribe(syncOnIdle);
 
-  if (opencodeOk) toast(`Connected to opencode ${opencodeVersion ?? ''} — agent online`, 'info');
+  if (opencodeOk) toast(`Connected to Kilo Code ${opencodeVersion ?? ''} — agent online`, 'info');
 }
 
 boot().catch((e) => {

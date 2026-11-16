@@ -24,8 +24,10 @@ function git(cwd) {
   // is legitimate ambient configuration — allowlist it. Arg-based guards
   // (upload-pack, exec, config paths) stay at full strength.
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-  // The bridge injects opencode credentials for its own server calls — git
-  // children must not inherit them.
+  // The app injects kilo server credentials for its own calls — git children
+  // must not inherit them.
+  delete env.KILO_SERVER_PASSWORD;
+  delete env.KILO_SERVER_USERNAME;
   delete env.OPENCODE_SERVER_PASSWORD;
   // CRITICAL scope guard: GIT_CEILING_DIRECTORIES stops git from ascending
   // past the OPENED folder, so a bare subfolder of a repo never sees (or

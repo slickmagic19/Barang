@@ -87,7 +87,7 @@ export function toServerList(mcp: Record<string, unknown>): McpServerConfig[] {
 export function buildFileText(existingText: string, mcp: Record<string, unknown>): string {
   const { config } = parseMcpFile(existingText);
   const next: Record<string, unknown> = { ...config };
-  if (!next.$schema) next.$schema = 'https://opencode.ai/config.json';
+  if (!next.$schema) next.$schema = 'https://app.kilo.ai/config.json';
   next.mcp = mcp;
   return JSON.stringify(next, null, 2) + '\n';
 }

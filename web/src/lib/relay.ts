@@ -1,6 +1,6 @@
-// CLI Relay: route opencode-provider chats through the official `opencode run`
-// CLI instead of the serve API (Zen free models are gated for serve-driven
-// clients, but answer for the official CLI — verified live). This module is
+// CLI Relay: route Kilo Code (kilo/*) chats through the official `kilo run`
+// CLI instead of the serve API (the OpenCode-fork CLI path is the most robust
+// for provider models and matches upstream behavior). This module is
 // dependency-free and pure so it can be unit-tested outside the renderer:
 // arg building (allowlisted, shell-free), JSON event parsing, progress
 // labels, and secret redaction for anything surfaced in the UI.
@@ -25,13 +25,13 @@ export interface RelayModel {
 }
 
 /** True when this send must go through the CLI instead of serve: the relay
- *  setting is on and the resolved model is an opencode (Zen) model. Pure. */
+ *  setting is on and the resolved model is a Kilo Code (kilo) model. Pure. */
 export function shouldRelayRoute(model: RelayModel | null, relayEnabled: boolean): boolean {
-  return !!relayEnabled && !!model && model.providerID === 'opencode';
+  return !!relayEnabled && !!model && model.providerID === 'kilo';
 }
 
 const PROVIDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$/;
-const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.\-+:]{0,199}$/;
+const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.\-+:/]{0,199}$/;
 const AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const SESSION_ID_RE = /^ses_[A-Za-z0-9]{20,40}$/;
 
@@ -48,7 +48,7 @@ export interface RelayRequest {
   auto: boolean;
 }
 
-/** Build argv for `opencode run`. Main spawns it with shell:false, so there
+/** Build argv for `kilo run`. Main spawns it with shell:false, so there
  *  is no shell to inject into — validation here is defense in depth plus
  *  clear errors (bad agent/session names, argv budget). Throws. Pure. */
 export function buildRelayArgs(req: RelayRequest): string[] {

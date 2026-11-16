@@ -1,8 +1,9 @@
-// Direct client for the owned `opencode serve` instance (no HTTP proxy needed
+// Direct client for the owned `kilo serve` instance (Kilo Code is an OpenCode
+// fork, so the REST + /event SSE surface is identical). No HTTP proxy needed
 // inside a desktop app — main fetches upstream with the env auth header and
-// returns plain results over IPC). Also pumps the upstream /event SSE bus and
-// forwards parsed frames to renderer windows.
-import { startOpencodeServer, serverAuthHeader } from './opencode.js';
+// returns plain results over IPC. Also pumps the upstream /event SSE bus and
+// forwards parsed frames to the renderer.
+import { startKiloServer, serverAuthHeader } from './kilo.js';
 
 let server = null; // { base, port, version, cliVersion, stop }
 let pumpController = null;
@@ -10,15 +11,18 @@ let pumpFailures = 0;
 let onFrame = null;
 let onConn = null;
 
-export function opencodeState() {
+export function kiloState() {
   return server
     ? { running: true, base: server.base, port: server.port, version: server.version, cli: server.cliVersion }
     : { running: false };
 }
 
-/** One opencode REST call. Returns { status, text }. GETs retry through cold boot. */
+// Back-compat alias (renderer still reads `app.state().opencode`).
+export const opencodeState = kiloState;
+
+/** One kilo REST call. Returns { status, text }. GETs retry through cold boot. */
 export async function ocCall(path, { method = 'GET', body, timeoutMs } = {}) {
-  if (!server) throw new Error('opencode server is not running yet');
+  if (!server) throw new Error('kilo server is not running yet');
   const headers = { ...serverAuthHeader() };
   let bodyInit;
   if (body !== undefined) {
@@ -40,7 +44,7 @@ export async function ocCall(path, { method = 'GET', body, timeoutMs } = {}) {
       lastErr = e;
     }
   }
-  throw new Error('opencode upstream failed: ' + (lastErr?.message || 'unreachable'));
+  throw new Error('kilo upstream failed: ' + (lastErr?.message || 'unreachable'));
 }
 
 let bootSeq = 0; // guards rapid project switches: only the latest boot wins
@@ -49,7 +53,7 @@ let bootSeq = 0; // guards rapid project switches: only the latest boot wins
 export async function ensureServer(cwd, { port = 0, onLog = () => {}, extraEnv = {} } = {}) {
   if (server) return server;
   const my = ++bootSeq;
-  const s = await startOpencodeServer({ cwd, port, onLog, extraEnv });
+  const s = await startKiloServer({ cwd, port, onLog, extraEnv });
   if (my !== bootSeq) {
     try { s.stop(); } catch { /* noop */ }
     throw new Error('superseded');

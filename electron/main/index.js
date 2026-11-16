@@ -2623,6 +2623,20 @@ async function runUiSmoke() {
       }
       // CLI Relay is off by default (serve is the normal path now).
       if (typeof u.readSettings === 'function' && u.readSettings().opencodeRelay !== false) bad.push('relay-default-off');
+      // Auto-approve must not surface an approval card/notification.
+      if (typeof u.shouldSurfacePermission !== 'function') bad.push('no-should-surface');
+      else {
+        if (u.shouldSurfacePermission(false) !== true) bad.push('surface-when-manual');
+        if (u.shouldSurfacePermission(true) !== false) bad.push('surface-when-auto');
+      }
+      if (typeof u.handlePermissionAsk === 'function') {
+        const props = { id: 'per_1', sessionID: 'ses_abcdef0123456789abcd', permission: 'bash', patterns: ['echo hi'] };
+        const manual = u.handlePermissionAsk(props, false);
+        if (manual.surface !== true || !manual.card) bad.push('ask-manual-surface');
+        const auto = u.handlePermissionAsk(props, true);
+        if (auto.surface !== false) bad.push('ask-auto-hide');
+        if (!auto.card) bad.push('ask-auto-nocard');
+      } else bad.push('no-handle-ask');
       // Send retry classification: fatal first (no duplicate re-POSTs).
       const t = u.isRetryableSendError;
       if (typeof t !== 'function') bad.push('no-retry-fn');

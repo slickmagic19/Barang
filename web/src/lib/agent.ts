@@ -322,6 +322,23 @@ export function permissionFromEvent(props: unknown): PendingPermission | null {
   };
 }
 
+/** Whether an incoming permission ask should be surfaced (approval card +
+ *  notification). Auto-approve mode approves silently — no card and no nudge.
+ *  Pure. */
+export function shouldSurfacePermission(autoApprove: boolean): boolean {
+  return !autoApprove;
+}
+
+/** Decide how to handle an incoming permission ask. Auto-approve returns the
+ *  card for a silent 'always' reply (never surfaced — no card, no notification);
+ *  manual mode surfaces it for the user to approve. Pure. */
+export function handlePermissionAsk(
+  props: unknown,
+  autoApprove: boolean,
+): { surface: boolean; card: PendingPermission | null } {
+  return { surface: shouldSurfacePermission(autoApprove), card: permissionFromEvent(props) };
+}
+
 /** Track a newly asked permission (dedupe by id). Tombstoned (answered or
  *  confirmed-dead) ids stay buried: the server re-emits dead waits. */
 export function upsertPermission(props: unknown): PendingPermission | null {
@@ -596,10 +613,14 @@ export function connectEvents() {
         const sameProject = !ev.directory || !root || normDir(ev.directory) === normDir(root);
         if (sameProject) {
           if (ev.type === 'permission.asked' || ev.type === 'permission.updated') {
-            const card = upsertPermission(ev.props);
-            if (card && readSettings().agentFullAuto) {
-              // Full-permissions mode (TUI --auto): approve + remember, so
-              // matching future asks stop appearing mid-run.
+            const d = handlePermissionAsk(ev.props, readSettings().agentFullAuto);
+            if (d.surface) {
+              upsertPermission(ev.props);
+            } else if (d.card) {
+              // Full-permissions mode (TUI --auto): approve + remember WITHOUT
+              // surfacing an approval card or notification — auto-approved
+              // prompts must not ask for attention.
+              const card = d.card;
               void respondPermission(card, 'always').catch((e) => {
                 agentStore.set({ error: `Auto-approve failed: ${(e as Error).message}` });
               });

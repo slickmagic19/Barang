@@ -4,7 +4,7 @@ import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
 import { connectEvents, agentStore, createSession, selectSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession,
-          pickDefaultModel, isFreeKiloModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries, sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, parseAgentEvent, isTransportDown, findUserMessage, todoProgress,
+          pickDefaultModel, isFreeKiloModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries,           sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, shouldSurfacePermission, handlePermissionAsk, parseAgentEvent,  isTransportDown, findUserMessage, todoProgress,
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
@@ -1217,6 +1217,8 @@ async function boot() {
     messageErrorText,
     decideStalled,
     permissionFromEvent,
+    shouldSurfacePermission,
+    handlePermissionAsk,
     parseAgentEvent,
     upsertPermission,
     removePermission,

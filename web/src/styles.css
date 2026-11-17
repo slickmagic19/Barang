@@ -25,6 +25,13 @@
   --shadow-pop: 0 12px 40px #000000b8;
   --side-w: 264px;
   --agent-w: 372px;
+  /* Chrome metrics: one tab height for file tabs and session tabs, and the
+     editor surface the active tab merges into (Monaco's editor.background,
+     see ui/editor.ts defineTheme). */
+  --tab-h: 35px;
+  --tab-surface: #080808;
+  --tab-surface-panel: var(--panel);
+  --tab-x-slot: 18px;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -211,13 +218,13 @@ button { font-family: inherit; }
   cursor: pointer; border-radius: 6px; transition: background .12s, color .12s;
 }
 .icon-btn:hover { background: #ffffff10; color: var(--text); }
-.tree { overflow: auto; flex: 1; padding: 0 6px 20px; }
+.tree { overflow: auto; flex: 1; padding: 2px 6px 16px; }
 .tree-row { line-height: 0; }
 .tree-label {
-  display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
   background: transparent; border: none; color: var(--text-dim);
-  font-size: 12.5px; padding: 0 8px 0 0; height: 29px; cursor: pointer;
-  white-space: nowrap; overflow: hidden; border-radius: 6px; border-left: none;
+  font-size: 12.5px; padding: 0 8px; height: 24px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; border-radius: var(--radius-sm); border-left: none;
 }
 .tree-label:hover { background: #ffffff08; color: var(--text); }
 .tree-label.active { background: var(--accent-dim); color: var(--text); }
@@ -228,12 +235,20 @@ button { font-family: inherit; }
 .tree-label.open .tw svg { transform: rotate(90deg); }
 .tree-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
-/* SCM worktree badges (explorer + scm rows share layout; exact VSCode Dark+
-   decoration colors are injected by scm.ts so they survive any theme) */
-.git-badge {
-  font-size: 10px; font-weight: 700; margin-left: auto; padding-left: 8px;
-  flex: 0 0 auto; line-height: 1;
+/* Tracking indicators (explorer + SCM right gutter). Files carry their git
+   status letter (colors injected by scm.ts), folders a rolled-up count, and
+   any row with unsaved edits an amber dot. */
+.tree-badges {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-left: auto; padding-left: 8px; flex: 0 0 auto;
 }
+.git-badge { font-size: 10px; font-weight: 700; line-height: 1; letter-spacing: .2px; flex: 0 0 auto; }
+.git-count {
+  min-width: 16px; text-align: center; font-size: 9.5px; font-weight: 700; line-height: 1;
+  color: var(--text-dim); background: #ffffff0f; border-radius: 999px; padding: 2px 5px;
+}
+.tree-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--yellow); flex: 0 0 auto; }
+.tree-label:hover .git-count { color: var(--text); background: #ffffff1a; }
 
 /* sidebar view switch (Explorer | Source Control | Bolt icons) */
 .side-viewbar {
@@ -318,7 +333,7 @@ button { font-family: inherit; }
   color: var(--text-faint); padding: 3px; border-radius: 5px;
 }
 .scm-row-act:hover { background: #ffffff1a; color: var(--text); }
-.scm-row .git-badge { margin-left: 2px; }
+.scm-row .git-badge { margin-left: auto; }
 .scm-row:hover .git-badge { visibility: hidden; }
 .scm-resolve-label { font-size: 10px; font-weight: 650; padding: 0 3px; white-space: nowrap; }
 .scm-dir-row .tw { color: var(--text-faint); display: inline-flex; width: 14px; }
@@ -479,30 +494,59 @@ button.status-git:hover { color: var(--text); }
   50% { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
 }
 
-/* tabs + editor */
+/* tabs + editor
+   One tab language for every strip (file tabs, agent session tabs): flat
+   rows, hairline separators, no notches; the active tab takes the editor
+   surface so it merges with the code below it (Cursor/VS Code posture). */
 .tabs {
-  display: flex; overflow-x: auto; background: var(--bg-soft);
-  border-bottom: 1px solid var(--border); flex: 0 0 auto; padding: 6px 8px 0; gap: 2px;
+  display: flex; align-items: stretch; flex: 0 0 auto;
+  height: var(--tab-h); min-height: var(--tab-h);
+  background: var(--bg-soft); border-bottom: 1px solid var(--border);
+  padding: 0; gap: 0;
+  /* Horizontal overflow only: an auto vertical axis paints a stray scrollbar
+     at the strip's right end and steals tab height. */
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none;
 }
+.tabs::-webkit-scrollbar { display: none; }
 .tab {
-  display: flex; align-items: center; gap: 7px; background: transparent; border: 1px solid transparent;
-  border-bottom: none; color: var(--text-dim); padding: 7px 8px 8px 12px; font-size: 12.5px;
-  cursor: pointer; white-space: nowrap; border-radius: 8px 8px 0 0; position: relative; max-width: 200px;
+  display: flex; align-items: center; gap: 7px; flex: 0 0 auto;
+  height: 100%; max-width: 200px; min-width: 0; padding: 0 6px 0 11px;
+  background: transparent; border: none; border-radius: 0;
+  box-shadow: inset -1px 0 0 var(--border);
+  color: var(--text-dim); font-size: 12.5px; font-weight: 500;
+  cursor: pointer; white-space: nowrap; position: relative; text-align: left;
+  transition: background .1s ease, color .1s ease;
 }
 .tab:hover { color: var(--text); background: #ffffff06; }
-.tab.active { background: var(--bg); color: var(--text); border-color: var(--border); }
+.tab.active {
+  background: var(--tab-surface); color: var(--text);
+  box-shadow: inset 0 1px 0 var(--accent-line), inset -1px 0 0 var(--border);
+}
+/* Seam: the active tab owns the strip's bottom hairline, so it reads as one
+   surface with the editor below instead of a strip with a tab pasted on. */
 .tab.active::after {
-  content: ''; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px;
-  background: var(--accent); border-radius: 2px;
+  content: ''; position: absolute; left: 0; right: 1px; bottom: -1px; height: 1px;
+  background: var(--tab-surface);
 }
 .tab .tab-name { overflow: hidden; text-overflow: ellipsis; }
 .tab .dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); flex: 0 0 auto; }
 .tab-x {
   display: inline-flex; align-items: center; justify-content: center;
-  opacity: 0; border-radius: 5px; width: 20px; height: 20px; color: var(--text-dim);
+  width: var(--tab-x-slot); height: var(--tab-x-slot); flex: 0 0 auto;
+  opacity: 0; border-radius: 4px; color: var(--text-dim);
+  transition: opacity .1s ease, background .12s ease;
 }
-.tab:hover .tab-x, .tab.active .tab-x { opacity: .85; }
-.tab-x:hover { background: #ffffff1a; color: var(--text); }
+.tab:hover .tab-x, .tab.active .tab-x { opacity: .8; }
+.tab-x:hover { background: #ffffff1a; color: var(--text); opacity: 1; }
+/* Dirty tabs show the dot in the close slot and swap back to the X on hover
+   (visibility, not display: the slot never collapses, so nothing shifts). */
+.tab.is-dirty .tab-x { visibility: hidden; }
+.tab.is-dirty .dirty-dot {
+  position: absolute; right: calc(6px + var(--tab-x-slot) / 2 - 3.5px);
+}
+.tab.is-dirty:hover .tab-x { visibility: visible; }
+.tab.is-dirty:hover .dirty-dot { visibility: hidden; }
 .editor-host { flex: 1; min-height: 0; }
 /* VSCode-style split groups: two columns, each with its own tab strip. */
 .editor-cols { flex: 1; display: flex; min-height: 0; min-width: 0; }
@@ -510,7 +554,9 @@ button.status-git:hover { color: var(--text); }
 .editor-col + .editor-col { border-left: 1px solid var(--border); }
 .editor-col.drop-over { outline: 1px dashed var(--accent-strong); outline-offset: -5px; }
 .tabs-spacer { flex: 1; }
-.split-btn { flex: 0 0 auto; align-self: center; margin: 0 4px 4px 2px; }
+/* Strip actions (split toggle) ride the same row without stretching it. */
+.tabs .icon-btn { flex: 0 0 auto; align-self: center; width: 26px; height: 26px; margin: 0 4px; }
+.split-btn { flex: 0 0 auto; align-self: center; }
 
 .welcome { flex: 1; display: grid; place-items: center; overflow: auto; }
 .welcome-inner { text-align: center; max-width: 560px; padding: 32px 24px; }
@@ -587,10 +633,11 @@ body.agentic .effort-mini { flex: 0 0 auto; }
 body.agentic .send-row .btn-primary { margin-left: auto; }
 .agentic-branch { display: flex; align-items: center; gap: 5px; color: var(--text-faint); }
 .agentic-branch.hidden { display: none; }
-.agent-section { padding: 12px 12px 0; }
-/* Session header: clear separation from the transcript below. */
-.sess-section {
-  padding-bottom: 13px;
+.agent-section { padding: 12px 14px 0; }
+/* Session strip: chrome, not a card — one full-bleed tab row. The drop
+   shadow keeps scrolled transcript text from bleeding into the strip. */
+.agent-section.sess-section {
+  padding: 0;
   border-bottom: 1px solid var(--border);
   box-shadow: 0 12px 18px -14px rgba(0, 0, 0, 0.85);
   position: relative;
@@ -600,8 +647,7 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
   font-size: 10.5px; font-weight: 700; letter-spacing: 1.1px; text-transform: uppercase;
   color: var(--text-faint); margin: 0 2px 7px; user-select: none;
 }
-.sess-row { display: flex; gap: 6px; }
-.sess-sel, .model-sel, .agent-sel {
+.model-sel, .agent-sel {
   appearance: none; -webkit-appearance: none;
   background-color: var(--panel-2); color: var(--text); border: 1px solid var(--border);
   border-radius: var(--radius-sm); font-size: 12px; padding: 7px 26px 7px 10px; outline: none; min-width: 0;
@@ -610,12 +656,11 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
   cursor: pointer; transition: border-color .12s;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.sess-sel:hover, .model-sel:hover, .agent-sel:hover { border-color: var(--border-strong); }
-.sess-sel:focus, .model-sel:focus, .agent-sel:focus { border-color: var(--accent-line); }
-.sess-sel { flex: 1; }
+.model-sel:hover, .agent-sel:hover { border-color: var(--border-strong); }
+.model-sel:focus, .agent-sel:focus { border-color: var(--accent-line); }
 .agent-pickers { display: flex; gap: 6px; padding-top: 8px; }
 .model-sel { flex: 3; } .agent-sel { flex: 2; }
-.perms { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 0; }
+.perms { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px 0; }
 .perms:empty { padding: 0; }
 .perm-card {
   border: 1px solid #e0af6859; background: linear-gradient(180deg, #e0af6814, #e0af6808);
@@ -668,7 +713,7 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
   color: var(--yellow); font-size: 11.5px; line-height: 1.55; margin-bottom: 9px;
   background: #e0af6812; border: 1px solid #e0af6852; border-radius: 7px; padding: 7px 9px;
 }
-.chat-list { flex: 1 1 auto; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.chat-list { flex: 1 1 auto; overflow-y: auto; padding: 14px 14px 16px; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
 /* Below-list sections never squeeze the composer: fixed footprint, internal scroll. */
 .busy-row, .todos-sec, .changes-sec { flex: 0 0 auto; }
 .chat-empty {
@@ -677,7 +722,7 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
 }
 .chat-err {
   display: flex; gap: 8px; align-items: flex-start;
-  margin: 10px 12px 0; padding: 9px 11px; border-radius: var(--radius);
+  margin: 10px 14px 0; padding: 9px 11px; border-radius: var(--radius);
   background: #f7768e10; border: 1px solid #f7768e4d; color: var(--red); font-size: 12px; line-height: 1.5;
 }
 .chat-err .ic { margin-top: 1px; }
@@ -781,7 +826,7 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
   color: var(--accent-strong); cursor: pointer; font-size: 12px; padding: 0; text-align: left;
 }
 .link-btn:hover { text-decoration: underline; }
-.busy-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; color: var(--text-dim); font-size: 12px; }
+.busy-row { display: flex; align-items: center; gap: 8px; padding: 8px 14px; color: var(--text-dim); font-size: 12px; }
 .spinner {
   width: 13px; height: 13px; border-radius: 50%; flex: 0 0 13px;
   border: 2px solid var(--border-strong); border-top-color: var(--accent); animation: spin 0.8s linear infinite;
@@ -789,7 +834,7 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* composer */
-.composer { border-top: 1px solid var(--border); padding: 12px; position: relative; background: var(--panel); }
+.composer { border-top: 1px solid var(--border); padding: 12px 14px 14px; position: relative; background: var(--panel); }
 .composer-box {
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px;
   padding: 4px 4px 4px 12px; transition: border-color .13s;
@@ -925,11 +970,11 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
 /* status bar */
 .statusbar {
   display: flex; justify-content: space-between; align-items: center;
-  height: 29px; flex: 0 0 29px; background: var(--panel);
+  height: 26px; flex: 0 0 26px; background: var(--panel);
   border-top: 1px solid var(--border); padding: 0 12px; font-size: 11.5px; color: var(--text-dim);
   user-select: none;
 }
-.status-left, .status-right { display: flex; gap: 16px; align-items: center; }
+.status-left, .status-right { display: flex; gap: 14px; align-items: center; }
 .status-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; line-height: 1; }
 /* Dot wrappers must not inherit line box height, or the 7px glyph sinks. */
 .status-item .ok, .status-item .bad, .status-item .warn, .status-item .run { display: inline-flex; line-height: 0; }
@@ -955,7 +1000,7 @@ button.status-item:hover { color: var(--text); }
 }
 .term-grip:hover { background: #ffffff10; }
 .term-head {
-  display: flex; align-items: center; gap: 8px; padding: 3px 8px;
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px;
   border-bottom: 1px solid #ffffff10; flex: 0 0 auto; user-select: none;
 }
 .term-tabs { display: flex; align-items: center; gap: 2px; overflow-x: auto; flex: 1 1 auto; min-width: 0; }
@@ -998,7 +1043,7 @@ button.status-item:hover { color: var(--text); }
 .term-col { flex: 1 1 0; min-width: 0; display: flex; }
 .term-col.hidden { display: none; }
 .term-col[data-col="1"] { border-left: 1px solid #ffffff14; }
-.term-mount { flex: 1 1 auto; min-width: 0; padding: 6px 0 6px 10px; }
+.term-mount { flex: 1 1 auto; min-width: 0; padding: 4px 0 4px 10px; }
 .term-mount .xterm { height: 100%; }
 .term-empty {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -1283,7 +1328,7 @@ button.status-item:hover { color: var(--text); }
 .usage-sep { border-top: 1px solid var(--border); margin: 7px 0 5px; }
 
 /* session changes (Cursor-style review list) */
-.changes-sec { border-top: 1px solid var(--border); padding: 10px 12px 4px; display: flex; flex-direction: column; gap: 6px; }
+.changes-sec { border-top: 1px solid var(--border); padding: 10px 14px 6px; display: flex; flex-direction: column; gap: 6px; }
 .changes-sec.hidden { display: none; }
 .changes-head { display: flex; align-items: center; gap: 7px; }
 .changes-toggle {
@@ -1306,7 +1351,7 @@ button.status-item:hover { color: var(--text); }
 .changes-head .icon-btn { margin-left: auto; width: 24px; height: 24px; }
 .changes-list { display: flex; flex-direction: column; gap: 3px; max-height: 190px; overflow-y: auto; padding-bottom: 6px; }
 /* Agent todo checklist (read-only, server-owned) */
-.todos-sec { border-top: 1px solid var(--border); padding: 10px 12px 4px; display: flex; flex-direction: column; gap: 6px; }
+.todos-sec { border-top: 1px solid var(--border); padding: 10px 14px 6px; display: flex; flex-direction: column; gap: 6px; }
 .todos-sec.hidden { display: none; }
 .todos-toggle {
   display: flex; align-items: center; gap: 7px; flex: 1;
@@ -1482,3 +1527,88 @@ button.status-item:hover { color: var(--text); }
 .sound-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sound-acts { display: flex; gap: 6px; flex: none; }
 .mcp-area { min-height: 54px; resize: vertical; font-family: var(--mono); font-size: 11.5px; }
+
+/* ============================================================
+   Cursor-style polish — appended, variable-driven overrides.
+   Dark-gray (not pure black) surfaces, Inter type, blue accents
+   for active/focus, rounded panels, refined tabs/scrollbars.
+   ============================================================ */
+:root {
+  --bg: #141414;
+  --bg-soft: #181818;
+  --panel: #1b1b1d;
+  --panel-2: #232326;
+  --panel-3: #2c2c30;
+  --border: #ffffff0d;
+  --border-strong: #ffffff1a;
+  --text: #e7e7ea;
+  --text-dim: #a3a3ab;
+  --text-faint: #6b6b73;
+  --accent: #e7e7ea;
+  --accent-strong: #ffffff;
+  --accent-dim: #ffffff12;
+  --accent-line: #ffffff2e;
+  --blue: #4c8dff;
+  --radius: 9px;
+  --radius-sm: 6px;
+  --shadow-pop: 0 18px 50px #000000b0;
+}
+body { font-size: 13px; line-height: 1.55; letter-spacing: .05px; text-rendering: optimizeLegibility; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #ffffff12; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #ffffff26; border: 2px solid transparent; background-clip: content-box; }
+.topbar { height: 46px; flex: 0 0 46px; background: #161617; border-bottom: 1px solid var(--border); }
+.brand { font-weight: 650; letter-spacing: .2px; }
+.top-btn { border-radius: var(--radius-sm); font-weight: 500; }
+/* Sidebar rhythm: view switcher, then a 34px section header that sits right
+   on top of the tree (density without crowding). */
+.side-viewbar { padding: 6px 8px 4px; gap: 2px; }
+.side-header { height: 34px; padding: 0 8px 0 14px; }
+.tree-label.active { background: #ffffff0f; }
+.editor-host { background: #1a1a1c; }
+.btn, .settings-btn, .top-btn { border-radius: var(--radius-sm); }
+.modal, .settings-modal, .palette, .popover, .ctx-menu, .menu-pop {
+  border-radius: var(--radius); border: 1px solid var(--border-strong); box-shadow: var(--shadow-pop);
+}
+:focus-visible { outline: 1px solid var(--accent-line); outline-offset: 1px; }
+a { color: var(--blue); }
+.statusbar { background: #161617; border-top: 1px solid var(--border); font-size: 12px; }
+
+/* Agent session strip — the same tab language as the file strips above
+   (.tabs/.tab): flat rows, hairline separators, active = editor surface. */
+.sess-row {
+  display: flex; align-items: stretch; gap: 0;
+  height: var(--tab-h); background: var(--panel-2); padding-right: 4px;
+}
+.sess-list {
+  display: flex; align-items: stretch; flex: 1 1 auto; min-width: 0;
+  height: 100%; padding: 0; gap: 0;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.sess-list::-webkit-scrollbar { display: none; }
+.sess-tab {
+  display: flex; align-items: center; flex: 0 0 auto;
+  height: 100%; max-width: 190px; min-width: 0; padding: 0 12px;
+  background: transparent; border: none; border-radius: 0;
+  box-shadow: inset -1px 0 0 var(--border);
+  color: var(--text-dim); font-size: 12.5px; font-weight: 500;
+  cursor: pointer; white-space: nowrap; text-align: left; position: relative;
+  transition: background .1s ease, color .1s ease;
+}
+.sess-tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-tab:hover { color: var(--text); background: #ffffff06; }
+.sess-tab.active {
+  background: var(--tab-surface-panel); color: var(--text);
+  box-shadow: inset 0 1px 0 var(--accent-line), inset -1px 0 0 var(--border);
+}
+.sess-tab.active::after {
+  content: ''; position: absolute; left: 0; right: 1px; bottom: -1px; height: 1px;
+  background: var(--tab-surface-panel);
+}
+/* Row actions (+ / restore / delete) ride the strip without stretching it. */
+.sess-row > .icon-btn { align-self: center; flex: 0 0 auto; width: 24px; height: 24px; margin-left: 2px; }
+
+/* Composer focus: subtle border, no glow (Cursor-like) */
+.composer-box { transition: border-color .14s ease, box-shadow .14s ease; }
+.composer-box:focus-within { border-color: var(--accent-line); }
+.composer-input:focus, .composer-input:focus-visible { outline: none !important; box-shadow: none !important; }

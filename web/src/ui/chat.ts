@@ -887,14 +887,14 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
 
   const sessSection = el('div', { class: 'agent-section sess-section' });
   const sessRow = el('div', { class: 'sess-row' });
-  const sessSel = el('select', { class: 'sess-sel', title: 'Session' }) as HTMLSelectElement;
+  const sessList = el('div', { class: 'sess-list' }); // Cursor-style session pills
   const btnNew = el('button', { class: 'icon-btn', title: 'New session' }) as HTMLButtonElement;
   btnNew.append(iconEl('plus', 15));
   const btnDel = el('button', { class: 'icon-btn', title: 'Delete session' }) as HTMLButtonElement;
   btnDel.append(iconEl('trash', 15));
   const btnUnrevert = el('button', { class: 'icon-btn', title: 'Restore messages hidden by revert' }) as HTMLButtonElement;
   btnUnrevert.append(iconEl('history', 15));
-  sessRow.append(sessSel, btnNew, btnUnrevert, btnDel);
+  sessRow.append(sessList, btnNew, btnUnrevert, btnDel);
   sessSection.append(sessRow);
 
   const perms = el('div', { class: 'perms' });
@@ -1499,7 +1499,6 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       .then(() => hooks.toast('Reverted messages restored.', 'info'))
       .catch((e) => hooks.toast(`Unrevert failed: ${(e as Error).message}`, 'error'));
   };
-  sessSel.onchange = () => void selectSession(sessSel.value).catch((e) => hooks.toast(e.message, 'error'));
 
 // Sessions the user collapsed in Todos (new sessions default open).
 const todosCollapsed = new Set<string>();
@@ -1516,7 +1515,8 @@ const changesTouched = new Set<string>();
 
 function paintTodos() {
   const s = agentStore.get();
-  const todos = s.todos ?? [];
+  // Completed todos clear automatically (Cursor-like: only open work shows).
+  const todos = (s.todos ?? []).filter((t) => String(t.status ?? '').toLowerCase() !== 'completed');
   todosSec.classList.toggle('hidden', todos.length === 0);
   if (!todos.length) return;
   const { label } = todoProgress(todos);
@@ -1856,16 +1856,19 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
         ? `${RELAY_DISPLAY_NAME}: sends go through your local kilo CLI. Auto-approves anything not denied — set deny rules in opencode.json.`
         : `${RELAY_DISPLAY_NAME}: sends go through your local kilo CLI. Auto-approve is off, so tool runs may stall on permission prompts.`;
     }
-    // sessions
-    const cur = sessSel.value;
-    sessSel.innerHTML = '';
+    // sessions (Cursor-style pill list)
+    const cur = s.activeId;
+    sessList.innerHTML = '';
     for (const sess of s.sessions) {
-      const name = sessionDisplayTitle(sess, sess.id === s.activeId ? s.messages : []);
-      const o = el('option', { value: sess.id }, `${name} — ${sess.time?.updated ? timeAgo(sess.time.updated) : ''}`) as HTMLOptionElement;
-      sessSel.append(o);
+      const name = sessionDisplayTitle(sess, sess.id === cur ? s.messages : []);
+      // Session strip reuses the file-tab language (.tab metrics, hairline
+      // separators, active surface) — only the class name differs, so the
+      // smoke harness can still tell file tabs from session tabs.
+      const pill = el('button', { class: 'sess-tab' + (sess.id === cur ? ' active' : ''), title: name });
+      pill.append(el('span', { class: 'sess-tab-name' }, name));
+      pill.onclick = () => void selectSession(sess.id).catch((e) => hooks.toast(e.message, 'error'));
+      sessList.append(pill);
     }
-    if (s.activeId) sessSel.value = s.activeId;
-    else if (cur) sessSel.value = cur;
     // permissions
     perms.innerHTML = '';
     for (const p of s.permissions) {

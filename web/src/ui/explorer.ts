@@ -8,6 +8,7 @@ import { iconEl } from './icons';
 import { fileIconEl } from './fileIcons';
 import { showContextMenu } from './menu';
 import { confirmDialog } from './dialog';
+import { treeBadges } from '../lib/treeBadges';
 
 export interface ExplorerHooks {
   onOpenFile(path: string, opts?: { focus?: boolean }): void;
@@ -15,8 +16,12 @@ export interface ExplorerHooks {
   onPathRemoved(path: string): void;
   onOpenFolder(): void;
   onCollapseSidebar(): void;
-  /** SCM worktree status letter for a project-relative path (badge). */
-  gitStatusOf?(path: string): string | null;
+  /** SCM worktree decoration for a project-relative path: the status letter
+   *  for files, the changed-descendant count for folders (row badges). */
+  gitStatusOf?(path: string, isDir: boolean): { letter: string | null; count: number } | null;
+  /** Unsaved-edits indicator: an open editor tab holds changes for the path
+   *  (exact file, or anywhere inside a folder). */
+  isDirtyOf?(path: string, isDir: boolean): boolean;
   /** Open the Search view scoped to a folder (dir ctx menu). */
   onSearchInFolder?(path: string): void;
   toast(msg: string, kind?: 'info' | 'error'): void;
@@ -374,10 +379,19 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
     const glyph = rowIcon(e);
     if (isDir) glyph.classList.add('ft-folder');
     label.append(glyph, el('span', { class: 'tree-name' }, e.name));
-    // SCM worktree badge (VSCode gutter letters): file exact, dir rolled up.
-    if (!isDir) {
-      const st = hooks.gitStatusOf?.(e.path);
-      if (st) label.append(el('span', { class: `git-badge git-${st}`, title: `Git: ${st}` }, st));
+    // Tracking indicators (VSCode-style right gutter): git state for files,
+    // rolled-up change counts for folders, an unsaved dot for both.
+    const git = hooks.gitStatusOf?.(e.path, isDir) ?? null;
+    const badges = treeBadges({
+      isDir,
+      letter: git?.letter ?? null,
+      count: git?.count ?? 0,
+      dirty: hooks.isDirtyOf?.(e.path, isDir) ?? false,
+    });
+    if (badges.length) {
+      const box = el('span', { class: 'tree-badges' });
+      for (const b of badges) box.append(el('span', { class: b.cls, title: b.title }, b.text));
+      label.append(box);
     }
     row.append(label);
     host.append(row);

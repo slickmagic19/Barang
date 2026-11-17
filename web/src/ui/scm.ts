@@ -11,6 +11,7 @@ import { fileIconEl } from './fileIcons';
 import { showContextMenu } from './menu';
 import { confirmDialog, promptDialog } from './dialog';
 import { openDiffTab, registerStageRangesAction } from './editor';
+import { buildDecorations } from '../lib/gitDeco';
 
 export interface GitRepoInfo {
   isRepo: boolean;
@@ -46,13 +47,22 @@ const CODE_LABEL: Record<string, string> = { A: 'Added', M: 'Modified', D: 'Dele
 
 // Module state (single SCM view per window).
 let decoFiles = new Map<string, string>();
-let decoDirs = new Set<string>();
+let decoDirs = new Map<string, number>();
 
-/** Explorer badge for a tree path (file exact, dir rolled up). Null = clean. */
-export function decoration(rel: string, isDir: boolean): string | null {
-  if (!isDir) return decoFiles.get(rel) ?? null;
-  if (decoDirs.has(rel)) return '~';
-  return null;
+export interface GitDeco {
+  letter: string | null; // file status letter (null on folders)
+  count: number; // changed files underneath a folder
+}
+
+/** Explorer decoration for a tree path: the file's status letter, or the
+ *  number of changed descendants for a folder. Null = clean. */
+export function decoration(rel: string, isDir: boolean): GitDeco | null {
+  if (!isDir) {
+    const letter = decoFiles.get(rel);
+    return letter ? { letter, count: 0 } : null;
+  }
+  const count = decoDirs.get(rel) ?? 0;
+  return count > 0 ? { letter: null, count } : null;
 }
 
 const LS_TREE = 'barang:scm-tree';
@@ -218,21 +228,9 @@ export function initScm(host: HTMLElement, hooks: ScmHooks) {
   }
 
   function rebuildDeco() {
-    decoFiles = new Map();
-    decoDirs = new Set();
-    if (!info?.isRepo) return;
-    for (const f of (info.files ?? []) as FileEntry[]) {
-      const code = (f.work && f.work !== ' ' ? f.work : f.index) || '';
-      const letter = code === '?' ? 'U' : code;
-      if (!letter || letter === ' ') continue;
-      decoFiles.set(f.path, letter);
-      let dir = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '.';
-      while (true) {
-        decoDirs.add(dir);
-        if (dir === '.') break;
-        dir = dir.includes('/') ? dir.slice(0, dir.lastIndexOf('/')) : '.';
-      }
-    }
+    const deco = buildDecorations(info?.isRepo ? ((info.files ?? []) as FileEntry[]) : []);
+    decoFiles = deco.files;
+    decoDirs = deco.dirs;
   }
 
   // --- rows ---------------------------------------------------------------

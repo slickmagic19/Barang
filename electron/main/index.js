@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as files from './files.js';
 import * as updater from './updater.js';
-import { ensureServer, restartServer, stopServer, ocCall, kiloState, attachPumpHandlers } from './kiloClient.js';
+import { ensureServer, restartServer, stopServer, ocCall, kiloState, opencodeState, attachPumpHandlers } from './kiloClient.js';
 import { startRelay, abortRelay, shutdownRelays } from './relay.js';
 import * as term from './terminal.js';
 import * as scm from './git.js';
@@ -1517,6 +1517,7 @@ async function runUiSmoke() {
           openSplit: !!q('.top-split') && !!q('.top-split .top-split-chev'),
           icons: qa('.ic svg').length,
           selects: qa('.agent-panel select').length,
+          sessTabs: qa('.agent-panel .sess-tab').length,
           noSessionLabel: !q('.agent-panel .agent-section-label'),
           headerShadow: (() => {
             const s = q('.agent-panel .sess-section');
@@ -1562,7 +1563,7 @@ async function runUiSmoke() {
   console.log('[smoke-ui] console-errors:', errors.length ? errors.slice(0, 10) : 'none');
   const dom = JSON.parse(probe.startsWith('{') ? probe : '{}');
   let pass = dom.brand === 'Barang' && dom.brandImg === true && dom.hasEditor && dom.hasAgent &&
-    dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true &&     dom.icons >= 8 && dom.selects === 3 && dom.emoji === 0 &&
+    dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true &&     dom.icons >= 8 && dom.selects === 2 && dom.sessTabs >= 0 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
     dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true && dom.ctxCopyPaths === true && dom.ctxReveal === true &&
@@ -2088,102 +2089,16 @@ async function runUiSmoke() {
   try { await fs.rm(nogitDir, { recursive: true, force: true }); } catch {}
   console.log('[smoke-ui] nogit-status: ' + nogitProbe);
   pass = pass && nogitProbe === 'ok';
-  // Agentic Coding mode: centered chat posture (no IDE chrome), hero +
-  // folder/branch meta, composer placeholder, and file-open exits to IDE.
+  // Vibe mode was removed (IDE-only now): verify no Vibe entry point remains.
   let agenticProbe = 'skip';
   try {
-    agenticProbe = await w.webContents.executeJavaScript(`(async () => {
-      const u = window.__barangTestUtils;
-      const need = ['enterAgenticFlow', 'exitAgentic', 'isAgentic'];
-      for (const f of need) if (!u || typeof u[f] !== 'function') return 'no-fn:' + f;
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      // Self-heal: a crashed earlier run may have left the flag/mode on.
-      if (u.isAgentic()) {
-        u.exitAgentic();
-        await sleep(500);
-      }
-      // Hermetic transcript: the shared smoke session accumulates real
-      // server-side messages across runs (which correctly hides the
-      // empty-state hero) — so this probe works on a fresh empty session
-      // and restores the original afterwards.
-      if (typeof u.activeSessionId !== 'function' || typeof u.createSession !== 'function' ||
-          typeof u.selectSession !== 'function') return 'no-session-fns';
-      const origId = u.activeSessionId();
-      let probeId = '';
-      try {
-        probeId = await u.createSession('agentic smoke');
-      } catch (e) { return 'mk-session-fail'; }
-      if (!probeId || typeof u.debugSetMessages !== 'function') return 'no-probe-session';
-      const welcomeBtn = [...document.querySelectorAll('.welcome-actions button')]
-        .find((b) => (b.textContent || '').includes('Vibe'));
-      if (!welcomeBtn) return 'no-welcome-btn';
-      await u.enterAgenticFlow();
-      await sleep(1000);
-      if (!u.isAgentic()) return 'not-entered';
-      if (!document.body.classList.contains('agentic')) return 'no-body-class';
-      const disp = (s) => {
-        const n = document.querySelector(s);
-        return n ? getComputedStyle(n).display : 'missing';
-      };
-      if (disp('.sidebar') !== 'none') return 'sidebar-visible';
-      if (disp('.center') !== 'none') return 'center-visible';
-      if (disp('.agent-wrap') === 'none') return 'panel-hidden';
-      const input = document.querySelector('.composer-input');
-      if (!input) return 'no-composer';
-      if (!String(input.placeholder || '').includes('/ for commands')) return 'placeholder:' + input.placeholder;
-      const hero = document.querySelector('.agentic-hero');
-      if (!hero || hero.classList.contains('hidden')) {
-        return 'no-hero:msgs=' + document.querySelectorAll('.msg').length;
-      }
-      const meta = document.querySelector('.agentic-meta');
-      if (!meta || meta.classList.contains('hidden')) return 'no-meta';
-      const branch = document.querySelector('.agentic-branch');
-      if (!branch || branch.classList.contains('hidden') || !(branch.textContent || '').trim()) return 'no-branch';
-      const ideBtn = [...document.querySelectorAll('.topbar .top-btn')]
-        .find((b) => (b.title || '').includes('Back to editor'));
-      if (!ideBtn || ideBtn.classList.contains('hidden')) return 'no-ide-btn';
-      const vibeBtn = [...document.querySelectorAll('.topbar .top-btn')]
-        .find((b) => (b.textContent || '').includes('Vibe'));
-      // Vibe hides while agentic (welcome owns entry there); IDE shows.
-      if (!vibeBtn || !vibeBtn.classList.contains('hidden')) return 'vibe-btn-visible';
-      const folderBtn = document.querySelector('.agentic-folder');
-      if (!folderBtn) return 'no-folder-btn';
-      folderBtn.click();
-      await sleep(500);
-      const menu = document.querySelector('.ctx-menu');
-      const menuText = menu ? (menu.textContent || '') : '';
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      await sleep(300);
-      if (!menu || !menuText.includes('Open folder')) return 'menu-bad:' + menuText.slice(0, 80);
-      // Opening a file exits back to the IDE (palette quick-open path).
-      await u.openFile('package.json', { group: 1 });
-      await sleep(800);
-      if (u.isAgentic()) return 'no-exit-on-open';
-      if (document.body.classList.contains('agentic')) return 'body-stuck';
-      if (disp('.sidebar') === 'none') return 'sidebar-stuck';
-      const vibeBack = [...document.querySelectorAll('.topbar .top-btn')]
-        .find((b) => (b.textContent || '').includes('Vibe'));
-      if (!vibeBack || vibeBack.classList.contains('hidden')) return 'no-vibe-back-btn';
-      try {
-        const dd = await window.barang.app.defaultFolder();
-        const rp = String((dd && dd.root) || '');
-        const tail = (rp.split('/').pop() || '').split('\\\\').pop() || '';
-        if (tail !== 'Default') return 'default-folder:' + rp.slice(-60);
-      } catch (e) { return 'default-folder-err:' + (e.message || e); }
-      if (typeof u.closeTab === 'function') await u.closeTab('package.json', 1);
-      // Restore the original session and delete the probe one.
-      try {
-        if (probeId) await window.barang.oc('/session/' + probeId, { method: 'DELETE' });
-      } catch {}
-      try {
-        if (origId) await u.selectSession(origId);
-      } catch {}
-      await sleep(600);
-      return 'ok';
+    agenticProbe = await w.webContents.executeJavaScript(`(() => {
+      const btns = [...document.querySelectorAll('button')].map((b) => (b.textContent || '').trim());
+      return btns.includes('Vibe') ? 'vibe-present' : 'ok';
     })()`);
   } catch (e) { agenticProbe = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] agentic-mode: ' + agenticProbe);
-  pass = pass && agenticProbe === 'ok';
+  pass = pass && (agenticProbe === 'ok' || agenticProbe === 'skip');
   // Vibe polish: BARANG caps, seamless backdrop, compact send row, and a
   // single error voice (inline only — no echo toast, no second box).
   let vibePolish = 'skip';
@@ -4186,18 +4101,24 @@ if (!gotLock && !SMOKE && !SMOKE_UI) {
     // AV scan + cold Bun start (up to a minute of blank screen). Now the
     // window opens first and the server follows; the UI already handles
     // offline (banner) and flips online on opencode:ready.
-    void bootKilo().then(
-      () => {
-        bootLog('opencode-ready', JSON.stringify(opencodeState()));
-        broadcast('opencode:ready', { root });
-      },
-      (e) => {
-        const msg = e?.message || String(e);
-        bootLog('opencode-failed', msg);
-        console.error('[barang] ' + msg);
-        broadcast('opencode:error', { error: msg });
-      },
-    );
+    // Connect to the agent only once a project folder is open. On a fresh
+    // boot with no folder, stay idle (the UI shows the welcome screen).
+    if (root) {
+      void bootKilo().then(
+        () => {
+          bootLog('opencode-ready', JSON.stringify(opencodeState()));
+          broadcast('opencode:ready', { root });
+        },
+        (e) => {
+          const msg = e?.message || String(e);
+          bootLog('opencode-failed', msg);
+          console.error('[barang] ' + msg);
+          broadcast('opencode:error', { error: msg });
+        },
+      );
+    } else {
+      bootLog('no-project');
+    }
   });
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();

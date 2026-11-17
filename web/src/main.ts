@@ -17,6 +17,7 @@ import {
   setProviderEntry, removeProviderEntry, listProviderEntries,
 } from './lib/providers';
 import { sliceWindow, truncateText, parseUnifiedPatch, applyHunkSubset, tabPageRange } from './lib/util';
+import { hasDirtyUnder } from './lib/treeBadges';
 import { watchAgentNotifications, playNotificationSound, resolveKindSound, KIND_DEFAULT_SOUND, debugAudioState, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
@@ -163,14 +164,11 @@ async function boot() {
   const btnIDE = el('button', { class: 'top-btn hidden', title: 'Back to editor (IDE)' }) as HTMLButtonElement;
   btnIDE.append(iconEl('file', 14), el('span', {}, 'IDE'));
   btnIDE.onclick = () => exitAgentic();
-  const btnVibe = el('button', { class: 'top-btn hidden', title: 'Vibe with the agent — no editor' }) as HTMLButtonElement;
-  btnVibe.append(iconEl('spark', 14), el('span', {}, 'Vibe'));
-  btnVibe.onclick = () => void enterAgenticFlow();
   const btnSettings = el('button', { class: 'top-btn settings-btn', title: 'Settings' }) as HTMLButtonElement;
   btnSettings.append(iconEl('gear', 15));
   const btnUpdate = el('button', { class: 'top-btn update-btn hidden', title: 'Check for updates' }) as HTMLButtonElement;
   btnUpdate.append(iconEl('download', 14));
-  topActions.append(openSplit, btnPalette, btnAgent, btnVibe, btnIDE, btnSettings, btnUpdate);
+  topActions.append(openSplit, btnPalette, btnAgent, btnIDE, btnSettings, btnUpdate);
 
   // Self-updater: the button exists only while a newer release is known.
   // Click downloads the portable and restarts into it (dev builds open the
@@ -494,11 +492,7 @@ async function boot() {
   const btnWelcomeOpen = el('button', { class: 'btn btn-primary' }, 'Open folder') as HTMLButtonElement;
   btnWelcomeOpen.prepend(iconEl('folder', 14));
   btnWelcomeOpen.onclick = openFolderFlow;
-  const btnWelcomeAgentic = el('button', { class: 'btn', title: 'Vibe with the agent, opencode-style — no editor' }) as HTMLButtonElement;
-  btnWelcomeAgentic.prepend(iconEl('spark', 14));
-  btnWelcomeAgentic.append('Vibe');
-  btnWelcomeAgentic.onclick = () => void enterAgenticFlow();
-  welcomeActions.append(btnWelcomeOpen, btnWelcomeAgentic);
+  welcomeActions.append(btnWelcomeOpen);
   const welcomeRecent = el('div', { class: 'welcome-recent hidden' });
   welcome.querySelector('.welcome-inner')?.append(welcomeActions, welcomeRecent);
 
@@ -574,13 +568,12 @@ async function boot() {
   } catch (e) {
     toast(`Desktop backend unreachable: ${(e as Error).message}`, 'error');
   }
-  if (!opencodeOk) {
-    // The CLI ships inside Barang (vendor/kilo) — this banner means the
-    // bundled server failed to start (slow first boot, AV lock), not that
-    // anything needs installing. It hides itself on kilo:ready.
+  if (!opencodeOk && root) {
+    // A project is open but the agent hasn't connected yet — show a neutral
+    // "connecting" banner (not an error) that hides on kilo:ready.
     ocBanner.append(
       iconEl('alert', 14),
-      el('span', {}, 'Agent offline — the bundled Kilo Code failed to start. Editing still works.'),
+      el('span', {}, 'Connecting to the agent (Kilo Code)…'),
     );
     const btnRetryOc = el('button', { class: 'btn btn-sm' }, 'Retry') as HTMLButtonElement;
     btnRetryOc.onclick = () => {
@@ -652,8 +645,9 @@ async function boot() {
         ? (boltApi?.tabName(t.path.slice(5)) ?? 'Request')
         : (t.title ?? file.split('/').pop() ?? file);
       const isDiff = !!t.diff;
+      const isDirty = !!t.dirty;
       const b = el('button', {
-        class: `tab${t.path === (group === 2 ? editorStore.get().active2 : editorStore.get().active) ? ' active' : ''}${isDiff ? ' is-diff' : ''}`,
+        class: `tab${t.path === (group === 2 ? editorStore.get().active2 : editorStore.get().active) ? ' active' : ''}${isDiff ? ' is-diff' : ''}${isDirty ? ' is-dirty' : ''}`,
         title: isBolt ? `Bolt request — ${name}` : isDiff ? `${file} — session changes (read-only review)` : t.path,
         'data-path': t.path,
       }) as HTMLButtonElement;
@@ -782,7 +776,12 @@ async function boot() {
       })();
     },
     toast,
-    gitStatusOf: (p: string) => decoration(p, false),
+    gitStatusOf: (p: string, isDir: boolean) => decoration(p, isDir),
+    isDirtyOf: (p: string, isDir: boolean) => hasDirtyUnder(
+      editorStore.get().tabs.filter((t) => t.dirty && t.file).map((t) => t.file!),
+      p,
+      isDir,
+    ),
     onSearchInFolder: (p: string) => {
       setSideView('search');
       searchApi?.setScope(p === '.' ? '' : p);
@@ -864,6 +863,20 @@ async function boot() {
     const v = localStorage.getItem('barang:side-view');
     if (v === 'scm' || v === 'api' || v === 'search' || v === 'pomo') setSideView(v as SideView);
   } catch { /* fresh default */ }
+
+  // Unsaved dots in the tree: repaint only when the dirty SET changes — the
+  // editor store fires on every keystroke and a tree repaint must not.
+  let dirtyKey = '';
+  editorStore.subscribe(() => {
+    const key = editorStore.get().tabs
+      .filter((t) => t.dirty && t.file)
+      .map((t) => t.file)
+      .sort()
+      .join('|');
+    if (key === dirtyKey) return;
+    dirtyKey = key;
+    void explorer.repaint();
+  });
 
   // Sidebar Search view (project find + replace).
   searchApi = initSearchView(searchHost, {
@@ -983,10 +996,8 @@ async function boot() {
     if (agentic) exitAgentic();
   }
 
-  /** Topbar IDE/Vibe toggle visibility (Vibe needs an open folder). */
+  /** Topbar IDE toggle visibility. */
   function paintModeButtons() {
-    const hasRoot = !!agentStore.get().root;
-    btnVibe.classList.toggle('hidden', agentic || !hasRoot);
     btnIDE.classList.toggle('hidden', !agentic);
   }
 

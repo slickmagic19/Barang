@@ -144,7 +144,7 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
     if (info.opencodeOk) {
       ocEl.append(dot('ok'), el('span', {}, `kilo ${info.opencodeVersion ?? ''}`.trim()));
     } else {
-      ocEl.append(dot('bad'), el('span', {}, 'kilo offline'));
+      ocEl.append(dot('bad'), el('span', {}, 'kilo idle'));
     }
     ocEl.classList.toggle('is-busy', a.busy);
 

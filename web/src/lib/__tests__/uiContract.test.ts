@@ -244,6 +244,34 @@ describe('explorer tracking indicators', () => {
   it('keeps rows compact', () => {
     expect(decl('.tree-label', 'height')).toContain('24px');
   });
+
+  it('marks the open file with a flat brand row (no pill)', () => {
+    expect(decl('.tree-label.active', 'background')).toEqual(['#8b7bff24']);
+    expect(decl('.tree-label.active', 'border-radius')).toEqual(['0']);
+    expect(decl('.tree-label.active', 'box-shadow')).toEqual(['inset 2px 0 0 var(--brand)']);
+  });
+
+  it('never draws two marks on a row (no lingering focus ring)', () => {
+    // The old row's outline was what read as a lagging second selector.
+    expect(decl('.tree-label:focus-visible', 'outline')).toEqual(['none']);
+    // Focus styling yields to the active row and stays in the brand family.
+    expect(decl('.tree-label.focused:not(.active)', 'box-shadow')).toEqual(['inset 2px 0 0 var(--brand-line)']);
+  });
+});
+
+describe('breadcrumbs', () => {
+  it('sits under the tab strip on the editor surface', () => {
+    expect(decl('.crumbs', 'height')).toEqual(['26px']);
+    expect(decl('.crumbs', 'background')).toEqual(['var(--tab-surface)']);
+    expect(decl('.crumbs', 'border-bottom')).toEqual(['1px solid var(--border)']);
+    expect(decl('.crumbs.hidden', 'display')).toEqual(['none']);
+  });
+
+  it('separates segments with chevrons and lifts the file name', () => {
+    expect(decl('.crumb', 'border-radius')).toEqual(['4px']);
+    expect(decl('.crumb.is-file', 'color')).toEqual(['var(--text)']);
+    expect(decl('.crumb-sep', 'color')).toEqual(['var(--text-faint)']);
+  });
 });
 
 describe('quick diff (VS Code quickDiffDecorator + QuickDiffWidget)', () => {

@@ -18,6 +18,7 @@ import {
 } from './lib/providers';
 import { sliceWindow, truncateText, parseUnifiedPatch, applyHunkSubset, tabPageRange } from './lib/util';
 import { hasDirtyUnder } from './lib/treeBadges';
+import { crumbSegments, crumbsOverflow } from './lib/crumbs';
 import { watchAgentNotifications, playNotificationSound, resolveKindSound, KIND_DEFAULT_SOUND, debugAudioState, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
@@ -384,9 +385,11 @@ async function boot() {
   // Editor groups (VSCode split): each column owns a tab strip + pane.
   // Bolt/welcome stay center-wide overlays above the columns.
   const col1 = el('div', { class: 'editor-col' });
-  col1.append(tabs, editorHost);
+  const crumbs1 = el('div', { class: 'crumbs hidden' });
+  col1.append(tabs, crumbs1, editorHost);
   const splitCol = el('div', { class: 'editor-col split-col hidden' });
-  splitCol.append(tabs2, editorHost2);
+  const crumbs2 = el('div', { class: 'crumbs hidden' });
+  splitCol.append(tabs2, crumbs2, editorHost2);
   const editorCols = el('div', { class: 'editor-cols' });
   editorCols.append(col1, splitCol);
   center.append(editorCols, boltHost, welcome);
@@ -626,9 +629,29 @@ async function boot() {
   // Bolt API client (declared early: paintTabs routes bolt tabs through it).
   let boltApi: BoltApi | null = null;
 
+  // The explorer follows the editor: the open file's row is highlighted and
+  // scrolled into view (no flash — that's for explicit Reveal in Explorer).
+  let treeSelection = '';
+  const selectTreeFile = (file: string, reveal = true) => {
+    if (!file || isAbsolutePath(file) || file === treeSelection) return;
+    treeSelection = file;
+    void selectInTree(file, { reveal });
+  };
+  const syncTreeSelection = () => {
+    const s = editorStore.get();
+    const activePath = s.split && s.focus === 2 ? s.active2 : s.active;
+    const tab = s.tabs.find((x) => x.path === activePath);
+    const file = tab && !tab.untitled && !tab.path.startsWith('bolt:') ? (tab.file ?? '') : '';
+    selectTreeFile(file);
+  };
+
   const activateTab = (path: string, group: 1 | 2) => {
     const t = editorStore.get().tabs.find((x) => x.path === path && (x.group || 1) === group);
     if (!t) return;
+    // Move the tree mark NOW: opening a file is async (disk read) and the
+    // selector must never lag behind the tab the user just clicked. Only the
+    // mark moves here — revealing a collapsed path waits for the store pass.
+    if (t.file && !t.untitled && !t.path.startsWith('bolt:')) selectTreeFile(t.file, false);
     if (t.path.startsWith('bolt:')) boltApi?.activate(t.path.slice(5));
     else if (t.diff) showDiffTab(t.path, group);
     else if (t.preview && t.file) showPreviewTab(t.path, group);
@@ -636,17 +659,42 @@ async function boot() {
     else void openFile(t.path, { group });
   };
 
-  // The explorer follows the editor: the open file's row is highlighted and
-  // scrolled into view (no flash — that's for explicit Reveal in Explorer).
-  let treeSelection = '';
-  const syncTreeSelection = () => {
+  // Breadcrumbs (Qoder/VSCode): the open file's path, one clickable seg per
+  // folder, the file itself with its type icon, and an overflow mark.
+  const paintCrumbs = (host: HTMLElement, group: 1 | 2) => {
     const s = editorStore.get();
-    const activePath = s.split && s.focus === 2 ? s.active2 : s.active;
-    const tab = s.tabs.find((x) => x.path === activePath);
-    const file = tab && !tab.untitled && !tab.path.startsWith('bolt:') ? (tab.file ?? '') : '';
-    if (!file || isAbsolutePath(file) || file === treeSelection) return;
-    treeSelection = file;
-    void selectInTree(file);
+    const path = group === 2 ? s.active2 : s.active;
+    const tab = s.tabs.find((t) => t.path === path && (t.group || 1) === group);
+    const file = tab?.file ?? '';
+    const usable = !!tab && !!file && !tab.untitled && !tab.path.startsWith('bolt:') && !isAbsolutePath(file);
+    if (!usable) {
+      host.replaceChildren();
+      host.classList.add('hidden');
+      return;
+    }
+    host.classList.remove('hidden');
+    const segs = crumbSegments(file);
+    const nodes: HTMLElement[] = [];
+    segs.forEach((seg, i) => {
+      if (i) nodes.push(el('span', { class: 'crumb-sep', 'aria-hidden': 'true' }, '\u203a'));
+      if (seg.kind === 'file') {
+        const b = el('button', { class: 'crumb is-file', title: seg.path });
+        b.append(fileIconEl(seg.name, 12), el('span', { class: 'crumb-name' }, seg.name));
+        b.onclick = () => void revealInTree(seg.path);
+        nodes.push(b);
+      } else {
+        const b = el('button', { class: 'crumb', title: seg.path }, seg.name);
+        b.onclick = () => void revealInTree(seg.path);
+        nodes.push(b);
+      }
+    });
+    if (crumbsOverflow(segs)) {
+      nodes.push(el('span', { class: 'crumb-sep', 'aria-hidden': 'true' }, '\u203a'));
+      const more = el('button', { class: 'crumb crumb-more', title: 'Reveal in Explorer' }, '\u2026');
+      more.onclick = () => void revealInTree(file);
+      nodes.push(more);
+    }
+    host.replaceChildren(...nodes);
   };
 
   const paintStrip = (host: HTMLElement, group: 1 | 2, isFocused: boolean) => {
@@ -748,12 +796,15 @@ async function boot() {
     // Strips ALWAYS repaint — even behind the bolt overlay or a closed
     // split. Skipping leaves stale tab buttons that outlive their tabs.
     paintStrip(tabs, 1, !split || focus === 1);
+    paintCrumbs(crumbs1, 1);
     if (split) {
       splitCol.classList.remove('hidden');
       paintStrip(tabs2, 2, focus === 2);
+      paintCrumbs(crumbs2, 2);
     } else {
       splitCol.classList.add('hidden');
       paintStrip(tabs2, 2, false); // clear: no stale buttons in the closed group
+      paintCrumbs(crumbs2, 2); // hides itself: that group shows nothing
     }
     // Split toggle lives at the end of the primary strip.
     const spacer = el('span', { class: 'tabs-spacer' });

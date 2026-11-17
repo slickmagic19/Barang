@@ -9,6 +9,7 @@ import { fileIconEl } from './fileIcons';
 import { showContextMenu } from './menu';
 import { confirmDialog } from './dialog';
 import { treeBadges } from '../lib/treeBadges';
+import { pruneFocus, isSelectedRow } from '../lib/treeFocus';
 
 export interface ExplorerHooks {
   onOpenFile(path: string, opts?: { focus?: boolean }): void;
@@ -92,13 +93,19 @@ function findLabel(host: HTMLElement, path: string): HTMLElement | null {
 /** Expand ancestors, scroll the row into view and mark it selected — used
  *  when a tab is activated so the explorer follows the editor (no flash).
  *  Repaints ONLY when the row isn't on screen yet (keeps opens cheap and
- *  stops the tree rebuilding under an in-flight click). */
-export async function selectInTree(path: string) {
+ *  stops the tree rebuilding under an in-flight click); `reveal: false`
+ *  skips that repaint entirely (instant mark for already-visible rows). */
+export async function selectInTree(path: string, opts?: { reveal?: boolean }) {
   if (!treeCtx || !path) return;
   selectedPath = path;
+  // The open file is also the toolbar's create target; anything else that was
+  // focused (e.g. the row the user clicked before) must stop drawing a mark,
+  // otherwise two rows read as "selected" at once.
+  focusedEntry = pruneFocus(focusedEntry, path);
   const body = treeCtx.body;
   let label = findLabel(body, path);
   if (!label) {
+    if (opts?.reveal === false) return; // not rendered yet: the next paint wins
     const parts = path.split('/');
     let acc = '';
     for (const part of parts.slice(0, -1)) {
@@ -110,6 +117,7 @@ export async function selectInTree(path: string) {
   }
   if (!label) return;
   body.querySelectorAll('.tree-label.active').forEach((n) => n.classList.remove('active'));
+  body.querySelectorAll('.tree-label.focused').forEach((n) => n.classList.remove('focused'));
   label.classList.add('active');
   label.scrollIntoView({ block: 'nearest' });
 }
@@ -404,7 +412,7 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
     const isDir = e.type === 'dir';
     const open = isDir && expanded.has(e.path);
     const label = el('button', {
-      class: `tree-label${open ? ' open' : ''}${selectedPath === e.path ? ' active' : ''}${focusedEntry && focusedEntry.path === e.path ? ' focused' : ''}`,
+      class: `tree-label${open ? ' open' : ''}${isSelectedRow(selectedPath, e.path) ? ' active' : ''}${focusedEntry && focusedEntry.path === e.path ? ' focused' : ''}`,
       title: e.path,
       style: `padding-left:${6 + depth * 12}px`,
     }) as HTMLButtonElement;
@@ -442,8 +450,12 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
       // would nest the whole tree inside itself on every click.
       label.onclick = () => {
         focusedEntry = { path: e.path, type: 'dir' };
+        // Clicking a folder selects it too: the active selector has to land on
+        // whatever row the user picked, file or folder (VS Code parity).
+        selectedPath = e.path;
         if (expanded.has(e.path)) expanded.delete(e.path);
         else expanded.add(e.path);
+        // The repaint renders `.active` from selectedPath for every row.
         if (treeCtx) void paint(treeCtx.body, treeCtx.hooks);
       };
       if (open) {
@@ -460,6 +472,8 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
         // staging container after an atomic swap.
         const live = treeCtx?.body ?? host;
         live.querySelectorAll('.tree-label.active').forEach((n) => n.classList.remove('active'));
+        // Only one row may look selected — drop the previous focus mark.
+        live.querySelectorAll('.tree-label.focused').forEach((n) => n.classList.remove('focused'));
         label.classList.add('active');
         // VSCode parity: single click selects + opens WITHOUT stealing
         // focus, so Delete and other tree keys keep working. Double-click

@@ -234,8 +234,18 @@ button { font-family: inherit; }
   white-space: nowrap; overflow: hidden; border-radius: var(--radius-sm); border-left: none;
 }
 .tree-label:hover { background: #ffffff08; color: var(--text); }
-.tree-label.active { background: var(--accent-dim); color: var(--text); }
-.tree-label.focused:not(.active) { background: #ffffff06; box-shadow: inset 2px 0 0 var(--text-faint); }
+/* Keyboard focus has no ring of its own: the selection/focus marks already
+   say where you are, and a lingering outline reads as a second selector. */
+.tree-label:focus-visible { outline: none; }
+/* The open file's row: brand tint, edge to edge (no radius, no pill). */
+.tree-label.active {
+  background: #8b7bff24; color: var(--text); border-radius: 0;
+  box-shadow: inset 2px 0 0 var(--brand);
+}
+.tree-label.active .tree-name { font-weight: 500; }
+/* A focused-but-not-selected row (create target) keeps the brand family, so
+   it never reads as a foreign grey second selector. */
+.tree-label.focused:not(.active) { background: #8b7bff12; box-shadow: inset 2px 0 0 var(--brand-line); }
 .tree-label .ic { margin-left: 2px; }
 .tree-label .tw { color: var(--text-faint); display: inline-flex; width: 14px; }
 .tree-label .tw svg { transition: transform .13s; }
@@ -1804,7 +1814,7 @@ body { font-size: 13px; line-height: 1.55; letter-spacing: .05px; text-rendering
    on top of the tree (density without crowding). */
 .side-viewbar { padding: 6px 8px 4px; gap: 2px; }
 .side-header { height: 34px; padding: 0 8px 0 14px; }
-.tree-label.active { background: #ffffff0f; }
+/* .tree-label.active styling lives with the explorer rules above. */
 .editor-host { background: #09090c; }
 .btn, .settings-btn, .top-btn { border-radius: var(--radius-sm); }
 .modal, .settings-modal, .palette, .popover, .ctx-menu, .menu-pop {
@@ -1813,6 +1823,25 @@ body { font-size: 13px; line-height: 1.55; letter-spacing: .05px; text-rendering
 :focus-visible { outline: 1px solid var(--accent-line); outline-offset: 1px; }
 a { color: var(--brand-strong); }
 .statusbar { background: #0b0b0e; border-top: 1px solid var(--border); font-size: 12px; }
+
+/* Breadcrumbs under the tab strip: web › src › ui › chat.ts › … */
+.crumbs {
+  display: flex; align-items: center; gap: 1px; flex: 0 0 auto;
+  height: 26px; padding: 0 8px 0 12px;
+  background: var(--tab-surface); border-bottom: 1px solid var(--border);
+  font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden;
+}
+.crumbs.hidden { display: none; }
+.crumb {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  background: none; border: 0; padding: 1px 4px; border-radius: 4px;
+  color: var(--text-dim); font-size: 12px; cursor: pointer; line-height: 1.4;
+}
+.crumb:hover { color: var(--text); background: #ffffff0d; }
+.crumb.is-file { color: var(--text); }
+.crumb-more { color: var(--text-faint); padding: 1px 6px; }
+.crumb-more:hover { color: var(--text); }
+.crumb-sep { color: var(--text-faint); font-size: 11px; opacity: .7; flex: 0 0 auto; }
 
 /* Tab tracking marker (git letter, same palette as the explorer badges).
    Clickable: it opens the file's changes view. */

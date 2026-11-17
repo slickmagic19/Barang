@@ -16,7 +16,13 @@ import {
 import { fsApi } from '../lib/api';
 import { barang } from '../lib/transport';
 import { el, md, timeAgo, debounce, roundTripChange, parseUnifiedPatch, applyHunkSubset, sliceWindow, truncateText, copyText } from '../lib/util';
-import { iconEl } from './icons';
+import {
+  groupParts, messagePlainText, shouldAnimate, isStepMarker, toolLabel, stepDetail,
+  activityLabel, groupBucket, fileOpInfo, fileOpsFor, fileOpsTotals, planTurnFiles,
+  planTurnActions, FILE_BATCH_MIN, WORKED_ON_MIN, bucketOf,
+  type ChatPart, type FileOpInfo, type StepBucket, type TurnActionPlan,
+} from '../lib/chatLayout';
+import { iconEl, type IconName } from './icons';
 import { RELAY_DISPLAY_NAME } from '../lib/relay';
 import { confirmDialog } from './dialog';
 import { revealInEditor, openDiffTab, isAbsolutePath, writeTabContent, removeTabFile } from './editor';
@@ -28,6 +34,11 @@ export interface ChatHooks {
 }
 
 const SKIP_KEYS = new Set(['type', 'tool', 'name', 'state', 'status']);
+// Server bookkeeping the user never needs in an expanded step.
+const INTERNAL_KEYS = new Set([
+  'callID', 'id', 'sessionID', 'messageID', 'partID', 'providerID', 'modelID',
+  'time', 'tokens', 'cost', 'metadata',
+]);
 
 function humanize(raw: string): string {
   return raw.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'step';
@@ -109,16 +120,82 @@ function kvBlock(host: HTMLElement, obj: Record<string, unknown>, skip: Set<stri
   if (n > 0) host.append(dl);
 }
 
-function summaryRow(title: string, state: string): HTMLElement {
-  const s = el('summary', {});
+/** One step/tool summary line: chevron, state glyph, label. A step that is
+ *  still running gets `is-running`, which drives the spinner ring + shimmer. */
+function summaryRow(title: string, state: string, icon?: IconName): HTMLElement {
+  const cls = statusClass(state);
+  const s = el('summary', { class: cls === 'is-run' ? 'is-running' : '' });
   const tw = el('span', { class: 'tw' });
-  tw.append(iconEl('chevR', 12));
-  const dot = el('span', { class: `tool-dot ${statusClass(state)}`.trim() });
-  s.append(tw, dot, el('span', { class: 'tool-name' }, title));
+  tw.append(iconEl('chevR', 11));
+  if (icon) {
+    const glyph = el('span', { class: 'step-ic' });
+    glyph.append(iconEl(icon, 13));
+    s.append(tw, glyph, el('span', { class: 'tool-name' }, title));
+  } else {
+    const dot = el('span', { class: `tool-dot ${cls}`.trim() });
+    s.append(tw, dot, el('span', { class: 'tool-name' }, title));
+  }
   return s;
 }
 
-function renderPart(part: Record<string, unknown>, host: HTMLElement) {
+/** Remember which expanders the reader opened, so a stream repaint (which
+ *  rebuilds the transcript) does not yank them shut. */
+function applyOpenState(det: HTMLDetailsElement, sum: HTMLElement, openKeys?: Set<string>) {
+  const key = (sum.textContent || '').trim();
+  if (!key) return;
+  det.dataset.openKey = key;
+  if (openKeys && openKeys.has(key)) {
+    det.open = true;
+    det.classList.add('is-restored'); // restored, not user-opened: no animation
+  }
+}
+
+/** Collect the open expanders before a rebuild clears the list. */
+function collectOpenKeys(list: HTMLElement): Set<string> {
+  const out = new Set<string>();
+  list.querySelectorAll('details[data-open-key][open]').forEach((d) => {
+    const k = (d as HTMLElement).dataset.openKey;
+    if (k) out.add(k);
+  });
+  return out;
+}
+
+/** Mark a freshly rendered row. The transcript is rebuilt on every stream
+ *  frame, so only rows the previous paint did NOT show animate in. */
+function markNewRow(row: HTMLElement, title: string) {
+  const key = title.slice(0, 120);
+  if (!suppressAnim && !seenSteps.has(key)) row.classList.add('is-new');
+  seenSteps.add(key);
+}
+
+/** Qoder-style code chrome: a language label + copy button on every fence.
+ *  Self-contained (no hooks): the button reports success on itself. */
+function decorateCodeBlocks(host: HTMLElement) {
+  host.querySelectorAll('pre.md-code').forEach((node) => {
+    const box = node as HTMLElement;
+    if (box.querySelector('.md-copy')) return; // already decorated
+    const code = box.querySelector('code');
+    const lang = (code?.getAttribute('data-lang') || 'text').trim() || 'text';
+    const btn = el('button', { class: 'md-copy', title: 'Copy code', type: 'button' }) as HTMLButtonElement;
+    btn.append(el('span', { class: 'md-copy-lang' }, lang), iconEl('copy', 12));
+    btn.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      void copyText(code?.textContent ?? '').then((ok) => {
+        btn.classList.toggle('is-done', ok);
+        btn.title = ok ? 'Copied' : 'Copy failed';
+        setTimeout(() => {
+          btn.classList.remove('is-done');
+          btn.title = 'Copy code';
+        }, 1200);
+      });
+    };
+    box.classList.add('has-copy');
+    box.append(btn);
+  });
+}
+
+function renderPart(part: Record<string, unknown>, host: HTMLElement, openKeys?: Set<string>) {
   const type = typeof part.type === 'string' ? part.type : '';
   const lower = type.toLowerCase();
 
@@ -140,6 +217,7 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
       }
     });
     host.append(div);
+    decorateCodeBlocks(div);
     if (truncated) {
       const det = el('details', { class: 'tool-row msg-more' }) as HTMLDetailsElement;
       const sum = el('summary', {}, `Show full message (${(part.text.length / 1024).toFixed(0)} KB)`);
@@ -159,12 +237,15 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
   }
 
   if (lower.includes('reason') || lower.includes('think')) {
-    const det = el('details', { class: 'tool-row' });
-    det.append(summaryRow('Reasoning', 'running'));
+    const det = el('details', { class: 'tool-row step-row' });
+    const sum = summaryRow('Reasoning', '', 'spark');
+    det.append(sum);
     const body = el('div', { class: 'tool-body' });
     const prose = collectProse(part);
     body.append(el('pre', { class: 'tool-pre' }, (prose || summarizePart(part)).slice(0, 3000)));
     det.append(body);
+    applyOpenState(det, sum, openKeys);
+    markNewRow(det, 'Reasoning');
     host.append(det);
     return;
   }
@@ -187,18 +268,26 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
   }
 
   // Tool calls, step markers, file edits, unknown schemas: structured card.
-  const state = String(part.state ?? part.status ?? '');
-  const titleRaw = String(part.title ?? part.tool ?? part.name ?? humanize(type));
-  const input = part.input ?? part.args ?? part.arguments;
-  const title = typeof input === 'object' && input !== null && !Array.isArray(input)
-    ? `${titleRaw} · ${(JSON.stringify(input) as string).slice(0, 80)}`
-    : titleRaw;
-  const det = el('details', { class: 'tool-row' });
-  det.append(summaryRow(title, state));
+  // The server nests most of the payload under `state` (status/input/output/
+  // title/metadata), so read both shapes.
+  const stateObj = part.state && typeof part.state === 'object' && !Array.isArray(part.state)
+    ? part.state as Record<string, unknown>
+    : {};
+  const state = typeof part.state === 'string' ? part.state : String(stateObj.status ?? part.status ?? '');
+  const titleRaw = String(part.title ?? stateObj.title ?? part.tool ?? part.name ?? humanize(type));
+  const input = part.input ?? part.args ?? part.arguments ?? stateObj.input;
+  // Qoder-style row title: a verb phrase plus the file/command it touched,
+  // never a raw JSON blob.
+  const label = toolLabel(String(part.tool ?? part.name ?? '')) ?? humanize(titleRaw);
+  const detail = stepDetail(input) || (typeof stateObj.title === 'string' ? stateObj.title : '');
+  const title = part.title ? String(part.title) : detail ? `${label} · ${detail}` : label;
+  const det = el('details', { class: 'tool-row step-row' });
+  const sum = summaryRow(title, state, STEP_ICONS[bucketOf(part as ChatPart)]);
+  det.append(sum);
 
   const body = el('div', { class: 'tool-body' });
   // 1) free-text fields as readable prose
-  const prose = asText(part.text ?? part.content ?? part.message ?? part.description);
+  const prose = asText(part.text ?? part.content ?? part.message ?? part.description ?? stateObj.text);
   if (prose) body.append(el('pre', { class: 'tool-pre' }, prose.slice(0, 3000)));
   // 2) scalar input fields as key/value rows
   if (typeof input === 'object' && input !== null && !Array.isArray(input)) {
@@ -206,14 +295,15 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
   } else if (asText(input)) {
     body.append(el('pre', { class: 'tool-pre' }, (asText(input) as string).slice(0, 1200)));
   }
-  // 3) output / result / error payloads
-  const output = part.output ?? part.result ?? part.error;
+  // 3) output / result / error payloads (what the tool actually produced)
+  const output = part.output ?? part.result ?? part.error
+    ?? stateObj.output ?? stateObj.result ?? stateObj.error;
   if (output !== undefined) {
     const t = typeof output === 'string' ? output : JSON.stringify(output, null, 2);
-    body.append(el('pre', { class: 'tool-pre' }, t.slice(0, 3000)));
+    if (t && t.trim()) body.append(el('pre', { class: 'tool-pre' }, t.slice(0, 3000)));
   }
   // 4) remaining scalar fields (never show a totally empty card)
-  kvBlock(body, part, new Set([...SKIP_KEYS, 'text', 'content', 'message', 'description', 'reasoning', 'input', 'args', 'arguments', 'output', 'result', 'error', 'title']), 6);
+  kvBlock(body, part, new Set([...SKIP_KEYS, ...INTERNAL_KEYS, 'state', 'text', 'content', 'message', 'description', 'reasoning', 'input', 'args', 'arguments', 'output', 'result', 'error', 'title']), 6);
   if (!body.children.length) {
     body.append(el('pre', { class: 'tool-pre' }, summarizePart(part).slice(0, 2000)));
   }
@@ -222,6 +312,8 @@ function renderPart(part: Record<string, unknown>, host: HTMLElement) {
     pathLinks(body, JSON.stringify(part).slice(0, 4000));
   } catch { /* noop */ }
   det.append(body);
+  applyOpenState(det, sum, openKeys);
+  markNewRow(det, title);
   host.append(det);
 }
 
@@ -236,7 +328,136 @@ function isActivityPart(p: { type?: unknown }): boolean {
   if (t.includes('reason') || t.includes('think')) return false; // own toggle
   if (t.includes('permission')) return false; // approval history stays
   if (t === 'file') return false; // attachments render inline (own branch)
-  return true; // step-start/finish, tool calls, edits…
+  return true; // tool calls, edits, step markers…
+}
+
+/** Row glyph per activity bucket (Qoder activity rows lead with an icon). */
+const STEP_ICONS: Record<StepBucket, IconName> = {
+  file: 'file', terminal: 'prompt', search: 'search', edit: 'pencil', other: 'compass',
+};
+const STATE_TEXT: Record<string, string> = { applied: 'Applied', running: 'Running', failed: 'Failed' };
+
+/** One folded activity row ("Explored 3 files, 5 terminals") that expands into
+ *  the individual tool rows — Qoder's transcript centerpiece. */
+function activityBlock(parts: ChatPart[], openKeys?: Set<string>): HTMLElement {
+  const bucket = groupBucket(parts);
+  const label = activityLabel(parts);
+  const det = el('details', { class: 'tool-row step-block' }) as HTMLDetailsElement;
+  const sum = el('summary', {});
+  const tw = el('span', { class: 'step-chev' });
+  tw.append(iconEl('chevR', 11));
+  const glyph = el('span', { class: `step-ic is-${bucket}` });
+  glyph.append(iconEl(STEP_ICONS[bucket], 13));
+  sum.append(tw, glyph, el('span', { class: 'step-label' }, label));
+  det.append(sum);
+  const body = el('div', { class: 'tool-body step-body' });
+  for (const p of parts) renderPart(p as Record<string, unknown>, body, openKeys);
+  det.append(body);
+  applyOpenState(det, sum, openKeys);
+  markNewRow(det, label);
+  return det;
+}
+
+/** Qoder file card: extension badge · name · +N -M · A/M · state. */
+function fileCard(info: FileOpInfo): HTMLElement {
+  const card = el('button', { class: 'file-op', title: `${info.path} — open file`, type: 'button' }) as HTMLButtonElement;
+  card.append(el('span', { class: `file-op-ext ext-${info.ext.toLowerCase()}` }, info.ext));
+  card.append(el('span', { class: 'file-op-name' }, info.name));
+  const stat = el('span', { class: 'file-op-stat' });
+  if (info.added) stat.append(el('span', { class: 'file-op-add' }, `+${info.added}`));
+  if (info.removed) stat.append(el('span', { class: 'file-op-del' }, `-${info.removed}`));
+  stat.append(el('span', { class: `file-op-letter is-${info.letter}` }, info.letter));
+  stat.append(el('span', { class: 'file-op-state' }, STATE_TEXT[info.state] ?? 'Applied'));
+  card.append(stat);
+  card.onclick = () => revealInEditor(info.path);
+  return card;
+}
+
+/** One row inside the "N Files Changed" card (badge · name · +add -del · M). */
+function fileChangeRow(info: FileOpInfo): HTMLElement {
+  const row = el('button', { class: 'fc-row', title: `${info.path} — open file`, type: 'button' }) as HTMLButtonElement;
+  row.append(el('span', { class: `fc-ext ext-${info.ext.toLowerCase()}` }, info.ext));
+  row.append(el('span', { class: 'fc-name' }, info.name));
+  const stat = el('span', { class: 'fc-stat' });
+  if (info.added) stat.append(el('span', { class: 'fc-add' }, `+${info.added}`));
+  if (info.removed) stat.append(el('span', { class: 'fc-del' }, `-${info.removed}`));
+  stat.append(el('span', { class: `fc-letter is-${info.letter}` }, info.letter));
+  row.append(stat);
+  row.onclick = () => revealInEditor(info.path);
+  return row;
+}
+
+/** Consecutive file edits: one or two render as cards, longer runs fold into
+ *  Qoder's "N Files Changed" card (+742 -255 header, rows, collapse chevron). */
+function fileOpsBlock(parts: ChatPart[], collapsed: Set<string>): HTMLElement {
+  const holder = el('div', { class: 'file-ops' });
+  const infos = fileOpsFor(parts); // one row per file, stats merged
+  if (infos.length < FILE_BATCH_MIN) {
+    holder.append(...infos.map(fileCard));
+    return holder;
+  }
+  const totals = fileOpsTotals(infos);
+  const key = `${infos.length}:${infos[0]?.path ?? ''}`;
+  const card = el('div', { class: `file-changes${collapsed.has(key) ? ' is-collapsed' : ''}` });
+  const head = el('div', { class: 'file-changes-head' });
+  const glyph = el('span', { class: 'file-changes-icon' });
+  glyph.append(iconEl('file', 13));
+  head.append(glyph, el('span', { class: 'file-changes-title' }, `${infos.length} Files Changed`));
+  // Totals only when the server carried line data (never a fake +0 -0).
+  const totalsEl = el('span', { class: 'fc-totals' });
+  if (totals.added) totalsEl.append(el('span', { class: 'fc-add' }, `+${totals.added}`));
+  if (totals.removed) totalsEl.append(el('span', { class: 'fc-del' }, `-${totals.removed}`));
+  if (totalsEl.children.length) head.append(totalsEl);
+  const wrap = el('div', { class: 'file-changes-wrap' });
+  const list = el('div', { class: 'file-changes-list' });
+  list.append(...infos.map(fileChangeRow));
+  wrap.append(list);
+  // Footer chevron (Qoder): the card collapses from the bottom-right corner.
+  const more = el('button', { class: 'file-changes-more', title: 'Show all changed files', type: 'button' }) as HTMLButtonElement;
+  more.append(iconEl('chevD', 14));
+  const toggle = () => {
+    const next = !card.classList.contains('is-collapsed');
+    card.classList.toggle('is-collapsed', next);
+    if (next) collapsed.add(key);
+    else collapsed.delete(key);
+    more.title = next ? 'Show all changed files' : 'Collapse changed files';
+  };
+  more.onclick = toggle;
+  head.onclick = toggle;
+  card.append(head, wrap, more);
+  markNewRow(card, `files:${key}`);
+  holder.append(card);
+  return holder;
+}
+
+/** One step group: reasoning rows first, then the single call or a folded
+ *  activity row for the rest. */
+function stepsBlock(parts: ChatPart[], openKeys?: Set<string>): HTMLElement {
+  const holder = el('div', { class: 'step-group' });
+  const reasoning = parts.filter((p) => isReasoningPart(p));
+  const tools = parts.filter((p) => !isReasoningPart(p));
+  for (const p of reasoning) renderPart(p as Record<string, unknown>, holder, openKeys);
+  if (tools.length === 1) renderPart(tools[0] as Record<string, unknown>, holder, openKeys);
+  else if (tools.length > 1) holder.append(activityBlock(tools, openKeys));
+  return holder;
+}
+
+/** Qoder's turn-level summary: "Worked on 104 actions ›" — one line, expanding
+ *  into every step of the run instead of listing each call inline. */
+function workedBlock(plan: TurnActionPlan, openKeys?: Set<string>): HTMLElement {
+  const det = el('details', { class: 'tool-row step-block worked-block' }) as HTMLDetailsElement;
+  const sum = el('summary', {});
+  sum.append(el('span', { class: 'worked-label' }, `Worked on ${plan.total} action${plan.total === 1 ? '' : 's'}`));
+  const chev = el('span', { class: 'step-chev' });
+  chev.append(iconEl('chevR', 13));
+  sum.append(chev);
+  det.append(sum);
+  const body = el('div', { class: 'tool-body step-body worked-body' });
+  for (const group of plan.groups) body.append(...stepsBlock(group, openKeys).childNodes);
+  det.append(body);
+  applyOpenState(det, sum, openKeys);
+  markNewRow(det, `worked:${plan.total}`);
+  return det;
 }
 
 /** Classify a file part for inline rendering: images show as thumbnails
@@ -730,6 +951,13 @@ let chatKeepScroll = false; // "show more" preserves position instead of jumping
 let requestChatPaint: (() => void) | null = null;
 let dcSig = '';
 let dcOut: ChangeEntry[] = [];
+// Transcript chrome: a full rebuild happens on every stream frame, so the
+// enter animations are keyed to turns/rows the previous paint already showed.
+let msgSeenKeys = new Set<string>();
+let seenSteps = new Set<string>();
+let suppressAnim = false; // true for the first paint of a session switch
+// "N Files Changed" cards the reader collapsed (survives stream repaints).
+let collapsedFileCards = new Set<string>();
 
 function renderMessages(list: HTMLElement, hooks: ChatHooks) {
   const { messages, activeId, busy, status, statusInfo, error } = agentStore.get();
@@ -739,8 +967,11 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
   const prevTop = list.scrollTop;
   const prevHeight = list.scrollHeight;
   const atBottom = prevHeight - prevTop - list.clientHeight < 48;
+  // Open expanders survive the rebuild (Qoder keeps your unfolded step open).
+  const openKeys = collectOpenKeys(list);
   list.innerHTML = '';
-  if (activeId !== lastChatSession) {
+  const sessionSwitched = activeId !== lastChatSession;
+  if (sessionSwitched) {
     lastChatSession = activeId;
     chatShown = CHAT_WINDOW; // fresh session starts at the tail
   }
@@ -779,19 +1010,77 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
   // that look like duplicated chats/images mid-run. Hide those; the
   // optimistic bubble carries the message until completion replaces all.
   const echoGuard = relayEchoGuard();
-  for (const m of visible) {
-    if (isTransientRelayEcho(m, echoGuard, activeId)) continue;
-    const role = String(m.info?.role ?? 'assistant').toLowerCase();
-    const parts = (m.parts ?? []).filter(
-      (p) => (showReasoning || !isReasoningPart(p as { type?: unknown })) &&
-        (showActivity || !isActivityPart(p as { type?: unknown })),
-    );
-    if (!parts.length) continue; // fully hidden message — skip the empty bubble
-    const wrap = el('div', { class: `msg ${role === 'user' ? 'is-user' : 'is-agent'}` });
-    const meta = el('div', { class: 'msg-meta' });
-    meta.append(`${role === 'user' ? 'You' : 'Agent'}${m.info?.time?.created ? ` · ${timeAgo(m.info.time.created)}` : ''}`);
-    wrap.append(meta);
-    for (const p of parts) renderPart(p as Record<string, unknown>, wrap);
+  // First paint of a session: everything is "already seen" — no replay of
+  // enter animations for history the user did not just create.
+  if (sessionSwitched) {
+    suppressAnim = true;
+    seenSteps.clear();
+    msgSeenKeys = new Set();
+    collapsedFileCards = new Set();
+  }
+  const nextSeen = new Set<string>();
+  const firstPaintOfSession = suppressAnim;
+  let shown = 0;
+  // One rendered row per message (filters applied) so the file-change card can
+  // be planned per assistant run, Qoder style.
+  const rows = visible
+    .filter((m) => !isTransientRelayEcho(m, echoGuard, activeId))
+    .map((m) => ({
+      m,
+      role: String(m.info?.role ?? 'assistant').toLowerCase(),
+      parts: (m.parts ?? []).filter(
+        (p) => !isStepMarker(p as ChatPart) &&
+          (showReasoning || !isReasoningPart(p as { type?: unknown })) &&
+          (showActivity || !isActivityPart(p as { type?: unknown })),
+      ),
+    }))
+    .filter((r) => r.parts.length > 0); // fully hidden message — skip the bubble
+  const filePlans = planTurnFiles(rows);
+  const actionPlans = planTurnActions(rows);
+  const renderedFileCards = new Set<ChatPart[]>(); // one card per run
+  const renderedWorked = new Set<ChatPart[][]>(); // one summary per run
+  // Consecutive assistant messages are one visual turn (Qoder): paragraphs
+  // flow together, no repeated headers.
+  let prevRole: string | null = null;
+  for (let i = 0; i < rows.length; i++) {
+    const { m, role, parts } = rows[i];
+    const isUser = role === 'user';
+    const merged = !isUser && prevRole === role;
+    // One action strip per turn: it belongs to the last message of the run,
+    // not to every step (Qoder shows it once, under the answer).
+    const lastOfRun = !rows[i + 1] || rows[i + 1].role !== role;
+    prevRole = role;
+    const wrap = el('div', { class: `msg ${isUser ? 'is-user' : 'is-agent'}${merged ? ' is-cont' : ''}` });
+    // Body: prose on the surface, activity folded into rows, edits as file
+    // cards, media inline (Qoder's turn layout — no per-turn header).
+    const body = el('div', { class: `msg-body${isUser ? ' is-bubble' : ''}` });
+    for (const g of groupParts(parts as ChatPart[])) {
+      if (g.kind === 'steps') {
+        // Long turns fold every step into one "Worked on N actions" line.
+        const ap = actionPlans[i];
+        if (ap && ap.total >= WORKED_ON_MIN) {
+          if (ap.isFirstStepMsg && !renderedWorked.has(ap.groups)) {
+            renderedWorked.add(ap.groups);
+            body.append(workedBlock(ap, openKeys));
+          }
+          continue;
+        }
+        body.append(stepsBlock(g.parts, openKeys));
+      } else if (g.kind === 'fileops') {
+        // A long turn's edits collapse into ONE "N Files Changed" card that
+        // renders where the run's last edit group sits.
+        const plan = filePlans[i];
+        if (plan && fileOpsFor(plan.parts).length >= FILE_BATCH_MIN) {
+          if (plan.isLastFileopMsg && !renderedFileCards.has(plan.parts)) {
+            renderedFileCards.add(plan.parts);
+            body.append(fileOpsBlock(plan.parts, collapsedFileCards));
+          }
+        } else {
+          body.append(fileOpsBlock(g.parts, collapsedFileCards));
+        }
+      } else for (const p of g.parts) renderPart(p as Record<string, unknown>, body, openKeys);
+    }
+    wrap.append(body);
     // Server-reported run failures live on the assistant message — show them
     // inline in the transcript, not just as a toast.
     if (role !== 'user') {
@@ -816,56 +1105,106 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
         }
       }
     }
-    if (role === 'user' && m.info?.id && activeId) {
+    // Qoder's under-turn action strip: icon-only, copy for every turn,
+    // thumbs for answers, revert on prompts — once per turn, never per step.
+    if (isUser || lastOfRun) {
       const actions = el('div', { class: 'msg-actions' });
-      const btn = el('button', { class: 'msg-action msg-revert', title: 'Revert this message and restore files to before it' }) as HTMLButtonElement;
-      const msgId = String(m.info.id);
-      const sessId = activeId;
-      btn.append(iconEl('history', 12), el('span', {}, 'Revert'));
-      if (agentStore.get().busy) btn.toggleAttribute('disabled', true);
-      btn.onclick = () => {
-        void (async () => {
-          const ok = await confirmDialog({
-            title: 'Revert this message?',
-            message: 'The message and everything after it will be hidden, and files restored to before it. You can undo with Unrevert (clock button above).',
-            confirmLabel: 'Revert',
-          });
-          if (!ok) return;
-          btn.toggleAttribute('disabled', true);
-          try {
-            await revertMessage(sessId, msgId);
-            hooks.toast('Message reverted — files restored. “Unrevert” (clock button above) undoes this.', 'info');
-          } catch (e) {
-            hooks.toast(`Revert failed: ${(e as Error).message}`, 'error');
-          } finally {
-            btn.toggleAttribute('disabled', false);
-          }
-        })();
+      const iconAction = (name: IconName, title: string, run: (btn: HTMLButtonElement) => void) => {
+        const b = el('button', { class: 'msg-action', title, type: 'button' }) as HTMLButtonElement;
+        b.append(iconEl(name, 14));
+        b.onclick = () => run(b);
+        return b;
       };
-      actions.append(btn);
+      const copySource = messagePlainText(parts as ChatPart[]);
+      actions.append(iconAction('copy', 'Copy message', (b) => {
+        void copyText(copySource).then((ok) => {
+          b.classList.toggle('is-done', ok);
+          setTimeout(() => b.classList.remove('is-done'), 1200);
+          hooks.toast(ok ? 'Message copied.' : 'Copy failed.', ok ? 'info' : 'error');
+        });
+      }));
+      if (!isUser) {
+        // Local feedback marks (no backend in this build): press to toggle.
+        const up = iconAction('thumbUp', 'Good response', (b) => {
+          const on = !b.classList.contains('is-on');
+          b.classList.toggle('is-on', on);
+          down.classList.remove('is-on');
+        });
+        const down = iconAction('thumbDown', 'Bad response', (b) => {
+          const on = !b.classList.contains('is-on');
+          b.classList.toggle('is-on', on);
+          up.classList.remove('is-on');
+        });
+        actions.append(up, down);
+      }
+      if (isUser && m.info?.id && activeId) {
+        const btn = el('button', { class: 'msg-action msg-revert', title: 'Revert this message and restore files to before it' }) as HTMLButtonElement;
+        const msgId = String(m.info.id);
+        const sessId = activeId;
+        btn.append(iconEl('history', 14));
+        if (agentStore.get().busy) btn.toggleAttribute('disabled', true);
+        btn.onclick = () => {
+          void (async () => {
+            const ok = await confirmDialog({
+              title: 'Revert this message?',
+              message: 'The message and everything after it will be hidden, and files restored to before it. You can undo with Unrevert (clock button above).',
+              confirmLabel: 'Revert',
+            });
+            if (!ok) return;
+            btn.toggleAttribute('disabled', true);
+            try {
+              await revertMessage(sessId, msgId);
+              hooks.toast('Message reverted — files restored. “Unrevert” (clock button above) undoes this.', 'info');
+            } catch (e) {
+              hooks.toast(`Revert failed: ${(e as Error).message}`, 'error');
+            } finally {
+              btn.toggleAttribute('disabled', false);
+            }
+          })();
+        };
+        actions.append(btn);
+      }
       wrap.append(actions);
     }
+    // Enter animation: only the tail turns the previous paint did not show.
+    const msgKey = String(m.info?.id ?? '') || `i${shown}`;
+    if (!firstPaintOfSession && !msgSeenKeys.has(msgKey) && shouldAnimate(shown, rows.length)) {
+      wrap.classList.add('msg-enter');
+    }
+    nextSeen.add(msgKey);
     list.append(wrap);
+    shown++;
+  }
+  msgSeenKeys = nextSeen;
+  suppressAnim = false;
+  // Streaming caret: a soft block right after the newest answer text (Qoder).
+  if (busy) {
+    const agents = list.querySelectorAll('.msg.is-agent .msg-body');
+    const lastBody = agents[agents.length - 1];
+    const mds = lastBody?.querySelectorAll('.msg-md');
+    const tail = mds?.[mds.length - 1];
+    if (tail) tail.append(el('span', { class: 'stream-caret' }));
   }
   // Transport/submit failures (store error) also land in the transcript —
   // a toast alone is gone before the user reads it. Skipped when the same
   // text already renders on a run-error row above.
   if (error && !shownRunErrors.has(error)) {
     const eb = el('div', { class: 'msg is-agent' });
-    eb.append(el('div', { class: 'msg-meta' }, 'Agent'));
+    const errBody = el('div', { class: 'msg-body' });
     const row = el('div', { class: 'msg-runerr' });
     row.append(iconEl('alert', 13), el('span', {}, error));
-    eb.append(row);
+    errBody.append(row);
     if (isFreeTierGateError(error)) {
       const g = el('div', { class: 'msg-runerr is-guide' });
       g.append(iconEl('info', 13), el('span', {}, freeTierGuidance()));
-      eb.append(g);
+      errBody.append(g);
     }
     if (isModelAccessError(error)) {
       const g = el('div', { class: 'msg-runerr is-guide' });
       g.append(iconEl('info', 13), el('span', {}, modelAccessGuidance()));
-      eb.append(g);
+      errBody.append(g);
     }
+    eb.append(errBody);
     list.append(eb);
   }
   if (chatKeepScroll) {
@@ -900,6 +1239,25 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   const perms = el('div', { class: 'perms' });
   const quests = el('div', { class: 'quests' });
   const list = el('div', { class: 'chat-list' });
+  // Qoder-style transcript frame: the list scrolls, a floating pill jumps back
+  // to the latest turn when the reader wandered up (it fades in/out).
+  const chatScroll = el('div', { class: 'chat-scroll' });
+  const btnBottom = el('button', { class: 'scroll-bottom is-off', title: 'Scroll to latest' }) as HTMLButtonElement;
+  btnBottom.append(iconEl('arrowDown', 16));
+  btnBottom.onclick = () => list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
+  chatScroll.append(list, btnBottom);
+  const syncScrollBtn = () => {
+    const gap = list.scrollHeight - list.scrollTop - list.clientHeight;
+    btnBottom.classList.toggle('is-off', gap < 80);
+  };
+  let scrollRaf = 0;
+  list.addEventListener('scroll', () => {
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0;
+      syncScrollBtn();
+    });
+  }, { passive: true });
   const errBox = el('div', { class: 'chat-err hidden' });
   const busyRow = el('div', { class: 'busy-row hidden' });
   const busyTxt = el('span', {}, 'Agent working…');
@@ -970,7 +1328,11 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   const attachBar = el('div', { class: 'attach-bar hidden' });
   const queueSec = el('div', { class: 'queue-sec hidden' });
   const box = el('div', { class: 'composer-box' });
-  const input = el('textarea', { class: 'composer-input', placeholder: 'Ask, build, refactor… (@ for files, paste/drop images, Enter to send)' }) as HTMLTextAreaElement;
+  const input = el('textarea', {
+    class: 'composer-input',
+    placeholder: 'Ask, build, refactor…',
+    title: '@ to attach a file · paste/drop images · Enter sends, Shift+Enter adds a line',
+  }) as HTMLTextAreaElement;
   input.rows = 2;
   const suggest = el('div', { class: 'suggest hidden' });
   const sendRow = el('div', { class: 'send-row' });
@@ -988,7 +1350,7 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   box.append(input, sendRow);
   composer.append(attachBar, queueSec, box, suggest);
 
-  panel.append(sessSection, perms, quests, list, errBox, busyRow, todosSec, changesSec, composer);
+  panel.append(sessSection, perms, quests, chatScroll, errBox, busyRow, todosSec, changesSec, composer);
 
   // --- attachments (opencode-style): images inline, files as @mentions ---
   interface ImgAttach { filename: string; mime: string; dataUrl: string }
@@ -1840,7 +2202,10 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
   function paintSendBtn() {
     const empty = !input.value.trim() && !imgAttaches.length;
     btnSend.toggleAttribute('disabled', empty);
-    btnSend.title = agentStore.get().busy ? 'Queue follow-up (Enter)' : 'Send (Enter)';
+    const busy = agentStore.get().busy;
+    btnSend.title = busy ? 'Queue follow-up (Enter)' : 'Send (Enter)';
+    // Qoder composer voice: the prompt invites the next move, not a form.
+    input.placeholder = busy ? 'Queue a follow-up…' : 'Ask, build, refactor…';
   }
 
   const paint = () => {
@@ -2021,14 +2386,13 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
     }
     // messages / busy / error
     renderMessages(list, hooks);
+    syncScrollBtn();
     busyRow.classList.toggle('hidden', !s.busy);
     btnContinue.classList.toggle('hidden', !(s.busy && s.relayStuck));
     if (s.busy) {
-      busyTxt.textContent = s.status === 'stalled' && s.lastActivity
-        ? `Agent stalled — ${s.lastActivity} (Stop, then send again)`
-        : relayActive()
-          ? (s.lastActivity || `${RELAY_DISPLAY_NAME} working…`)
-          : statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
+      busyTxt.textContent = relayActive()
+        ? (s.lastActivity || `${RELAY_DISPLAY_NAME} working…`)
+        : statusTextFor(s.status, s.statusInfo?.attempt ?? 0);
     }
   if (s.error) {
     const errText: string = s.error;

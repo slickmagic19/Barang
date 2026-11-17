@@ -6,7 +6,8 @@ export type IconName =
   | 'refresh' | 'trash' | 'plus' | 'x' | 'chevL' | 'chevR' | 'chevD'
   | 'send' | 'stop' | 'shield' | 'spark' | 'search' | 'prompt'
   | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip' | 'download'
-  | 'splitV' | 'maximize' | 'branch' | 'minus' | 'upload' | 'sync' | 'discard' | 'meatball' | 'bolt' | 'help' | 'timer' | 'eye';
+  | 'splitV' | 'maximize' | 'branch' | 'minus' | 'upload' | 'sync' | 'discard' | 'meatball' | 'bolt' | 'help' | 'timer' | 'eye'
+  | 'user' | 'copy' | 'arrowDown' | 'compass' | 'thumbUp' | 'thumbDown';
 
 const S = (inner: string) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
@@ -25,6 +26,12 @@ export const ICONS: Record<IconName, string> = {
   chevL: S('<path d="M15 5.5L8.5 12l6.5 6.5"/>'),
   chevR: S('<path d="M9 5.5l6.5 6.5L9 18.5"/>'),
   chevD: S('<path d="M5.5 9L12 15.5 18.5 9"/>'),
+  user: S('<circle cx="12" cy="8.2" r="3.6"/><path d="M5 20c.5-3.5 3.4-5.5 7-5.5s6.5 2 7 5.5"/>'),
+  copy: S('<rect x="8.5" y="8.5" width="11" height="11" rx="2.5"/><path d="M15.5 5.5v-.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"/>'),
+  arrowDown: S('<path d="M12 4.5v15"/><path d="M6.5 13.5L12 19l5.5-5.5"/>'),
+  compass: S('<circle cx="12" cy="12" r="8.5"/><path d="M15.2 8.8l-1.9 4.5-4.5 1.9 1.9-4.5z"/>'),
+  thumbUp: S('<path d="M7.5 10.5H4.8v10h2.7z"/><path d="M7.5 20.5h8.6a2 2 0 0 0 2-1.6l1.2-6a2 2 0 0 0-2-2.4h-3.9l.7-3.9a2 2 0 0 0-2-2.3H9.4a2 2 0 0 0-2 1.9z"/>'),
+  thumbDown: S('<path d="M7.5 13.5H4.8v-10h2.7z"/><path d="M7.5 3.5h8.6a2 2 0 0 1 2 1.6l1.2 6a2 2 0 0 1-2 2.4h-3.9l.7 3.9a2 2 0 0 1-2 2.3H9.4a2 2 0 0 1-2-1.9z"/>'),
   send: S('<path d="M21.5 2.5L11 13"/><path d="M21.5 2.5L15 21.5l-4-8.5-8.5-4z"/>'),
   stop: `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>`,
   shield: S('<path d="M12 3l7 2.8v5.4c0 4.8-3.4 7.8-7 9-3.6-1.2-7-4.2-7-9V5.8z"/><path d="M9.3 11.8l2 2 3.6-4.2"/>'),

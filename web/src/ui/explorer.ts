@@ -34,6 +34,8 @@ let treeCtx: { body: HTMLElement; hooks: ExplorerHooks } | null = null;
 // VSCode-style selection: toolbar New File/Folder targets the focused entry
 // (inside a focused folder, beside a focused file), not always the root.
 let focusedEntry: { path: string; type: 'file' | 'dir' } | null = null;
+// Row highlighted as "the open file" — kept in state so repaints keep it.
+let selectedPath: string | null = null;
 
 /** Drop focus if it points at a removed path (stale focus mis-targets creates). */
 export function clearFocusedEntry(prefix: string) {
@@ -76,11 +78,46 @@ export function resetExplorerState() {
   cache.clear();
   expanded.clear();
   expanded.add('.');
+  selectedPath = null;
+}
+
+function findLabel(host: HTMLElement, path: string): HTMLElement | null {
+  try {
+    return host.querySelector(`.tree-label[title="${CSS.escape(path)}"]`) as HTMLElement | null;
+  } catch {
+    return null;
+  }
+}
+
+/** Expand ancestors, scroll the row into view and mark it selected — used
+ *  when a tab is activated so the explorer follows the editor (no flash).
+ *  Repaints ONLY when the row isn't on screen yet (keeps opens cheap and
+ *  stops the tree rebuilding under an in-flight click). */
+export async function selectInTree(path: string) {
+  if (!treeCtx || !path) return;
+  selectedPath = path;
+  const body = treeCtx.body;
+  let label = findLabel(body, path);
+  if (!label) {
+    const parts = path.split('/');
+    let acc = '';
+    for (const part of parts.slice(0, -1)) {
+      acc = acc ? `${acc}/${part}` : part;
+      expanded.add(acc);
+    }
+    await paint(body, treeCtx.hooks);
+    label = findLabel(body, path);
+  }
+  if (!label) return;
+  body.querySelectorAll('.tree-label.active').forEach((n) => n.classList.remove('active'));
+  label.classList.add('active');
+  label.scrollIntoView({ block: 'nearest' });
 }
 
 /** Expand ancestors, repaint, and flash-highlight a path (reveal in tree). */
 export async function revealInTree(path: string) {
   if (!treeCtx) return;
+  selectedPath = path;
   const parts = path.split('/');
   let acc = '';
   for (const part of parts.slice(0, -1)) {
@@ -367,7 +404,7 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
     const isDir = e.type === 'dir';
     const open = isDir && expanded.has(e.path);
     const label = el('button', {
-      class: `tree-label${open ? ' open' : ''}${focusedEntry && focusedEntry.path === e.path ? ' focused' : ''}`,
+      class: `tree-label${open ? ' open' : ''}${selectedPath === e.path ? ' active' : ''}${focusedEntry && focusedEntry.path === e.path ? ' focused' : ''}`,
       title: e.path,
       style: `padding-left:${6 + depth * 12}px`,
     }) as HTMLButtonElement;
@@ -418,6 +455,7 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
     } else {
       label.onclick = () => {
         focusedEntry = { path: e.path, type: 'file' };
+        selectedPath = e.path;
         // Query the LIVE tree: this closure's host may be a superseded
         // staging container after an atomic swap.
         const live = treeCtx?.body ?? host;

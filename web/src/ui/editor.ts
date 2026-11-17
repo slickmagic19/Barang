@@ -2,8 +2,11 @@
 // shell paints instantly; models are cached per tab and disposed on close.
 import * as monacoLoader from './monaco';
 import { fsApi } from '../lib/api';
+import { barang } from '../lib/transport';
 import { agentStore, readSettings } from '../lib/agent';
-import { createStore, md } from '../lib/util';
+import { createStore, el, md } from '../lib/util';
+import { lineDiff } from '../lib/lineDiff';
+import { iconEl } from './icons';
 import { confirmDialog } from './dialog';
 
 export interface Tab {
@@ -467,6 +470,359 @@ export function getEditorDisplayFlags(): { brackets: boolean; sticky: boolean } 
 // Search-match decorations (one id list per editor instance).
 const searchDecorIds = new Map<import('monaco-editor').editor.IStandaloneCodeEditor, string[]>();
 
+// ---- changed lines: VS Code's quick-diff model --------------------------
+// Mirrors src/vs/workbench/contrib/scm/browser: `quickDiffDecorator` paints
+// gutter marks from the diff, and `quickDiffWidget` opens an EMBEDDED DIFF
+// EDITOR in inline (unified) mode for the peek. Same split here.
+const gutterMarkIds = new Map<import('monaco-editor').editor.IStandaloneCodeEditor, string[]>();
+const headText = new Map<string, string>(); // tab path -> HEAD content
+const diffTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
+// Paths whose changes peek the user opened (the peek is opt-in).
+const diffOpen = new Set<string>();
+// Line to bring into view once the peek opens (clicked gutter mark).
+let pendingReveal: number | null = null;
+let diffBar: HTMLElement | null = null;
+let diffBarParts: DiffBarParts | null = null;
+let activeDiff: ActiveDiff | null = null;
+// The peek: header bar + embedded diff editor, stacked under the file editor.
+let gitDiffPane: HTMLElement | null = null;
+let gitDiffHost: HTMLElement | null = null;
+let gitDiffEditor: import('monaco-editor').editor.IStandaloneDiffEditor | null = null;
+let gitOriginal: { path: string; text: string; model: import('monaco-editor').editor.ITextModel } | null = null;
+let gitLineChanges: import('monaco-editor').editor.ILineChange[] = [];
+
+interface DiffBarParts {
+  file: HTMLElement;
+  idx: HTMLElement;
+  add: HTMLElement;
+  prev: HTMLButtonElement;
+  next: HTMLButtonElement;
+  revert: HTMLButtonElement;
+}
+
+interface ActiveDiff {
+  path: string;
+  changes: import('../lib/lineDiff').LineChange[];
+  added: number;
+  deleted: number;
+}
+
+/** Path of a tab model (null for diff/untitled previews). */
+function tabPathOfModel(model: import('monaco-editor').editor.ITextModel): string | null {
+  for (const [path, m] of models) {
+    if (m === model && !path.startsWith('diff:') && !path.startsWith('untitled:')) return path;
+  }
+  return null;
+}
+
+/** Gutter marks are the only per-editor diff state: clearing is a no-op here
+ *  (the peek owns its own rendering), kept for the paint paths' symmetry. */
+function clearOverlay(_ed?: import('monaco-editor').editor.IStandaloneCodeEditor) {
+  /* nothing per-editor to unwind */
+}
+
+/** Passive gutter marks, exactly like VS Code's dirty-diff decorations. */
+function paintGutterMarks(
+  ed: import('monaco-editor').editor.IStandaloneCodeEditor,
+  diff: import('../lib/lineDiff').LineDiffResult,
+) {
+  if (!monaco) return;
+  const m = monaco;
+  const rulerPos = m.editor.OverviewRulerLane.Left;
+  // VS Code's `scm.diffDecorationsGutterPattern` is on → hatched bars.
+  const decorations = [
+    ...diff.changes.map((c) => ({
+      range: new m.Range(c.start, 1, c.end, 1),
+      options: {
+        isWholeLine: true,
+        linesDecorationsClassName: c.kind === 'add'
+          ? 'dirty-diff-glyph dirty-diff-added primary pattern'
+          : 'dirty-diff-glyph dirty-diff-modified primary pattern',
+        overviewRuler: { color: c.kind === 'add' ? '#9ece6aa6' : '#e0af68a6', position: rulerPos },
+      },
+    })),
+  ];
+  const ids = ed.deltaDecorations(gutterMarkIds.get(ed) ?? [], decorations);
+  gutterMarkIds.set(ed, ids);
+}
+
+/** Build the changes peek (header bar + embedded diff editor). */
+function ensureDiffBar(): DiffBarParts | null {
+  if (!host1) return null;
+  if (diffBar && diffBarParts) return diffBarParts;
+  const pane = el('div', { class: 'diff-pane hidden' });
+  const bar = el('div', { class: 'diff-bar' });
+  const file = el('span', { class: 'diff-bar-file' });
+  const scope = el('span', { class: 'diff-bar-scope' }, 'Git Local Changes (Working Tree)');
+  const idx = el('span', { class: 'diff-bar-idx' });
+  const spacer = el('span', { class: 'diff-bar-spacer' });
+  const add = el('span', { class: 'diff-bar-add' });
+  const revert = el('button', { class: 'icon-btn diff-nav diff-revert', title: 'Revert file changes' }) as HTMLButtonElement;
+  revert.append(iconEl('discard', 13));
+  const prev = el('button', { class: 'icon-btn diff-nav', title: 'Previous change' }) as HTMLButtonElement;
+  prev.append(iconEl('arrowDown', 13));
+  prev.style.transform = 'rotate(180deg)';
+  const next = el('button', { class: 'icon-btn diff-nav', title: 'Next change' }) as HTMLButtonElement;
+  next.append(iconEl('arrowDown', 13));
+  const close = el('button', { class: 'icon-btn diff-nav diff-close', title: 'Hide changes' }) as HTMLButtonElement;
+  close.append(iconEl('x', 13));
+  // Qoder's order: name | scope · N of M | +N | revert | next | prev | close.
+  bar.append(file, scope, idx, spacer, add, revert, next, prev, close);
+  const host = el('div', { class: 'diff-editor' });
+  pane.append(bar, host);
+  prev.onclick = () => gotoChange(-1);
+  next.onclick = () => gotoChange(1);
+  revert.onclick = () => void revertFile();
+  close.onclick = () => {
+    closeDiffPane();
+  };
+  host1.append(pane);
+  gitDiffPane = pane;
+  gitDiffHost = host;
+  diffBar = bar;
+  diffBarParts = { file, idx, add, prev, next, revert };
+  return diffBarParts;
+}
+
+/** The peek's embedded diff editor (VS Code's EmbeddedDiffEditorWidget).
+ *  Inline/unified mode: removals keep their original numbers, additions the
+ *  modified ones — the exact rendering VS Code's quick-diff peek produces. */
+function ensureGitDiffEditor(): import('monaco-editor').editor.IStandaloneDiffEditor | null {
+  if (gitDiffEditor) return gitDiffEditor;
+  if (!monaco || !gitDiffHost) return null;
+  const prefs = readSettings();
+  const ed = monaco.editor.createDiffEditor(gitDiffHost, {
+    theme: 'barang-dark',
+    automaticLayout: true,
+    readOnly: true,
+    originalEditable: false,
+    renderSideBySide: false,
+    renderOverviewRuler: false,
+    enableSplitViewResizing: false,
+    ignoreTrimWhitespace: false,
+    renderIndicators: true,
+    scrollBeyondLastLine: false,
+    fontFamily: "'JetBrains Mono','Cascadia Code',Consolas,monospace",
+    fontSize: prefs.fontSize,
+    lineHeight: 1.55,
+    wordWrap: prefs.wordWrap ? 'on' : 'off',
+    minimap: { enabled: false },
+    glyphMargin: false,
+    folding: false,
+    renderLineHighlight: 'none',
+    stickyScroll: { enabled: false },
+    scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
+  });
+  ed.onDidUpdateDiff(() => {
+    gitLineChanges = ed.getLineChanges() ?? [];
+    paintDiffBar();
+    applyPendingReveal();
+  });
+  gitDiffEditor = ed;
+  return ed;
+}
+
+/** HEAD content as a Monaco model, cached per path + text. */
+function originalModelFor(path: string, text: string, languageId: string) {
+  if (!monaco) return null;
+  if (gitOriginal && gitOriginal.path === path && gitOriginal.text === text) return gitOriginal.model;
+  gitOriginal?.model.dispose();
+  const model = monaco.editor.createModel(text, languageId, monaco.Uri.parse(`git-original://${path}`));
+  gitOriginal = { path, text, model };
+  return model;
+}
+
+/** Scroll the peek to the change the user clicked (or the first one). */
+function applyPendingReveal() {
+  if (pendingReveal == null || !gitDiffEditor) return;
+  const reveal = pendingReveal;
+  pendingReveal = null;
+  const modified = gitDiffEditor.getModifiedEditor();
+  const model = modified.getModel();
+  if (!model) return;
+  const ln = Math.max(1, Math.min(reveal, model.getLineCount()));
+  modified.revealLineInCenter(ln);
+  modified.setPosition({ lineNumber: ln, column: 1 });
+}
+
+/** Hide the peek and forget the open path. */
+function closeDiffPane() {
+  if (activeDiff) diffOpen.delete(activeDiff.path);
+  activeDiff = null;
+  pendingReveal = null;
+  gitLineChanges = [];
+  gitDiffPane?.classList.add('hidden');
+  gitDiffEditor?.setModel(null);
+}
+
+/** Revert the open file to HEAD (confirmed), then refresh the view. */
+async function revertFile() {
+  if (!activeDiff) return;
+  const path = activeDiff.path;
+  const name = path.split('/').pop() ?? path;
+  const ok = await confirmDialog({
+    title: 'Revert file?',
+    message: `${name} — every unsaved change in the working tree is lost. This cannot be undone.`,
+    confirmLabel: 'Revert',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await barang().git('discard', { paths: [path] });
+    headText.delete(path);
+    hooks?.toast(`Reverted ${name}.`);
+    await checkExternalChanges();
+    scheduleGutter(editor, true);
+  } catch (e) {
+    hooks?.toast(`Revert failed: ${(e as Error).message}`, 'error');
+  }
+}
+
+/** Index (1-based) of the change under a modified-file line. */
+function changeIndexAt(line: number): number {
+  if (!gitLineChanges.length) return 0;
+  const i = gitLineChanges.findIndex((c) => line <= (c.modifiedEndLineNumber || c.modifiedStartLineNumber));
+  return i < 0 ? gitLineChanges.length : i + 1;
+}
+
+/** Jump to the previous (-1) / next (+1) change in the peek. */
+function gotoChange(dir: -1 | 1) {
+  if (!gitDiffEditor || !gitLineChanges.length) return;
+  const modified = gitDiffEditor.getModifiedEditor();
+  const cur = modified.getPosition()?.lineNumber ?? 1;
+  const list = gitLineChanges;
+  let target: import('monaco-editor').editor.ILineChange | undefined;
+  if (dir > 0) {
+    target = list.find((c) => (c.modifiedEndLineNumber || c.modifiedStartLineNumber) >= cur
+      && c.modifiedStartLineNumber > cur) ?? list[0];
+  } else {
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].modifiedStartLineNumber < cur) { target = list[i]; break; }
+    }
+    target = target ?? list[list.length - 1];
+  }
+  if (!target) return;
+  const line = target.modifiedStartLineNumber || target.modifiedEndLineNumber || 1;
+  modified.revealLineInCenter(line);
+  modified.setPosition({ lineNumber: line, column: 1 });
+  paintDiffBar();
+}
+
+/** Show/refresh the peek header: file | scope · N of M changes | +N | nav. */
+function paintDiffBar() {
+  const parts = ensureDiffBar();
+  if (!parts || !diffBar || !gitDiffPane) return;
+  if (!activeDiff) {
+    gitDiffPane.classList.add('hidden');
+    return;
+  }
+  const { path, added } = activeDiff;
+  parts.file.textContent = path.split('/').pop() ?? path;
+  const line = gitDiffEditor?.getModifiedEditor().getPosition()?.lineNumber ?? 1;
+  const total = gitLineChanges.length || activeDiff.changes.length;
+  parts.idx.textContent = `\u00b7 ${changeIndexAt(line)} of ${total} changes`;
+  parts.add.textContent = `+${added}`;
+  parts.add.classList.toggle('is-zero', added === 0);
+  gitDiffPane.classList.remove('hidden');
+}
+
+/** Recompute marks (always) and the changes view (only when opened). */
+async function paintDiffFor(ed: import('monaco-editor').editor.IStandaloneCodeEditor) {
+  if (!monaco) return;
+  const model = ed.getModel();
+  const path = model ? tabPathOfModel(model) : null;
+  const blank = () => {
+    clearOverlay(ed);
+    const ids = gutterMarkIds.get(ed) ?? [];
+    if (ids.length) {
+      try { ed.deltaDecorations(ids, []); } catch { /* gone */ }
+    }
+    gutterMarkIds.set(ed, []);
+    if (ed === editor) {
+      activeDiff = null;
+      gitLineChanges = [];
+      gitDiffPane?.classList.add('hidden');
+      paintDiffBar();
+    }
+  };
+  if (!model || !path) { blank(); return; }
+  let before = headText.get(path);
+  if (before === undefined) {
+    try {
+      const d = await barang().git('diff', { path }) as { before?: string } | null;
+      before = String(d?.before ?? '');
+    } catch {
+      before = ''; // no repo / outside project / new file — no baseline
+    }
+    headText.set(path, before);
+  }
+  // Untracked or brand-new files have no HEAD text: nothing to compare.
+  if (!before) { blank(); return; }
+  if (ed.getModel() !== model) return; // switched away while fetching
+  const diff = lineDiff(before, model.getValue());
+  if (!diff.changes.length && !diff.removed.length) { blank(); return; }
+  paintGutterMarks(ed, diff);
+  if (diffOpen.has(path)) {
+    const parts = ensureDiffBar();
+    const diffEd = ensureGitDiffEditor();
+    const original = diffEd ? originalModelFor(path, before, model.getLanguageId()) : null;
+    if (diffEd && parts && original) {
+      const pair = diffEd.getModel();
+      if (!pair || pair.modified !== model || pair.original !== original) {
+        diffEd.setModel({ original, modified: model });
+      }
+      activeDiff = { path, changes: diff.changes, added: diff.added, deleted: diff.deleted };
+      paintDiffBar();
+    }
+  } else {
+    clearOverlay(ed);
+    if (ed === editor) {
+      activeDiff = null;
+      gitLineChanges = [];
+      gitDiffPane?.classList.add('hidden');
+      paintDiffBar();
+    }
+  }
+}
+
+/** Open/close the changes view for a file; `line` reveals that change. */
+export function toggleGitDiff(path: string, line?: number) {
+  if (diffOpen.has(path)) {
+    diffOpen.delete(path);
+    pendingReveal = null;
+  } else {
+    diffOpen.add(path);
+    pendingReveal = line ?? null;
+  }
+  scheduleGutter(editor, true);
+  if (editor2) scheduleGutter(editor2, true);
+}
+
+/** True when the changes view is open for this path (smoke/tests). */
+export function isGitDiffOpen(path: string): boolean {
+  return diffOpen.has(path);
+}
+
+/** Recompute after a short pause (typing), or immediately on tab switches. */
+function scheduleGutter(ed: import('monaco-editor').editor.IStandaloneCodeEditor | null, immediate = false) {
+  if (!ed) return;
+  const prev = diffTimers.get(ed);
+  if (prev) clearTimeout(prev);
+  if (immediate) {
+    void paintDiffFor(ed);
+    return;
+  }
+  diffTimers.set(ed, setTimeout(() => void paintDiffFor(ed), 400));
+}
+
+/** Drop the cached baseline for a path (file saved/reloaded from disk). */
+export function resetGitGutter(path?: string) {
+  if (path) headText.delete(path);
+  else headText.clear();
+  scheduleGutter(editor, true);
+  scheduleGutter(editor2, true);
+}
+
 /** Clear search-match decorations on both editors. */
 export function clearSearchDecorations() {
   if (!monaco) {
@@ -547,14 +903,21 @@ export async function initEditor(container: HTMLElement, h: EditorHooks) {
     inherit: true,
     rules: [{ token: 'comment', foreground: '63636b' }],
     colors: {
-      'editor.background': '#080808',
+      'editor.background': '#060608',
       'editor.lineHighlightBackground': '#ffffff08',
-      'editorLineNumber.foreground': '#52525b',
-      'editorLineNumber.activeForeground': '#d4d4d8',
-      'editorCursor.foreground': '#fafafa',
-      'editor.selectionBackground': '#ffffff26',
-      'editorWidget.background': '#101012',
-      'editorWidget.border': '#ffffff1f',
+      'editorLineNumber.foreground': '#4a4a58',
+      'editorLineNumber.activeForeground': '#cfcfda',
+      'editorCursor.foreground': '#a79bff',
+      'editor.selectionBackground': '#8b7bff33',
+      'editorWidget.background': '#0e0e12',
+      'editorWidget.border': '#ffffff1e',
+      // Diff (inline peek): the same palette the gutter uses.
+      'diffEditor.insertedLineBackground': '#9ece6a1f',
+      'diffEditor.removedLineBackground': '#f7768e1f',
+      'diffEditor.insertedTextBackground': '#9ece6a33',
+      'diffEditor.removedTextBackground': '#f7768e33',
+      'diffEditor.border': '#ffffff1e',
+      'diffEditor.diagonalFill': '#ffffff10',
     },
   });
   monaco.editor.setTheme('barang-dark');
@@ -601,9 +964,28 @@ function wireCodeEditor(ed: import('monaco-editor').editor.IStandaloneCodeEditor
       tabs: s.tabs.map((t) => (models.get(t.path) === model ? { ...t, dirty: true } : t)),
     }));
     schedulePreviewRefresh(model);
+    scheduleGutter(ed);
     hooks?.onTabs();
   });
-  ed.onDidChangeCursorPosition((e) => hooks?.onCursor({ line: e.position.lineNumber, col: e.position.column }));
+  ed.onDidChangeModel(() => scheduleGutter(ed, true));
+  // Clicking a change mark opens/closes the changes view (Qoder's trigger).
+  // Monaco reports the DOM element under the pointer, marks included.
+  ed.onMouseDown((e) => {
+    const target = e.target.element as HTMLElement | null;
+    if (!target?.closest?.('.dirty-diff-glyph')) return;
+    const model = ed.getModel();
+    const path = model ? tabPathOfModel(model) : null;
+    if (!path) return;
+    const line = e.target.position?.lineNumber ?? e.target.range?.startLineNumber;
+    toggleGitDiff(path, line);
+  });
+  ed.onDidChangeCursorPosition((e) => {
+    hooks?.onCursor({ line: e.position.lineNumber, col: e.position.column });
+    // Keep the bar's "N of M changes" glued to the caret.
+    if (ed === editor && activeDiff && diffBarParts) {
+      diffBarParts.idx.textContent = `\u00b7 ${changeIndexAt(e.position.lineNumber)} of ${(gitLineChanges.length || activeDiff.changes.length)} changes`;
+    }
+  });
   ed.onDidFocusEditorText(() => {
     if (editorStore.get().focus !== group) editorStore.set({ focus: group });
   });
@@ -1206,6 +1588,8 @@ function dropTabs(gone: Tab[]) {
     if (!live.has(t.path)) {
       models.get(t.path)?.dispose();
       models.delete(t.path);
+      diffOpen.delete(t.path);
+      headText.delete(t.path);
     }
     const key = `${t.group || 1}:${t.path}`;
     const pair = diffModels.get(key);

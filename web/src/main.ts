@@ -3,8 +3,8 @@
 import './styles.css';
 import { appState } from './lib/api';
 import { barang } from './lib/transport';
-import { connectEvents, agentStore, createSession, selectSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession,
-          pickDefaultModel, isFreeKiloModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries,           sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText, decideStalled,   permissionFromEvent, shouldSurfacePermission, handlePermissionAsk, parseAgentEvent,  isTransportDown, findUserMessage, todoProgress,
+import { connectEvents, agentStore, createSession, selectSession, loadMeta, loadSessions, readSettings, shouldAutoCreateSession, migrateQoderTranscriptDefault,
+          pickDefaultModel, isFreeKiloModel, fmtTokens, sessionUsage, isRetryableSendError, withSendRetries,           sanitizeOutgoingFiles, resolveSendModel, statusTextFor, messageErrorText,   permissionFromEvent, shouldSurfacePermission, handlePermissionAsk, parseAgentEvent,  isTransportDown, findUserMessage, todoProgress,
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
@@ -31,12 +31,12 @@ function logoImg(size: number, cls = ''): HTMLImageElement {
   return img;
 }
 import { initExplorer, refreshExplorer, revealInTree, resetExplorerState, clearFocusedEntry,
-deleteFocusedEntry, pathOf } from './ui/explorer';
+deleteFocusedEntry, pathOf, selectInTree } from './ui/explorer';
 import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor,
 revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds,
 parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup,
 openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab,
-showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText, setFileOpenedHandler } from './ui/editor';
+showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText, setFileOpenedHandler, resetGitGutter, toggleGitDiff } from './ui/editor';
 import { initChat, filePartView, stepHistory, pushComposerHist, changeFp, isReviewed, markReviewed, loadReviewedState, scheduleReviewedPersist, openLightbox, closeLightbox } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
@@ -130,6 +130,8 @@ function initResizable(gutterL: HTMLElement, gutterR: HTMLElement) {
 
 async function boot() {
   const app = document.getElementById('app')!;
+  // One-time: the transcript is Qoder-style now (activity rows are content).
+  migrateQoderTranscriptDefault();
 
   // --- layout -----------------------------------------------------------
   const topbar = el('div', { class: 'topbar' });
@@ -634,6 +636,19 @@ async function boot() {
     else void openFile(t.path, { group });
   };
 
+  // The explorer follows the editor: the open file's row is highlighted and
+  // scrolled into view (no flash — that's for explicit Reveal in Explorer).
+  let treeSelection = '';
+  const syncTreeSelection = () => {
+    const s = editorStore.get();
+    const activePath = s.split && s.focus === 2 ? s.active2 : s.active;
+    const tab = s.tabs.find((x) => x.path === activePath);
+    const file = tab && !tab.untitled && !tab.path.startsWith('bolt:') ? (tab.file ?? '') : '';
+    if (!file || isAbsolutePath(file) || file === treeSelection) return;
+    treeSelection = file;
+    void selectInTree(file);
+  };
+
   const paintStrip = (host: HTMLElement, group: 1 | 2, isFocused: boolean) => {
     host.innerHTML = '';
     host.classList.toggle('group-focus', isFocused);
@@ -655,6 +670,20 @@ async function boot() {
       if (isBolt) b.append(iconEl('bolt', 14));
       else b.append(fileIconEl(isDiff ? (t.file ?? '') : name, 14));
       b.append(el('span', { class: 'tab-name' }, name));
+      // Tracking marker: same git letters as the explorer — and the way in
+      // to the changes view (Qoder shows it only on demand).
+      if (!isBolt && !t.diff && !t.untitled && !t.external) {
+        const letter = decoration(t.file ?? t.path, false)?.letter ?? null;
+        if (letter) {
+          const label = { A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', C: 'Conflict', U: 'Untracked' }[letter] ?? letter;
+          const badge = el('span', { class: `tab-git git-${letter}`, title: `Git: ${label} — click to show changes` }, letter);
+          badge.onclick = (e) => {
+            e.stopPropagation();
+            toggleGitDiff(t.file ?? t.path);
+          };
+          b.append(badge);
+        }
+      }
       if (t.dirty) b.append(el('span', { class: 'dirty-dot', title: 'Unsaved changes' }));
       b.onclick = () => activateTab(t.path, group);
       b.onauxclick = (e) => {
@@ -732,6 +761,7 @@ async function boot() {
     splitBtn.append(iconEl('splitV', 14));
     splitBtn.onclick = () => toggleSplit();
     tabs.append(spacer, splitBtn);
+    syncTreeSelection();
   };
   editorStore.subscribe(paintTabs);
 
@@ -844,6 +874,7 @@ async function boot() {
   buildSideViews();
 
   let explorer = initExplorer(explorerHost, explorerHooks, root);
+  let repoSignature = '';
   const scmApi: ScmApi = initScm(scmHost, {
     toast,
     onOpenFile: (p, opts) => void openFile(p, opts),
@@ -857,6 +888,13 @@ async function boot() {
       const n = info?.total ?? 0;
       scmBadge.textContent = n > 99 ? '99+' : String(n);
       scmBadge.classList.toggle('hidden', n === 0);
+      // Repo state moved (commit/stage/checkout): refresh tab badges + gutter.
+      const sig = `${info?.branch ?? ''}|${n}|${info?.ahead ?? 0}|${info?.behind ?? 0}`;
+      if (sig !== repoSignature) {
+        repoSignature = sig;
+        paintTabs();
+        resetGitGutter();
+      }
     },
   });
   try {
@@ -1226,7 +1264,6 @@ async function boot() {
     resolveSendModel,
     statusTextFor,
     messageErrorText,
-    decideStalled,
     permissionFromEvent,
     shouldSurfacePermission,
     handlePermissionAsk,

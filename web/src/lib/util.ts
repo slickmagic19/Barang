@@ -38,8 +38,10 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-/** Render markdown: fences, headings, lists, quotes, rules, inline code,
- *  bold, links. Escapes HTML first; fences are extracted before block parse. */
+/** Render markdown: paragraphs, fences, headings, lists, quotes, rules,
+ *  inline code, bold and links. Escaped first; fences are extracted before the
+ *  block parse. Text typed by the user keeps its shape: single newlines are
+ *  <br> inside a paragraph, blank lines start a new paragraph. */
 export function md(src: string): string {
   const esc = src.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const blocks: string[] = [];
@@ -58,42 +60,54 @@ export function md(src: string): string {
   const lines = fenced.split('\n');
   const out: string[] = [];
   let list: 'ul' | 'ol' | null = null;
+  // Consecutive text lines collect here: one <p>, newlines kept as <br>.
+  let para: string[] = [];
+  const flushPara = () => {
+    if (!para.length) return;
+    out.push(`<p>${para.map(inline).join('<br>')}</p>`);
+    para = [];
+  };
   const closeList = () => {
     if (list) {
       out.push(`</${list}>`);
       list = null;
     }
   };
+  const closeBlocks = () => {
+    flushPara();
+    closeList();
+  };
   for (const raw of lines) {
     const line = raw.replace(/\s+$/, '');
     if (/^\u0000\d+\u0000$/.test(line.trim())) {
-      closeList();
+      closeBlocks();
       out.push(line.trim());
       continue;
     }
     if (line.trim() === '') {
-      closeList();
+      closeBlocks();
       continue;
     }
     const h = line.match(/^(#{1,4})\s+(.*)$/);
     if (h) {
-      closeList();
+      closeBlocks();
       out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`);
       continue;
     }
     if (/^---+$/.test(line.trim())) {
-      closeList();
+      closeBlocks();
       out.push('<hr>');
       continue;
     }
     const q = line.match(/^&gt;\s?(.*)$/);
     if (q) {
-      closeList();
+      closeBlocks();
       out.push(`<blockquote>${inline(q[1])}</blockquote>`);
       continue;
     }
     const ul = line.match(/^\s*[-*]\s+(.*)$/);
     if (ul) {
+      flushPara();
       if (list !== 'ul') {
         closeList();
         out.push('<ul>');
@@ -104,6 +118,7 @@ export function md(src: string): string {
     }
     const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
     if (ol) {
+      flushPara();
       if (list !== 'ol') {
         closeList();
         out.push('<ol>');
@@ -112,10 +127,10 @@ export function md(src: string): string {
       out.push(`<li>${inline(ol[1])}</li>`);
       continue;
     }
-    closeList();
-    out.push(`${inline(line)}<br>`);
+    closeList(); // a paragraph line after a list ends the list
+    para.push(line);
   }
-  closeList();
+  closeBlocks();
   return out
     .join('')
     .replace(/\u0000(\d+)\u0000/g, (_m, i) => blocks[Number(i)] ?? '');

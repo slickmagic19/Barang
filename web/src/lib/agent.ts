@@ -245,21 +245,10 @@ const scheduleSessions = debounce(() => void loadSessions().catch(() => {}), 800
 
 let eventsConnected = false;
 let lastProgressAt = Date.now();
-let stallTimer: ReturnType<typeof setInterval> | null = null;
-/** Silence budget while a run is busy with zero updates (retry backoffs are
- *  expected-quiet and excluded by decideStalled). Pure threshold is exported. */
-export const STALL_MS = 120000;
 
+/** Mark a run as alive: any message/part/status/permission push resets it. */
 export function bumpProgress() {
   lastProgressAt = Date.now();
-}
-
-/** Stall decision (pure, smoke-tested): a busy non-retry run with no
- *  message/part/status/permission activity for STALL_MS is stuck — the
- *  server will never finish it on its own (e.g. an unanswered prompt the
- *  client failed to surface, or a wedged provider stream). */
-export function decideStalled(lastProgress: number, now: number, busy: boolean, status: string): boolean {
-  return busy && status !== 'retry' && now - lastProgress > STALL_MS;
 }
 
 export interface AgentEvent {
@@ -661,16 +650,6 @@ export function connectEvents() {
     scheduleRefresh();
     scheduleSessions();
   });
-  if (stallTimer) clearInterval(stallTimer);
-  stallTimer = setInterval(() => {
-    const s = agentStore.get();
-    if (decideStalled(lastProgressAt, Date.now(), s.busy, s.status)) {
-      agentStore.set({ status: 'stalled' });
-    }
-  }, 15000);
-  if (typeof (stallTimer as unknown as { unref?: unknown }).unref === 'function') {
-    (stallTimer as unknown as { unref: () => void }).unref();
-  }
 }
 
 export interface BarangSettings {
@@ -684,7 +663,7 @@ export interface BarangSettings {
   freeOnly: boolean;
   showUsage: boolean; // statusbar session cost meter, default true
   showReasoning: boolean; // default false — reasoning rows hidden
-  showActivity: boolean; // default false — step/tool rows hidden (text answers stay)
+  showActivity: boolean; // default true — Qoder-style activity rows + file cards
   confirmDelete: boolean; // default true — ask before deleting a session
   fontSize: number; // editor font size, default 13
   minimap: boolean; // editor minimap, default false
@@ -728,7 +707,7 @@ const SETTING_DEFAULTS: BarangSettings = {
   freeOnly: true,
   showUsage: true,
   showReasoning: false,
-  showActivity: false,
+  showActivity: true,
   confirmDelete: true,
   fontSize: 13,
   minimap: false,
@@ -842,7 +821,7 @@ export function readSettings(): BarangSettings {
       freeOnly: p.freeOnly !== false,
       showUsage: p.showUsage !== false,
       showReasoning: p.showReasoning === true,
-      showActivity: p.showActivity === true,
+      showActivity: p.showActivity !== false,
       confirmDelete: p.confirmDelete !== false,
       fontSize: Number.isFinite(p.fontSize) ? Math.max(11, Math.min(20, p.fontSize)) : SETTING_DEFAULTS.fontSize,
       minimap: p.minimap === true,
@@ -881,6 +860,26 @@ export function writeSettings(s: BarangSettings) {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
   } catch { /* private mode etc. */ }
+}
+
+/** One-time UI default migration. The transcript is Qoder-style now, so agent
+ *  activity (folded rows + file cards) is part of the answer surface — older
+ *  profiles that stored the pre-Qoder default would otherwise hide it forever.
+ *  Runs once per profile; an explicit later toggle always wins. */
+export function migrateQoderTranscriptDefault(): void {
+  const FLAG = 'barang:ui-migrated.qoder-transcript.v1';
+  try {
+    if (localStorage.getItem(FLAG)) return;
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as Record<string, unknown> | null;
+      if (p && typeof p === 'object' && p.showActivity === false) {
+        p.showActivity = true;
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(p));
+      }
+    }
+    localStorage.setItem(FLAG, '1');
+  } catch { /* private mode — fresh defaults apply anyway */ }
 }
 
 /** Identity key for a model list (labels joined). Provider metadata
@@ -1121,13 +1120,8 @@ let lastSubmitAt = 0;
 
 /** Busy-row label: the server retries failed runs itself (status type
  *  'retry' + attempt) — surfacing it is what "retry like opencode" means.
- *  Back to 'Agent working…' the moment the run resumes. Pure. */
-export function statusTextFor(status: string, attempt = 0): string {
-  if (status === 'retry') return attempt > 0 ? `Agent retrying… (attempt ${attempt})` : 'Agent retrying…';
-  if (status === 'stalled') return 'Agent stalled';
-  if (status === 'stopping') return 'Agent stopping…';
-  return `Agent working… (${status || 'busy'})`;
-}
+ *  Lives in agentStatus.ts so it can be unit-tested in isolation. */
+export { statusTextFor } from './agentStatus';
 
 /** Human text for an assistant message's server-reported run error
  *  (info.error). Null when there is nothing to show — user-initiated

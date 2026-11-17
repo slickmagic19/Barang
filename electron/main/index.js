@@ -202,15 +202,15 @@ function createWindow() {
     height: 860,
     minWidth: 960,
     minHeight: 600,
-    backgroundColor: '#101012',
+    backgroundColor: '#08080a',
     autoHideMenuBar: true,
     icon: windowIcon,
     // Dark window chrome: no native titlebar; the OS draws only the
     // min/max/close overlay (dark) while our topbar is the drag region.
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#101012',
-      symbolColor: '#a1a1aa',
+      color: '#0b0b0e',
+      symbolColor: '#9f9fb0',
       height: 46,
     },
     webPreferences: {
@@ -1376,7 +1376,9 @@ async function runUiSmoke() {
         try {
           const labels = [...document.querySelectorAll('.tree-label')];
           const dirRow = labels.find((b) => (b.title || '') === '.barang-smoke-ui');
-          if (dirRow) {
+          // Auto-reveal may already have expanded this folder for the opened
+          // file — only toggle when closed, else the click collapses it.
+          if (dirRow && !dirRow.classList.contains('open')) {
             dirRow.click();
             await new Promise((rr) => setTimeout(rr, 800));
           }
@@ -2593,14 +2595,16 @@ async function runUiSmoke() {
         if (rm(null, cat, ['build'], 'ghost').agent !== undefined) bad.push('sendmodel-ghost-agent');
         if (rm({ providerID: 'kilo', modelID: 'mimo-v2.6-flash-free' }, [], [], 'build').agent !== 'build') bad.push('sendmodel-passthru');
       }
-      // Opencode-style run state: server retry, stall, errors, permissions.
+      // Run state: server retry + errors (stall detection was dropped with the
+      // opencode transport — Kilo runs report their own progress).
       const st = u.statusTextFor;
       if (typeof st !== 'function') bad.push('no-status-fn');
       else {
         if (st('retry', 2) !== 'Agent retrying… (attempt 2)') bad.push('status-retry');
         if (st('retry', 0) !== 'Agent retrying…') bad.push('status-retry0');
-        if (st('busy', 0) !== 'Agent working… (busy)') bad.push('status-busy');
-        if (!st('stalled', 0).startsWith('Agent stalled')) bad.push('status-stalled');
+        if (st('busy', 0) !== 'Agent working…') bad.push('status-busy');
+        // The busy row animates a spinner only: no "(busy)" suffix, no dots.
+        if (st('busy', 0).includes('(')) bad.push('status-busy-suffix');
       }
       const me = u.messageErrorText;
       if (typeof me !== 'function') bad.push('no-msgerr-fn');
@@ -2610,14 +2614,6 @@ async function runUiSmoke() {
         if (me({ name: 'ProviderAuthError', data: { providerID: 'x', message: 'expired' } }) !== 'Provider sign-in error (x): expired') bad.push('msgerr-auth');
         if (me({ name: 'MessageAbortedError', data: { message: 'x' } }) !== null) bad.push('msgerr-abort');
         if (me(null) !== null || me('s') !== null) bad.push('msgerr-null');
-      }
-      const ds = u.decideStalled;
-      if (typeof ds !== 'function') bad.push('no-stall-fn');
-      else {
-        if (ds(0, 121000, true, 'busy') !== true) bad.push('stall-yes');
-        if (ds(0, 119000, true, 'busy') !== false) bad.push('stall-soon');
-        if (ds(0, 999999, true, 'retry') !== false) bad.push('stall-retry');
-        if (ds(0, 999999, false, 'busy') !== false) bad.push('stall-idle');
       }
       // CLI Relay liveness display: ticking quiet text + stuck clock.
       if (typeof u.formatQuiet !== 'function' || typeof u.relayQuietText !== 'function') bad.push('no-quiet-fns');

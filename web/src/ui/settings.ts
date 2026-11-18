@@ -13,6 +13,7 @@ import {
 } from '../lib/mcp';
 import {
   validateProviderEntry, parseModelIds, setProviderEntry, removeProviderEntry, listProviderEntries,
+  migrateLegacyProviders,
   type CustomProviderEntry, type ProviderListItem,
 } from '../lib/providers';
 import { parseJsonc } from '../lib/util';
@@ -414,9 +415,16 @@ export function openSettings(hooks: SettingsHooks) {
     paintProviders();
     try {
       const res = await barang().mcpConfig('read', { scope: 'managed' });
-      const text = String(res?.text ?? '');
+      let text = String(res?.text ?? '');
       provState.path = String(res?.path ?? '');
       try {
+        // Files from pre-fix builds used `providers`, which Kilo rejects —
+        // repair them here so saved endpoints actually load.
+        const fixed = migrateLegacyProviders(text);
+        if (fixed !== null) {
+          await barang().mcpConfig('write', { scope: 'managed', text: fixed });
+          text = fixed;
+        }
         if (text.trim()) parseJsonc(text);
         provState.custom = listProviderEntries(text);
         provState.error = undefined;

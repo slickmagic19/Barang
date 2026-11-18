@@ -76,6 +76,15 @@ export function providerToLiveConfig(e: CustomProviderEntry): Record<string, unk
   return { npm: '@ai-sdk/openai-compatible', options, models };
 }
 
+/** Provider map from a config object. Kilo's schema names it `provider`
+ *  (singular); older Barang builds wrote `providers`, which Kilo rejects
+ *  ("Unrecognized key: providers") and then silently drops. Legacy entries
+ *  are still read so pre-fix files keep working; singular wins on collisions. */
+function providerMapOf(config: Record<string, unknown>, key: string): Record<string, unknown> {
+  const v = config[key];
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
 function parseProvidersFile(fileText: string): { config: Record<string, unknown>; providers: Record<string, unknown> } {
   const raw = String(fileText ?? '').trim();
   if (!raw) return { config: {}, providers: {} };
@@ -89,10 +98,15 @@ function parseProvidersFile(fileText: string): { config: Record<string, unknown>
     throw new Error('existing config is not a JSON object');
   }
   const config = parsed as Record<string, unknown>;
-  const providers = config.providers && typeof config.providers === 'object' && !Array.isArray(config.providers)
-    ? (config.providers as Record<string, unknown>)
-    : {};
+  const providers = { ...providerMapOf(config, 'providers'), ...providerMapOf(config, 'provider') };
   return { config, providers };
+}
+
+/** Strip the invalid legacy key before writing, so Kilo accepts the file. */
+function withoutLegacyProviders(config: Record<string, unknown>): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...config };
+  delete next.providers;
+  return next;
 }
 
 /** Set (add/replace) one provider, preserving every other key. Throws on
@@ -101,19 +115,31 @@ export function setProviderEntry(fileText: string, entry: CustomProviderEntry): 
   const errs = validateProviderEntry(entry);
   if (errs.length) throw new Error(errs[0]);
   const { config, providers } = parseProvidersFile(fileText);
-  const next: Record<string, unknown> = { ...config };
+  const next = withoutLegacyProviders(config);
   if (!next.$schema) next.$schema = 'https://app.kilo.ai/config.json';
-  next.providers = { ...providers, [entry.id.trim()]: providerToLiveConfig(entry) };
+  next.provider = { ...providers, [entry.id.trim()]: providerToLiveConfig(entry) };
   return JSON.stringify(next, null, 2) + '\n';
 }
 
 /** Remove one provider (no-op when absent). Throws on unparseable input. Pure. */
 export function removeProviderEntry(fileText: string, id: string): string {
   const { config, providers } = parseProvidersFile(fileText);
-  const next: Record<string, unknown> = { ...config };
+  const next = withoutLegacyProviders(config);
   const rest = { ...providers };
   delete rest[String(id ?? '').trim()];
-  next.providers = rest;
+  next.provider = rest;
+  return JSON.stringify(next, null, 2) + '\n';
+}
+
+/** One-time repair for files written by pre-fix builds (entries under the
+ *  rejected `providers` key never load). Returns the rewritten text, or null
+ *  when there is nothing to migrate. Throws on unparseable input. Pure. */
+export function migrateLegacyProviders(fileText: string): string | null {
+  if (!String(fileText ?? '').trim()) return null;
+  const { config, providers } = parseProvidersFile(fileText);
+  if (!('providers' in config)) return null;
+  const next = withoutLegacyProviders(config);
+  next.provider = providers;
   return JSON.stringify(next, null, 2) + '\n';
 }
 

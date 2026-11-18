@@ -45,6 +45,10 @@ function monacoTheme(): { background: string; cursor: string } {
 }
 
 describe('tab strip', () => {
+  it('marks preview tabs with italic names until they are pinned', () => {
+    expect(decl('.tab.is-transient .tab-name', 'font-style')).toEqual(['italic']);
+  });
+
   it('never paints a scrollbar in the strip (the stray right-edge bar)', () => {
     expect(decl('.tabs', 'overflow-y')).toContain('hidden');
     expect(decl('.tabs', 'overflow-x')).toContain('auto');

@@ -37,7 +37,7 @@ import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTa
 revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds,
 parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup,
 openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab,
-showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText, setFileOpenedHandler, resetGitGutter, toggleGitDiff } from './ui/editor';
+showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText, setFileOpenedHandler, resetGitGutter, toggleGitDiff, pinTab, toggleWordWrap } from './ui/editor';
 import { initChat, filePartView, stepHistory, pushComposerHist, changeFp, isReviewed, markReviewed, loadReviewedState, scheduleReviewedPersist, openLightbox, closeLightbox } from './ui/chat';
 import { initPalette } from './ui/palette';
 import { initPomodoro, pomoDotsFilled } from './ui/pomodoro';
@@ -710,8 +710,12 @@ async function boot() {
       const isDiff = !!t.diff;
       const isDirty = !!t.dirty;
       const b = el('button', {
-        class: `tab${t.path === (group === 2 ? editorStore.get().active2 : editorStore.get().active) ? ' active' : ''}${isDiff ? ' is-diff' : ''}${isDirty ? ' is-dirty' : ''}`,
-        title: isBolt ? `Bolt request — ${name}` : isDiff ? `${file} — session changes (read-only review)` : t.path,
+        class: `tab${t.path === (group === 2 ? editorStore.get().active2 : editorStore.get().active) ? ' active' : ''}${isDiff ? ' is-diff' : ''}${isDirty ? ' is-dirty' : ''}${t.transient ? ' is-transient' : ''}`,
+        title: isBolt
+          ? `Bolt request — ${name}`
+          : isDiff
+            ? `${file} — session changes (read-only review)`
+            : t.transient ? `${t.path} — preview (double-click to keep)` : t.path,
         'data-path': t.path,
       }) as HTMLButtonElement;
       if (isDiff) b.append(el('span', { class: 'diff-badge' }, 'changes'));
@@ -734,6 +738,8 @@ async function boot() {
       }
       if (t.dirty) b.append(el('span', { class: 'dirty-dot', title: 'Unsaved changes' }));
       b.onclick = () => activateTab(t.path, group);
+      // Double-clicking a preview tab keeps it (VSCode).
+      b.ondblclick = () => pinTab(t.path, group);
       b.onauxclick = (e) => {
         if (e.button === 1) void closeTab(t.path, group);
       };
@@ -824,7 +830,7 @@ async function boot() {
   paintTabs();
 
   const explorerHooks = {
-    onOpenFile: (p: string, opts?: { focus?: boolean }) => void openFile(p, opts),
+    onOpenFile: (p: string, opts?: { focus?: boolean; transient?: boolean }) => void openFile(p, opts),
     onOpenFolder: () => void openFolderFlow(),
     onCollapseSidebar: () => setSideRail(true),
     onPathRenamed: (from: string, to: string) => {
@@ -1606,6 +1612,10 @@ async function boot() {
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && !mod && !isTypingTarget()) {
       e.preventDefault();
       deleteFocusedEntry();
+    } else if (e.altKey && !mod && e.key.toLowerCase() === 'z' && !termFocus) {
+      // VSCode: Alt+Z toggles word wrap on the editors.
+      e.preventDefault();
+      toggleWordWrap();
     } else if (mod && e.key.toLowerCase() === 'b' && !termFocus) {
       e.preventDefault();
       toggleSideRail();

@@ -12,7 +12,7 @@ import { treeBadges } from '../lib/treeBadges';
 import { pruneFocus, isSelectedRow } from '../lib/treeFocus';
 
 export interface ExplorerHooks {
-  onOpenFile(path: string, opts?: { focus?: boolean }): void;
+  onOpenFile(path: string, opts?: { focus?: boolean; transient?: boolean }): void;
   onPathRenamed(oldPath: string, newPath: string): void;
   onPathRemoved(path: string): void;
   onOpenFolder(): void;
@@ -475,10 +475,11 @@ async function renderTree(host: HTMLElement, hooks: ExplorerHooks, path: string,
         // Only one row may look selected — drop the previous focus mark.
         live.querySelectorAll('.tree-label.focused').forEach((n) => n.classList.remove('focused'));
         label.classList.add('active');
-        // VSCode parity: single click selects + opens WITHOUT stealing
-        // focus, so Delete and other tree keys keep working. Double-click
-        // (or Enter) moves into the editor.
-        hooks.onOpenFile(e.path, { focus: false });
+        // VSCode parity: single click SELECTS + opens as a PREVIEW tab
+        // (the next single click replaces it) WITHOUT stealing focus, so
+        // Delete and other tree keys keep working. Double-click (or Enter)
+        // pins the tab and moves into the editor.
+        hooks.onOpenFile(e.path, { focus: false, transient: true });
       };
       label.ondblclick = () => {
         hooks.onOpenFile(e.path, { focus: true });

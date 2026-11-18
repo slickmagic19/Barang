@@ -6,6 +6,7 @@ import { barang } from '../lib/transport';
 import { agentStore, readSettings } from '../lib/agent';
 import { createStore, el, md } from '../lib/util';
 import { lineDiff } from '../lib/lineDiff';
+import { previewVictim } from '../lib/previewTabs';
 import { iconEl } from './icons';
 import { confirmDialog } from './dialog';
 
@@ -20,6 +21,7 @@ export interface Tab {
   diff?: { before: string; after: string }; // present on session-diff review tabs
   diffKind?: 'git' | 'session'; // diff provenance (git tabs get range-staging)
   preview?: boolean; // markdown preview (renders the file's live model)
+  transient?: boolean; // VSCode preview tab: replaced by the next single click
   image?: boolean; // image preview (no Monaco model at all)
   group: 1 | 2; // editor group (VSCode-style split)
 }
@@ -447,13 +449,35 @@ function wireMarkerFilter() {
   monaco.editor.onDidChangeMarkers(() => scheduleMarkerFilter());
 }
 /** Apply persisted editor prefs (font size, minimap, brackets, sticky) to both editors. */
+/** Runtime word-wrap override (Alt+Z). Null = follow the saved setting. */
+let wrapOverride: boolean | null = null;
+
+/** Toggle word wrap on both editors (VSCode Alt+Z). Returns the new state. */
+export function toggleWordWrap(): boolean {
+  if (!monaco) return false;
+  const current = editor?.getOption(monaco.editor.EditorOption.wordWrap);
+  const on = current === 'off';
+  wrapOverride = on;
+  const opts = { wordWrap: on ? 'on' as const : 'off' as const };
+  editor?.updateOptions(opts);
+  editor2?.updateOptions(opts);
+  return on;
+}
+
+/** Word wrap currently in effect (smoke/debug). */
+export function isWordWrapOn(): boolean {
+  if (!monaco || !editor) return false;
+  return editor.getOption(monaco.editor.EditorOption.wordWrap) !== 'off';
+}
+
 export function applyEditorPrefs() {
   const s = readSettings();
   appliedEditorFlags = { brackets: s.bracketColors, sticky: s.stickyScroll };
+  const wrap = wrapOverride ?? s.wordWrap;
   const opts = {
     fontSize: s.fontSize,
     minimap: { enabled: s.minimap },
-    wordWrap: s.wordWrap ? 'on' as const : 'off' as const,
+    wordWrap: wrap ? 'on' as const : 'off' as const,
     bracketPairColorization: { enabled: s.bracketColors },
     stickyScroll: { enabled: s.stickyScroll, maxLineCount: 5 },
   };
@@ -961,7 +985,10 @@ function wireCodeEditor(ed: import('monaco-editor').editor.IStandaloneCodeEditor
     if (!hit) return;
     editorStore.set((s) => ({
       ...s,
-      tabs: s.tabs.map((t) => (models.get(t.path) === model ? { ...t, dirty: true } : t)),
+      // An edit makes the file permanent — previews only hold untouched files.
+      tabs: s.tabs.map((t) => (models.get(t.path) === model
+        ? { ...t, dirty: true, transient: undefined }
+        : t)),
     }));
     schedulePreviewRefresh(model);
     scheduleGutter(ed);
@@ -1058,25 +1085,53 @@ function setGroupActive(group: EditorGroup, path: string | null) {
   emitFileOpened();
 }
 
-export async function openFile(path: string, opts?: { focus?: boolean; group?: EditorGroup; silent?: boolean }): Promise<void> {
+/** Pin a preview tab so the next preview no longer replaces it. */
+export function pinTab(path: string, group?: EditorGroup) {
+  editorStore.set((s) => ({
+    ...s,
+    tabs: s.tabs.map((t) => (
+      t.path === path && (group === undefined || (t.group || 1) === group) && t.transient
+        ? { ...t, transient: undefined }
+        : t
+    )),
+  }));
+  hooks?.onTabs();
+}
+
+export async function openFile(
+  path: string,
+  opts?: { focus?: boolean; group?: EditorGroup; silent?: boolean; transient?: boolean },
+): Promise<void> {
   if (!editor || !monaco) return;
   // Absolute paths route through the detached-tab flow (which folds
   // in-project ones back to workspace tabs).
   if (isAbsolutePath(path)) return openExternalFile(path, opts);
   const wantFocus = opts?.focus ?? true;
   const silent = opts?.silent ?? false;
+  const transient = !!opts?.transient;
   const group = opts?.group ?? focusedGroup();
   if (group === 2 && (!editorStore.get().split || !ensureSplitEditor())) {
     // Split unavailable — fall back to group 1 rather than stranding.
-    return openFile(path, { focus: wantFocus, group: 1 });
+    return openFile(path, { focus: wantFocus, group: 1, transient });
   }
   const ed = editorFor(group);
   if (!ed) return;
   let tab = editorStore.get().tabs.find((t) => t.path === path && (t.group || 1) === group);
   if (!tab) {
-    const fresh: Tab = { path, file: path, dirty: false, group };
+    // A preview replaces the group's previous preview rather than piling up.
+    if (transient) {
+      const victim = previewVictim(editorStore.get().tabs, group, path);
+      if (victim) {
+        const full = editorStore.get().tabs.find((t) => t.path === victim.path && (t.group || 1) === group);
+        if (full) dropTabs([full]);
+      }
+    }
+    const fresh: Tab = { path, file: path, dirty: false, group, transient: transient || undefined };
     editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
     tab = fresh;
+  } else if (!transient && tab.transient) {
+    // Opening it for real (double click, palette, link) pins the tab.
+    pinTab(path, group);
   }
   setGroupActive(group, path);
   let model = models.get(path);
@@ -1093,7 +1148,7 @@ export async function openFile(path: string, opts?: { focus?: boolean; group?: E
           }));
           let imgTab = editorStore.get().tabs.find((t) => t.path === path && (t.group || 1) === group && t.image);
           if (!imgTab) {
-            const fresh: Tab = { path, file: path, dirty: false, image: true, group };
+            const fresh: Tab = { path, file: path, dirty: false, image: true, group, transient: transient || undefined };
             editorStore.set((s) => ({ ...s, tabs: [...s.tabs, fresh] }));
             imgTab = fresh;
           }

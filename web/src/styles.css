@@ -551,6 +551,8 @@ button.status-git:hover { color: var(--text); }
   background: var(--tab-surface);
 }
 .tab .tab-name { overflow: hidden; text-overflow: ellipsis; }
+/* VSCode preview tab: italic until the user pins or edits it. */
+.tab.is-transient .tab-name { font-style: italic; }
 .tab .dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); flex: 0 0 auto; }
 .tab-x {
   display: inline-flex; align-items: center; justify-content: center;

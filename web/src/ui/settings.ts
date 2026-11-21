@@ -4,7 +4,7 @@
 // Layout (panel reset). Persisted to localStorage, applied immediately.
 import {
   agentStore, loadMeta, readSettings, writeSettings, isFreeKiloModel, pickDefaultModel,
-  setAgent, listSelectableModels, applyModelSelection,
+  setAgent, listSelectableModels, applyModelSelection, aggregateUsage,
 } from '../lib/agent';
 import {
   parseMcpFile, toServerList, buildFileText, validateServer, parseKvLines,
@@ -18,7 +18,7 @@ import {
 } from '../lib/providers';
 import { parseJsonc } from '../lib/util';
 import { confirmDialog } from './dialog';
-import { appState } from '../lib/api';
+import { appState, oc } from '../lib/api';
 import { barang } from '../lib/transport';
 import { el } from '../lib/util';
 import { iconEl } from './icons';
@@ -41,6 +41,9 @@ export function openSettings(hooks: SettingsHooks) {
   // Single instance: a second modal would duplicate section IDs and break
   // tab ranges (global lookups hit the first modal's labels).
   if (document.querySelector('.settings-overlay')) return;
+  // Re-fetch hooks fired when a section's page becomes visible (Usage refreshes
+  // live data each time it's opened, so a cold server / new sessions show).
+  const onShow = new Map<string, () => void>();
   const overlay = el('div', { class: 'settings-overlay' });
   const dialog = el('div', { class: 'settings-modal', role: 'dialog', 'aria-label': 'Settings' });
   const head = el('div', { class: 'settings-head' });
@@ -54,7 +57,7 @@ export function openSettings(hooks: SettingsHooks) {
 
   // Section registry (single source of truth for the nav rail). Every
   // section() call below must use one of these titles.
-  const SECTIONS = ['Model', 'Agent', 'MCP', 'Providers', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
+  const SECTIONS = ['Account', 'Usage', 'Model', 'Agent', 'MCP', 'Providers', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
   const secSlug = (t: string) => 'sec-' + t.toLowerCase();
   const section = (title: string) => body.append(el('p', { class: 'settings-label', id: secSlug(title) }, title));
   // Toggle switch row (VSCode-style). The real checkbox stays in the DOM
@@ -69,6 +72,437 @@ export function openSettings(hooks: SettingsHooks) {
     body.append(row);
     return box;
   };
+
+  // --- Account (KiloCode sign-in / sign-up / sign-out) ---
+  // KiloCode's free models are rate-limited to anonymous users (HTTP 429).
+  // Signing in lifts that limit. Two paths:
+  //   - Browser sign-in (OAuth device flow): we run `kilo auth login`, show the
+  //     device-auth URL + code, and the CLI stores the credential.
+  //   - API key: paste a key from the profile; Barang stores + injects it.
+  // Sign-out clears BOTH Barang's key and the CLI credential.
+  section('Account');
+  const acctBox = el('div', { class: 'account-box' });
+  body.append(acctBox);
+  body.append(el('p', { class: 'settings-note' },
+    'Sign in to KiloCode to raise the anonymous rate limit (the 429 errors) and unlock your models. ' +
+    'Use browser sign-in, paste a Kilo API key, or create an account.'));
+
+  interface AcctStatus {
+    loggedIn: boolean;
+    name: string;
+    email: string;
+    team: string;
+    balance: number | null;
+    source?: string;
+    hasKey?: boolean;
+  }
+  const acctState: {
+    status: AcctStatus | null; loading: boolean; error: string; busy: boolean;
+    device: { url: string; code: string; token: string } | null;
+    showKey: boolean;
+  } = {
+    status: null, loading: true, error: '', busy: false, device: null, showKey: false,
+  };
+
+  const acctPaint = () => {
+    acctBox.innerHTML = '';
+    if (acctState.loading) {
+      acctBox.append(el('div', { class: 'scm-none' }, 'Checking sign-in…'));
+      return;
+    }
+    if (acctState.error) {
+      acctBox.append(el('div', { class: 'chat-err' }, acctState.error));
+    }
+    const s = acctState.status;
+    if (s?.loggedIn) {
+      // Signed-in card: avatar + identity + a Sign out button.
+      const card = el('div', { class: 'account-card' });
+      const avatar = el('div', { class: 'account-avatar' }, (s.name || '?').slice(0, 1).toUpperCase());
+      const info = el('div', { class: 'account-info' });
+      info.append(el('div', { class: 'account-name' }, s.name || 'Signed in'));
+      if (s.email) info.append(el('div', { class: 'account-sub' }, s.email));
+      const meta: string[] = [];
+      if (s.team) meta.push(s.team);
+      if (typeof s.balance === 'number') meta.push(`Balance: $${s.balance.toFixed(2)}`);
+      meta.push(s.hasKey || s.source === 'barang-key' ? 'Signed in via API key' : 'Signed in via browser');
+      info.append(el('div', { class: 'account-sub' }, meta.join(' · ')));
+      card.append(avatar, info);
+      const btnOut = el('button', { class: 'btn btn-sm', title: 'Sign out' }, 'Sign out') as HTMLButtonElement;
+      btnOut.disabled = acctState.busy;
+      btnOut.onclick = () => { void acctLogout(); };
+      card.append(btnOut);
+      acctBox.append(card);
+      return;
+    }
+
+    // Signed out. If a device flow is in progress, show its prompt + cancel.
+    if (acctState.device) {
+      const d = acctState.device;
+      const panel = el('div', { class: 'account-device' });
+      panel.append(el('div', { class: 'account-device-title' }, 'Sign in to KiloCode'));
+      panel.append(el('div', { class: 'account-sub' },
+        'Open the link below, then enter this code to authorize Barang:'));
+      if (d.code) {
+        const codeRow = el('div', { class: 'account-code-row' });
+        codeRow.append(el('code', { class: 'account-code' }, d.code));
+        const copyBtn = el('button', { class: 'btn btn-sm', title: 'Copy code' }, 'Copy') as HTMLButtonElement;
+        copyBtn.onclick = () => { void barang().clip.write(d.code); hooks.toast('Code copied.', 'info'); };
+        codeRow.append(copyBtn);
+        panel.append(codeRow);
+      }
+      const openBtn = el('button', { class: 'btn btn-primary btn-sm', title: 'Open in browser' }, 'Open sign-in page') as HTMLButtonElement;
+      openBtn.onclick = () => { void barang().app.openExternal(d.url); };
+      panel.append(openBtn);
+      const cancelBtn = el('button', { class: 'btn btn-sm', title: 'Cancel' }, 'Cancel') as HTMLButtonElement;
+      cancelBtn.onclick = () => { acctCancelDevice(); };
+      panel.append(cancelBtn);
+      panel.append(el('div', { class: 'account-busy' }, 'Waiting for authorization in your browser…'));
+      acctBox.append(panel);
+      return;
+    }
+
+    // Signed-out form: primary "Sign in" (browser) + "Create account", plus an
+    // expandable API-key option for users who already have a key.
+    const form = el('div', { class: 'account-form' });
+    const primary = el('div', { class: 'account-primary' });
+    const btnBrowser = el('button', { class: 'btn btn-primary', title: 'Sign in with your browser' },
+      'Sign in') as HTMLButtonElement;
+    btnBrowser.disabled = acctState.busy;
+    btnBrowser.onclick = () => { void acctLoginBrowser(); };
+    const btnSignup = el('button', { class: 'btn', title: 'Create a KiloCode account' }, 'Create account') as HTMLButtonElement;
+    btnSignup.onclick = () => { void barang().auth.signup(); };
+    primary.append(btnBrowser, btnSignup);
+    form.append(primary);
+
+    // API-key fallback (collapsible).
+    const keyToggle = el('button', { class: 'link-btn', title: 'Use an API key instead' },
+      acctState.showKey ? 'Hide API key option' : 'Have an API key? Sign in with a key') as HTMLButtonElement;
+    keyToggle.onclick = () => { acctState.showKey = !acctState.showKey; acctPaint(); };
+    form.append(keyToggle);
+    if (acctState.showKey) {
+      const input = el('input', {
+        class: 'settings-text account-key-input', type: 'password', autocomplete: 'off',
+        spellcheck: 'false', placeholder: 'Paste your Kilo API key', 'aria-label': 'Kilo API key',
+      }) as HTMLInputElement;
+      const row = el('div', { class: 'account-row' });
+      const btnKey = el('button', { class: 'btn btn-primary btn-sm', title: 'Sign in with key' },
+        acctState.busy ? 'Signing in…' : 'Sign in with key') as HTMLButtonElement;
+      btnKey.disabled = acctState.busy;
+      btnKey.onclick = () => { void acctLoginKey(input.value); };
+      input.onkeydown = (e) => {
+        if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); void acctLoginKey(input.value); }
+      };
+      row.append(input, btnKey);
+      form.append(row);
+      const getKey = el('button', { class: 'link-btn', title: 'Open your profile' }, 'Get a key from your profile') as HTMLButtonElement;
+      getKey.onclick = () => { void barang().app.openExternal('https://app.kilo.ai/profile'); };
+      form.append(getKey);
+    }
+    if (acctState.busy) form.append(el('div', { class: 'account-busy' }, 'Contacting KiloCode…'));
+    acctBox.append(form);
+  };
+
+  const acctLoad = async () => {
+    acctState.loading = true;
+    acctState.error = '';
+    acctPaint();
+    try {
+      acctState.status = await barang().auth.status();
+    } catch (e) {
+      acctState.status = null;
+      acctState.error = `Could not check sign-in: ${(e as Error).message}`;
+    }
+    acctState.loading = false;
+    acctPaint();
+  };
+
+  // Browser (OAuth device) sign-in: run the flow, show the prompt, resolve on done.
+  let acctProgressUnsub: (() => void) | null = null;
+  const acctLoginBrowser = async () => {
+    acctState.busy = true;
+    acctState.error = '';
+    acctState.device = null;
+    acctPaint();
+    acctProgressUnsub?.();
+    acctProgressUnsub = barang().auth.onLoginProgress((ev) => {
+      if (ev.kind === 'prompt') {
+        acctState.device = { url: ev.url || '', code: ev.code || '', token: ev.token || '' };
+        acctPaint();
+      } else if (ev.kind === 'success') {
+        acctState.device = null;
+      } else if (ev.kind === 'error') {
+        acctState.error = ev.message || 'Sign-in failed.';
+        acctState.device = null;
+        acctPaint();
+      }
+    });
+    try {
+      const res = await barang().auth.login({ timeoutMs: 180000 });
+      acctProgressUnsub?.();
+      acctProgressUnsub = null;
+      acctState.device = null;
+      if (res.loggedIn) {
+        hooks.toast('Signed in to KiloCode.', 'info');
+      } else if (res.cancelled) {
+        acctState.error = '';
+      } else if (res.error && res.error !== 'timeout') {
+        acctState.error = res.error;
+      } else if (res.error === 'timeout') {
+        acctState.error = 'Sign-in timed out. Try again.';
+      }
+      await acctLoad();
+      void loadMeta().then(() => { paintModels(); }).catch(() => {});
+    } catch (e) {
+      acctProgressUnsub?.();
+      acctProgressUnsub = null;
+      acctState.device = null;
+      acctState.error = (e as Error).message;
+    }
+    acctState.busy = false;
+    acctPaint();
+  };
+
+  // Cancel an in-flight device flow: clearing state + reloading status is enough
+  // (the main process kills the CLI on resolve/timeout; status is unchanged).
+  const acctCancelDevice = () => {
+    acctProgressUnsub?.();
+    acctProgressUnsub = null;
+    acctState.device = null;
+    acctState.busy = false;
+    acctState.error = '';
+    acctPaint();
+  };
+
+  // API-key sign-in.
+  const acctLoginKey = async (rawKey: string) => {
+    const key = String(rawKey || '').trim();
+    if (!key) { acctState.error = 'Paste your Kilo API key first.'; acctPaint(); return; }
+    acctState.busy = true;
+    acctState.error = '';
+    acctPaint();
+    try {
+      await barang().auth.loginKey(key);
+      hooks.toast('Signed in to KiloCode.', 'info');
+      await acctLoad();
+      void loadMeta().then(() => { paintModels(); }).catch(() => {});
+    } catch (e) {
+      acctState.error = (e as Error).message;
+    }
+    acctState.busy = false;
+    acctPaint();
+  };
+
+  const acctLogout = async () => {
+    acctState.busy = true;
+    acctState.error = '';
+    acctPaint();
+    try {
+      await barang().auth.logout();
+      hooks.toast('Signed out of KiloCode.', 'info');
+      await acctLoad();
+    } catch (e) {
+      acctState.error = (e as Error).message;
+    }
+    acctState.busy = false;
+    acctPaint();
+  };
+  acctPaint();
+  void acctLoad();
+
+  // --- Usage (account balance + aggregate session usage) ---
+  // Two data sources: the signed-in account balance (auth:status / profile) and
+  // the local session ledger (all sessions' cost + tokens, aggregated). Sessions
+  // are fetched unscoped so usage spans every project, not just the open one.
+  // Balance resolves fast and paints first; the usage ledger streams in after.
+  section('Usage');
+  const usagePanel = el('div', { class: 'usage-box' });
+  body.append(usagePanel);
+
+  const fmtNum = (n: number) => (Number.isFinite(n) ? Math.floor(n) : 0).toLocaleString('en-US');
+  const fmtCost = (n: number) => `$${Math.max(0, Number.isFinite(n) ? n : 0).toFixed(2)}`;
+  const fmtCompact = (n: number) => {
+    const v = Math.max(0, Math.floor(Number(n) || 0));
+    if (v < 1000) return String(v);
+    if (v < 1_000_000) return `${(v / 1000).toFixed(v < 10_000 ? 1 : 0)}K`;
+    if (v < 1_000_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    return `${(v / 1_000_000_000).toFixed(1)}B`;
+  };
+
+  const usageState: {
+    balanceLoading: boolean;
+    usageLoading: boolean;
+    error: string;
+    balance: number | null;
+    signedIn: boolean;
+    totals: ReturnType<typeof aggregateUsage> | null;
+  } = { balanceLoading: true, usageLoading: true, error: '', balance: null, signedIn: false, totals: null };
+
+  const usagePaint = () => {
+    usagePanel.innerHTML = '';
+
+    // --- Hero: balance card (paints as soon as auth resolves) ---
+    const hero = el('div', { class: 'usage-hero' });
+    const balCard = el('div', { class: 'usage-balance' });
+    balCard.append(el('div', { class: 'usage-balance-label' }, 'KiloCode balance'));
+    if (usageState.balanceLoading) {
+      balCard.append(el('div', { class: 'usage-skeleton-lg' }));
+    } else if (usageState.signedIn) {
+      balCard.append(el('div', { class: 'usage-balance-value' },
+        usageState.balance === null ? '—' : fmtCost(usageState.balance)));
+    } else {
+      const signIn = el('div', { class: 'usage-balance-empty' });
+      signIn.append(el('span', {}, 'Not signed in'));
+      const link = el('button', { class: 'link-btn', title: 'Open Account settings' }, 'Sign in') as HTMLButtonElement;
+      link.onclick = () => { showPage('Account'); };
+      signIn.append(link);
+      balCard.append(signIn);
+    }
+    hero.append(balCard);
+
+    // Summary chip row (totals at a glance) — skeletons while loading.
+    const chips = el('div', { class: 'usage-chips' });
+    const chip = (label: string, value: string) => {
+      const c = el('div', { class: 'usage-chip' });
+      c.append(el('div', { class: 'usage-chip-value' }, value));
+      c.append(el('div', { class: 'usage-chip-label' }, label));
+      return c;
+    };
+    const skelChip = (label: string) => {
+      const c = el('div', { class: 'usage-chip' });
+      c.append(el('div', { class: 'usage-skeleton' }));
+      c.append(el('div', { class: 'usage-chip-label' }, label));
+      return c;
+    };
+    const t = usageState.totals;
+    if (usageState.usageLoading && !t) {
+      chips.append(skelChip('Total cost'), skelChip('Sessions'), skelChip('Tokens'));
+    } else if (t && t.sessions) {
+      chips.append(
+        chip(fmtCost(t.cost), 'Total cost'),
+        chip(fmtNum(t.sessions), 'Sessions'),
+        chip(fmtCompact(t.tokens), 'Tokens'),
+      );
+    }
+    if (chips.childElementCount) hero.append(chips);
+    usagePanel.append(hero);
+
+    if (usageState.error) {
+      usagePanel.append(el('div', { class: 'chat-err' }, usageState.error));
+    }
+
+    // --- Detailed breakdown ---
+    if (usageState.usageLoading && !t) {
+      // Skeleton rows so the panel never looks empty while the ledger loads.
+      const skel = el('div', { class: 'usage-skeleton-list' });
+      for (let i = 0; i < 3; i++) skel.append(el('div', { class: 'usage-skeleton-row' }));
+      usagePanel.append(skel);
+    } else if (t && t.sessions) {
+      // Token detail grid.
+      const grid = el('div', { class: 'usage-grid' });
+      const cell = (label: string, value: string) => {
+        const c = el('div', { class: 'usage-cell' });
+        c.append(el('div', { class: 'usage-cell-value' }, value));
+        c.append(el('div', { class: 'usage-cell-label' }, label));
+        return c;
+      };
+      grid.append(
+        cell(fmtCompact(t.input), 'Input tokens'),
+        cell(fmtCompact(t.output), 'Output tokens'),
+        cell(fmtCompact(t.reasoning), 'Reasoning'),
+        cell(fmtCompact(t.cacheRead), 'Cache read'),
+        cell(fmtCompact(t.cacheWrite), 'Cache write'),
+        cell(fmtNum(t.sessions), 'Sessions'),
+      );
+      usagePanel.append(grid);
+
+      // Per-model breakdown with proportional bars.
+      if (t.byModel.length) {
+        const group = el('div', { class: 'usage-group' });
+        const head = el('div', { class: 'usage-group-head' });
+        head.append(el('span', { class: 'usage-group-title' }, 'By model'));
+        head.append(el('span', { class: 'usage-group-hint' }, `${t.byModel.length} model${t.byModel.length === 1 ? '' : 's'}`));
+        group.append(head);
+        const maxCost = Math.max(0.0001, ...t.byModel.map((m) => m.cost));
+        for (const m of t.byModel.slice(0, 12)) {
+          const row = el('div', { class: 'usage-model-row' });
+          const top = el('div', { class: 'usage-model-top' });
+          top.append(el('span', { class: 'usage-model-name', title: m.model }, m.model));
+          top.append(el('span', { class: 'usage-model-cost' }, fmtCost(m.cost)));
+          row.append(top);
+          const bar = el('div', { class: 'usage-bar' });
+          const fill = el('div', { class: 'usage-bar-fill' });
+          // Cost bar when there's a cost; otherwise scale by tokens.
+          const frac = m.cost > 0 ? (m.cost / maxCost) : (m.tokens / Math.max(1, t.tokens));
+          fill.style.width = `${Math.max(3, Math.round(Math.min(1, frac) * 100))}%`;
+          if (m.cost <= 0) fill.classList.add('is-free');
+          bar.append(fill);
+          row.append(bar);
+          const meta = el('div', { class: 'usage-model-meta' },
+            `${m.sessions} session${m.sessions === 1 ? '' : 's'} · ${fmtCompact(m.tokens)} tokens`);
+          row.append(meta);
+          group.append(row);
+        }
+        usagePanel.append(group);
+      }
+    } else {
+      // Signed in but no sessions yet.
+      usagePanel.append(el('div', { class: 'usage-empty' },
+        'No sessions yet — usage appears here as you work.'));
+    }
+
+    // --- Footer note + actions (always present) ---
+    const foot = el('div', { class: 'usage-foot' });
+    foot.append(el('p', { class: 'settings-note' },
+      'Totals span all sessions on this machine. Free models report $0.00; paid usage is billed to your KiloCode balance.'));
+    const actions = el('div', { class: 'usage-actions' });
+    const refresh = el('button', { class: 'btn btn-sm', title: 'Refresh usage' }, 'Refresh') as HTMLButtonElement;
+    refresh.disabled = usageState.usageLoading;
+    refresh.onclick = () => { void usageLoad(); };
+    const dash = el('button', { class: 'btn btn-sm', title: 'Open Kilo dashboard' }, 'Open dashboard') as HTMLButtonElement;
+    dash.onclick = () => { void barang().app.openExternal('https://app.kilo.ai'); };
+    actions.append(refresh, dash);
+    foot.append(actions);
+    usagePanel.append(foot);
+  };
+
+  const usageLoad = async () => {
+    // Reset to loading, paint skeletons, then resolve each source independently
+    // so the balance appears immediately instead of waiting on the slow ledger.
+    usageState.balanceLoading = true;
+    usageState.usageLoading = true;
+    usageState.error = '';
+    usagePaint();
+
+    // Balance (fast — paints as soon as auth resolves).
+    void (async () => {
+      try {
+        const st = await barang().auth.status();
+        usageState.signedIn = !!st?.loggedIn;
+        usageState.balance = typeof st?.balance === 'number' ? st.balance : null;
+      } catch {
+        usageState.signedIn = false;
+        usageState.balance = null;
+      }
+      usageState.balanceLoading = false;
+      usagePaint();
+    })();
+
+    // Usage ledger (slower on a cold server — streams in after).
+    try {
+      const list = await oc.get<SessionInfo[] | { value?: SessionInfo[] }>('/session', { timeoutMs: 12000 }).catch(() => []);
+      const all = Array.isArray(list) ? list : (list.value ?? []);
+      usageState.totals = aggregateUsage(all);
+    } catch (e) {
+      usageState.totals = null;
+      usageState.error = `Could not load usage: ${(e as Error).message}`;
+    }
+    usageState.usageLoading = false;
+    usagePaint();
+  };
+  usagePaint();
+  // Refresh usage each time the Usage page is opened (cold server / new sessions).
+  // (Not loaded eagerly — the agent server may still be booting at modal build.)
+  onShow.set('Usage', () => { void usageLoad(); });
 
   // --- Model ---
   section('Model');
@@ -719,6 +1153,8 @@ export function openSettings(hooks: SettingsHooks) {
     }
     body.scrollTop = 0;
     setActiveNav(t);
+    // Fire the section's on-show hook (e.g. Usage re-fetches live data).
+    onShow.get(t)?.();
   };
   const groupPages = () => {
     // Snapshot first: moving nodes while iterating a live list corrupts it.
@@ -820,10 +1256,14 @@ export function openSettings(hooks: SettingsHooks) {
 
   const paint = () => {
     // Normalize: a paid model can never be active with freeOnly on
-    // (e.g. provider list changed since it was picked).
+    // (e.g. provider list changed since it was picked). Look the active model
+    // up in the (enriched) list so the authoritative isFree flag is used.
     const s0 = agentStore.get();
     const st0 = readSettings();
-    if (st0.freeOnly && s0.model && !isFreeKiloModel(s0.model)) {
+    const activeEntry = s0.model
+      ? s0.providerModels.find((m) => m.providerID === s0.model!.providerID && m.modelID === s0.model!.modelID)
+      : undefined;
+    if (st0.freeOnly && s0.model && !isFreeKiloModel(activeEntry ?? s0.model)) {
       const d = pickDefaultModel(s0.providerModels.filter((m) => isFreeKiloModel(m)));
       st0.model = d;
       writeSettings(st0);
@@ -871,10 +1311,13 @@ export function openSettings(hooks: SettingsHooks) {
     commit((settings) => {
       settings.freeOnly = freeBox.checked;
       // Enabling the filter with a paid model active would leave the UI and
-      // the agent disagreeing — switch to the free default instead.
-      const cur = agentStore.get().model;
-      if (settings.freeOnly && cur && !isFreeKiloModel(cur)) {
-        const d = pickDefaultModel(agentStore.get().providerModels.filter((m) => isFreeKiloModel(m)));
+      // the agent disagreeing — switch to the free default instead. Use the
+      // enriched entry (authoritative isFree) when available.
+      const s0 = agentStore.get();
+      const cur = s0.model;
+      const curEntry = cur ? s0.providerModels.find((m) => m.providerID === cur.providerID && m.modelID === cur.modelID) : undefined;
+      if (settings.freeOnly && cur && !isFreeKiloModel(curEntry ?? cur)) {
+        const d = pickDefaultModel(s0.providerModels.filter((m) => isFreeKiloModel(m)));
         settings.model = d;
         agentStore.set({ model: d });
         hooks.toast(d ? `Switched to ${d.providerID}/${d.modelID} (free Kilo Code models only).` : 'Switched to Auto (free Kilo Code models only).', 'info');

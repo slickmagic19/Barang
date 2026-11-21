@@ -110,6 +110,23 @@ const barang = {
     send: (req) => invoke('api:send', req),
     cancel: (reqId) => invoke('api:cancel', { reqId }),
   },
+  /** KiloCode account: status / sign-in (browser or API key) / sign-up / sign-out. */
+  auth: {
+    status: () => invoke('auth:status'),
+    /** Begin the OAuth device flow. Resolves { loggedIn, source }. */
+    login: () => invoke('auth:login-start'),
+    /** Device-flow progress { kind, url?, code?, token?, message? }. */
+    onLoginProgress: (cb) => {
+      const h = (_ev, payload) => cb(payload ?? {});
+      ipcRenderer.on('auth:login-progress', h);
+      return () => ipcRenderer.removeListener('auth:login-progress', h);
+    },
+    /** Sign in with a pasted Kilo API key. */
+    loginKey: (key) => invoke('auth:login-key', { key }),
+    /** Open the Kilo sign-up page in the browser. */
+    signup: () => invoke('auth:signup'),
+    logout: () => invoke('auth:logout'),
+  },
   app: {
     state: () => ipcRenderer.invoke('app:state'),
     openFolder: () => invoke('app:open-folder'),

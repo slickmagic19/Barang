@@ -3,6 +3,7 @@
 // no auth in the UI: model credentials stay inside the user's opencode CLI.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from 'electron';
 import path from 'node:path';
+import os from 'node:os';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { watch as fsWatch } from 'node:fs';
@@ -16,6 +17,8 @@ import { startRelay, abortRelay, shutdownRelays } from './relay.js';
 import * as term from './terminal.js';
 import * as scm from './git.js';
 import * as api from './api.js';
+import * as auth from './auth.js';
+import { findKilo, isDirectBinary } from './kilo.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // electron/main
 const APP_DIR = path.resolve(here, '..', '..');
@@ -183,13 +186,23 @@ async function ensureManagedMcp() {
 
 /** Extra env for the kilo server: point it at our managed MCP file unless
  *  the user already overrides config discovery themselves. Kilo Code reads
- *  KILO_CONFIG (its OpenCode-fork rename of OPENCODE_CONFIG). */
+ *  KILO_CONFIG (its OpenCode-fork rename of OPENCODE_CONFIG).
+ *  Also injects the stored Kilo Gateway API key (KILO_API_KEY) so signed-in
+ *  users are not rate-limited to anonymous free-model quotas (the 429s). */
 async function mcpEnv() {
-  if (process.env.KILO_CONFIG || process.env.OPENCODE_CONFIG) return {};
+  const env = {};
+  if (!process.env.KILO_CONFIG && !process.env.OPENCODE_CONFIG) {
+    try {
+      env.KILO_CONFIG = await ensureManagedMcp();
+    } catch {
+      /* non-fatal */
+    }
+  }
   try {
-    return { KILO_CONFIG: await ensureManagedMcp() };
+    const key = await auth.readStoredKey(app.getPath('userData'));
+    return auth.authEnv(key, env);
   } catch {
-    return {};
+    return env;
   }
 }
 
@@ -734,6 +747,154 @@ function registerIpc() {
     restore: restoreProject,
     opencode: kiloState(),
     versions: { app: app.getVersion(), electron: process.versions.electron },
+  }));
+
+  // --- KiloCode account (sign-in / sign-up / sign-out) -------------------
+  // The Kilo provider (Kilo Gateway) authenticates two ways:
+  //   1. OAuth device flow — `kilo auth login --provider kilo` prints a
+  //      device-auth URL + code, then blocks until the user authorizes in the
+  //      browser (writes the CLI's own auth.json).
+  //   2. A pasted API key — Barang stores it and injects KILO_API_KEY into the
+  //      agent server (see mcpEnv).
+  // Sign-out must clear BOTH (Barang's key AND the CLI credential) or the next
+  // status check still reports signed in.
+  const scratchDir = () => root || path.join(app.getPath('userData'), 'scratch');
+
+  ipcMain.handle('auth:status', ok(async () => {
+    // A stored Barang key (or an explicit env key) is authoritative.
+    const envKey = process.env.KILO_API_KEY || process.env.KILOCODE_API_KEY;
+    const storedKey = await auth.readStoredKey(app.getPath('userData'));
+    if (storedKey || envKey) {
+      return { ...auth.publicStatus({ loggedIn: true, name: '', email: '' }), source: 'barang-key', hasKey: true };
+    }
+    // Otherwise fall back to the user's kilo CLI credential (auth.json).
+    const found = await findKilo().catch(() => null);
+    if (!found) return auth.publicStatus(null);
+    const { execFile } = await import('node:child_process');
+    const prof = await new Promise((resolve) => {
+      execFile(found.command, ['profile', '--json'], { shell: !isDirectBinary(found.command), timeout: 15000 }, (err, stdout) => {
+        resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout: String(stdout || '') });
+      });
+    });
+    return { ...auth.publicStatus(auth.parseAuthStatus(prof.stdout, prof.code)), source: 'kilo-cli', hasKey: false };
+  }));
+
+  // Begin the OAuth device flow: spawn `kilo auth login`, stream the device-auth
+  // prompt to the renderer, then poll until the CLI credential appears (success)
+  // or the process exits without one (failure/cancel). Resolves on completion.
+  ipcMain.handle('auth:login-start', ok(async (_ev, p = {}) => {
+    const found = await findKilo();
+    const { spawn } = await import('node:child_process');
+    const send = (payload) => {
+      try { _ev.sender.send('auth:login-progress', payload); } catch { /* closed */ }
+    };
+    const child = spawn(found.command, ['auth', 'login', '--provider', 'kilo'], {
+      shell: !isDirectBinary(found.command),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let buf = '';
+    let url = '';
+    let code = '';
+    let token = '';
+    let settled = false;
+    const onData = (d) => {
+      buf += d.toString();
+      const parsed = auth.parseDeviceAuth(buf);
+      if (parsed.url && parsed.url !== url) { url = parsed.url; send({ kind: 'prompt', url: parsed.url, code: parsed.code, token: parsed.token }); }
+      else if (parsed.code && parsed.code !== code) { code = parsed.code; send({ kind: 'prompt', url, code, token: parsed.token }); }
+      else if (parsed.token && parsed.token !== token) { token = parsed.token; send({ kind: 'prompt', url, code, token }); }
+    };
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
+
+    // Promise resolved exactly once when the flow completes (success, timeout,
+    // cancel, or error). Declared before the poll so its closure is safe.
+    let finish = (_v) => {};
+    const done = new Promise((resolve) => { finish = resolve; });
+
+    // Resolve as soon as a real credential lands in the CLI's auth.json.
+    const authJsonPath = path.join(os.homedir(), '.local', 'share', 'kilo', 'auth.json');
+    let timer = null;
+    const poll = setInterval(() => {
+      void fs.readFile(authJsonPath, 'utf8').then(async (raw) => {
+        if (!settled && auth.hasStoredCredential(raw)) {
+          settled = true;
+          clearInterval(poll);
+          if (timer) clearTimeout(timer);
+          try { child.kill(); } catch { /* noop */ }
+          send({ kind: 'success' });
+          finish({ loggedIn: true, source: 'kilo-cli' });
+          void restartServer(scratchDir(), { onLog: (l) => console.log(l.trimEnd()), extraEnv: await mcpEnv().catch(() => ({})) }).catch(() => {});
+        }
+      }).catch(() => {});
+    }, 1200);
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      try { child.kill(); } catch { /* noop */ }
+      send({ kind: 'error', message: 'Timed out waiting for authorization.' });
+      finish({ loggedIn: false, error: 'timeout' });
+    }, Number(p.timeoutMs) > 0 ? Number(p.timeoutMs) : 180000);
+
+    child.on('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      clearTimeout(timer);
+      // Exit 0 with no credential captured = user cancelled / already authed.
+      send({ kind: code === 0 ? 'closed' : 'error', message: code === 0 ? '' : `kilo auth login exited (${code}).` });
+      finish({ loggedIn: false, cancelled: code === 0 });
+    });
+    child.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      clearTimeout(timer);
+      send({ kind: 'error', message: e.message });
+      finish({ loggedIn: false, error: e.message });
+    });
+
+    return done;
+  }));
+
+  // Sign in with a pasted Kilo API key (Barang stores + injects KILO_API_KEY).
+  ipcMain.handle('auth:login-key', ok(async (p = {}) => {
+    const key = auth.normalizeKey(p.key);
+    if (!auth.isKeyLike(key)) {
+      throw new Error('That does not look like a Kilo API key. Copy the full key from app.kilo.ai (Profile → API key).');
+    }
+    await auth.writeStoredKey(app.getPath('userData'), key);
+    await restartServer(scratchDir(), {
+      onLog: (line) => console.log(line.trimEnd()),
+      extraEnv: await mcpEnv(),
+    }).catch(() => {});
+    return { loggedIn: true, source: 'barang-key' };
+  }));
+
+  // Sign out: clear Barang's key AND the CLI's Kilo credential, so status flips.
+  ipcMain.handle('auth:logout', ok(async () => {
+    await auth.clearStoredKey(app.getPath('userData'));
+    const found = await findKilo().catch(() => null);
+    if (found) {
+      const { execFile } = await import('node:child_process');
+      await new Promise((resolve) => {
+        execFile(found.command, ['auth', 'logout', 'kilo'], { shell: !isDirectBinary(found.command), timeout: 15000 }, () => resolve());
+      });
+    }
+    await restartServer(scratchDir(), {
+      onLog: (line) => console.log(line.trimEnd()),
+      extraEnv: await mcpEnv(),
+    }).catch(() => {});
+    return { loggedIn: false };
+  }));
+
+  // Sign up: open the Kilo account page in the user's browser.
+  ipcMain.handle('auth:signup', ok(async () => {
+    await shell.openExternal(auth.ACCOUNT_LINKS.signUp);
+    return { opened: true };
   }));
   ipcMain.handle('app:open-folder', async () => {
     const res = await handleOpenFolder();

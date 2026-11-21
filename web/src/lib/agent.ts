@@ -18,6 +18,10 @@ export interface AgentInfo {
 export interface ProviderModel {
   id: string;
   name?: string;
+  /** Kilo reports this authoritatively (true = no per-token charge). */
+  isFree?: boolean;
+  /** Per-token USD cost (free models report 0/0). */
+  cost?: { input?: number; output?: number };
 }
 export interface ProviderInfo {
   id: string;
@@ -205,7 +209,7 @@ interface AgentState {
   messages: ChatMessage[];
   todos: AgentTodo[];
   agents: AgentInfo[];
-  providerModels: Array<{ providerID: string; modelID: string; label: string; limit?: number; variants?: string[] }>;
+  providerModels: Array<{ providerID: string; modelID: string; label: string; limit?: number; variants?: string[]; isFree?: boolean }>;
   model: { providerID: string; modelID: string } | null;
   agent: string;
   busy: boolean;
@@ -890,20 +894,26 @@ export function modelListKey(models: Array<{ label: string }>): string {
   return (models ?? []).map((m) => String(m?.label ?? '')).join('\n');
 }
 
-/** Heuristic free-tier detection (Kilo exposes no pricing flags).
- *  Matches :free / -free / "free" tokens, Kilo's `kilo-auto/free` router,
- *  and other documented no-cost families — verified live through the kilo
- *  serve + run paths while anonymous. */
+/** Heuristic free-tier detection from the model ID alone. Kilo reports an
+ *  authoritative `isFree` flag per model (see isFreeKiloModel / loadMeta); this
+ *  ID-only path is the fallback for callers that lack the flag. It trusts only
+ *  an explicit `:free` suffix and Kilo's `kilo-auto/free` router — never family
+ *  substrings, which misclassify paid variants (e.g. nvidia/nemotron-3.5-super-vl
+ *  without `:free`, or meta/muse-* which Kilo marks isFree:false). */
 export function isFreeModel(providerID: string, modelID: string): boolean {
-  return /free|kilo-auto\/free|nemotron|muse-spark|gemini-flash-lite|gemma-/i.test(`${providerID}/${modelID}`);
+  if (modelID === 'kilo-auto/free') return true; // Kilo's free router
+  return /:free$/i.test(modelID); // explicit free variant (…:free)
 }
 
 /** Default model chain: Kilo Code's `kilo-auto/free` router first (free,
  *  no credits, no config), then any free model from the `kilo` provider,
  *  then any other free model, else auto (null). Only free models are ever
- *  auto-picked — paid models need an explicit pick. */
-export function pickDefaultModel(models: Array<{ providerID: string; modelID: string }>): { providerID: string; modelID: string } | null {
-  const free = (models ?? []).filter((m) => isFreeModel(m.providerID, m.modelID));
+ *  auto-picked — paid models need an explicit pick. Prefers the authoritative
+ *  `isFree` flag when present. */
+export function pickDefaultModel(models: Array<{ providerID: string; modelID: string; isFree?: boolean }>): { providerID: string; modelID: string } | null {
+  const isFree = (m: { providerID: string; modelID: string; isFree?: boolean }) =>
+    m.providerID === 'kilo' && (typeof m.isFree === 'boolean' ? m.isFree : isFreeModel(m.providerID, m.modelID));
+  const free = (models ?? []).filter((m) => isFree(m));
   if (!free.length) return null;
   const autoFree = free.find((m) => m.providerID === 'kilo' && m.modelID === 'kilo-auto/free');
   const pick = autoFree ?? free.find((m) => m.providerID === 'kilo') ?? free[0];
@@ -933,15 +943,24 @@ export async function loadMeta() {
     const keys = (Array.isArray(v) ? v.map(String) : Object.keys(v)).filter(Boolean).slice(0, 12);
     return keys.length ? keys : undefined;
   };
+  // Kilo reports `isFree` authoritatively per model (true = no per-token
+  // charge). Fall back to the :free suffix only when the flag is absent.
+  const isFreeOf = (m: unknown, modelID: string): boolean | undefined => {
+    if (m && typeof m === 'object') {
+      const flag = (m as { isFree?: unknown }).isFree;
+      if (typeof flag === 'boolean') return flag;
+    }
+    return /:free$/i.test(modelID) ? true : undefined;
+  };
   for (const p of raw) {
     const models = p.models;
     if (Array.isArray(models)) {
       for (const m of models) {
         const id = typeof m === 'string' ? m : (m.id ?? '');
-        if (id) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m), variants: variantsOf(m) });
+        if (id) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m), variants: variantsOf(m), isFree: isFreeOf(typeof m === 'string' ? undefined : m, id) });
       }
     } else if (models && typeof models === 'object') {
-      for (const [id, m] of Object.entries(models)) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m), variants: variantsOf(m) });
+      for (const [id, m] of Object.entries(models)) providerModels.push({ providerID: p.id, modelID: id, label: `${p.id}/${id}`, limit: limitOf(m), variants: variantsOf(m), isFree: isFreeOf(m, id) });
     }
   }
   providerModels.sort((a, b) => a.label.localeCompare(b.label));
@@ -2366,11 +2385,16 @@ export interface SelectableModel {
   label: string;
   limit?: number;
   variants?: string[];
+  isFree?: boolean;
 }
 
-/** Free models of Kilo Code only — the "Free models only" filter. */
-export function isFreeKiloModel(m: { providerID: string; modelID: string }): boolean {
-  return m.providerID === 'kilo' && isFreeModel(m.providerID, m.modelID);
+/** Free models of Kilo Code only — the "Free models only" filter.
+ *  Prefers Kilo's authoritative `isFree` flag (per-model metadata); falls back
+ *  to the explicit `:free` suffix only when the flag is absent. */
+export function isFreeKiloModel(m: { providerID: string; modelID: string; isFree?: boolean }): boolean {
+  if (m.providerID !== 'kilo') return false;
+  if (typeof m.isFree === 'boolean') return m.isFree;
+  return /:free$/i.test(m.modelID) || m.modelID === 'kilo-auto/free';
 }
 
 /** Model list honoring the free-only setting (shared by Settings + composer).
@@ -2398,4 +2422,58 @@ export function applyModelSelection(value: string) {
   settings.model = { providerID, modelID };
   writeSettings(settings);
   setModel(providerID, modelID);
+}
+
+// --- Usage aggregation (Settings > Usage) ---------------------------------
+export interface UsageTotals {
+  sessions: number; // sessions with any usage
+  cost: number; // total USD across sessions
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+  tokens: number; // input + output + reasoning
+  byModel: Array<{ model: string; cost: number; tokens: number; sessions: number }>;
+}
+
+/** Aggregate usage across a list of sessions (pure). Sessions with no
+ *  cost/tokens are skipped from the count. byModel is sorted by cost desc. */
+export function aggregateUsage(sessions: Array<Partial<SessionInfo> | null | undefined>): UsageTotals {
+  const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const totals: UsageTotals = {
+    sessions: 0, cost: 0, input: 0, output: 0, reasoning: 0,
+    cacheRead: 0, cacheWrite: 0, tokens: 0, byModel: [],
+  };
+  const models = new Map<string, { cost: number; tokens: number; sessions: number }>();
+  for (const s of sessions ?? []) {
+    if (!s) continue;
+    const t = (s.tokens ?? {}) as SessionTokens;
+    const input = num(t.input);
+    const output = num(t.output);
+    const reasoning = num(t.reasoning);
+    const cacheRead = num(t.cache?.read);
+    const cacheWrite = num(t.cache?.write);
+    const cost = num((s as { cost?: unknown }).cost);
+    const tokens = input + output + reasoning;
+    if (!tokens && !cost && !cacheRead && !cacheWrite) continue;
+    totals.sessions += 1;
+    totals.cost += cost;
+    totals.input += input;
+    totals.output += output;
+    totals.reasoning += reasoning;
+    totals.cacheRead += cacheRead;
+    totals.cacheWrite += cacheWrite;
+    totals.tokens += tokens;
+    const key = String((s.model as { id?: string } | undefined)?.id || 'unknown');
+    const m = models.get(key) ?? { cost: 0, tokens: 0, sessions: 0 };
+    m.cost += cost;
+    m.tokens += tokens;
+    m.sessions += 1;
+    models.set(key, m);
+  }
+  totals.byModel = [...models.entries()]
+    .map(([model, v]) => ({ model, cost: v.cost, tokens: v.tokens, sessions: v.sessions }))
+    .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
+  return totals;
 }

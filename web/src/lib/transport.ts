@@ -77,6 +77,18 @@ export interface BarangBridge {
     }) => void): () => void;
   };
   mcpConfig(action: 'read' | 'write', payload?: { scope?: 'managed' | 'project'; text?: string }): Promise<any>;
+  auth: {
+    status(): Promise<{ loggedIn: boolean; name: string; email: string; team: string; balance: number | null; source?: string; hasKey?: boolean }>;
+    /** Begin the OAuth device flow; resolves when authorized/failed. */
+    login(opts?: { timeoutMs?: number }): Promise<{ loggedIn: boolean; source?: string; cancelled?: boolean; error?: string }>;
+    /** Device-flow progress frames. Returns unsubscribe. */
+    onLoginProgress(cb: (ev: { kind: string; url?: string; code?: string; token?: string; message?: string }) => void): () => void;
+    /** Sign in with a pasted Kilo API key. */
+    loginKey(key: string): Promise<{ loggedIn: boolean; source?: string }>;
+    /** Open the Kilo sign-up page in the browser. */
+    signup(): Promise<{ opened: boolean }>;
+    logout(): Promise<{ loggedIn: boolean }>;
+  };
   api: {
     send(req: { reqId: string; method: string; url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<{
       ok: boolean; status: number; statusText: string; url: string; ms: number; size: number;

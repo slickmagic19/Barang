@@ -5,7 +5,7 @@
 import {
   agentStore, loadSessions, createSession, selectSession, deleteSession,
   sendMessage, abortActive, respondPermission, revertMessage, unrevertSession,
-  refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection,
+  refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection, loadMeta, isFreeModel,
   statusTextFor, messageErrorText, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, todoProgress, classifyAttachFile,
   relayActive, relayRouteFor, modelListKey, sessionDisplayTitle, stuckContinueText, relayEchoGuard, isTransientRelayEcho,
   loadCommands, parseSlashCommand, sendCommand,
@@ -726,16 +726,19 @@ export function loadReviewedState(): { reviewed: number; rejected: number } {
     const raw = localStorage.getItem(REVIEW_LS_KEY);
     if (!raw) return out;
     const data = JSON.parse(raw) as { reviewed?: Record<string, string>; rejected?: Record<string, number[]> };
+    // The caps limit what re-enters memory, never what counts as stored —
+    // a saturated profile must still report its persisted entries (smoke
+    // calls this after init already filled the maps).
     for (const [k, v] of Object.entries(data.reviewed ?? {})) {
-      if (typeof v === 'string' && reviewedFp.size < REVIEW_MAX_KEYS) {
-        reviewedFp.set(k, v);
-        out.reviewed++;
-      }
+      if (typeof v !== 'string') continue;
+      out.reviewed++;
+      if (reviewedFp.size < REVIEW_MAX_KEYS) reviewedFp.set(k, v);
     }
     for (const [k, v] of Object.entries(data.rejected ?? {})) {
-      if (Array.isArray(v) && rejectedHunks.size < REJECT_MAX_KEYS) {
+      if (!Array.isArray(v)) continue;
+      out.rejected++;
+      if (rejectedHunks.size < REJECT_MAX_KEYS) {
         rejectedHunks.set(k, new Set(v.filter((n) => Number.isInteger(n) && (n as number) >= 0).slice(0, 50)));
-        out.rejected++;
       }
     }
   } catch { /* corrupt — start fresh */ }
@@ -1336,17 +1339,15 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   input.rows = 2;
   const suggest = el('div', { class: 'suggest hidden' });
   const sendRow = el('div', { class: 'send-row' });
-  const btnAttach = el('button', { class: 'icon-btn attach-btn', title: 'Attach file or image (or paste / drop into the composer)' }) as HTMLButtonElement;
-  btnAttach.append(iconEl('clip', 15));
-  const modelMini = el('select', { class: 'model-mini', title: 'Model' }) as HTMLSelectElement;
-  const effortMini = el('select', { class: 'effort-mini', title: 'Reasoning effort' }) as HTMLSelectElement;
+  const agentBtn = el('button', { class: 'agent-btn', title: 'Agent' }) as HTMLButtonElement;
+  const modelBtn = el('button', { class: 'model-btn', title: 'Model' }) as HTMLButtonElement;
   const btnSend = el('button', { class: 'btn btn-primary btn-icon', title: 'Send (Enter)' }) as HTMLButtonElement;
   btnSend.append(iconEl('send', 14));
   // CLI Relay route badge: visible when this composer send would go through
   // the official CLI instead of serve (opencode models + relay setting on).
   const relayBadge = el('span', { class: 'relay-badge hidden', title: '' });
   relayBadge.append(iconEl('prompt', 12), el('span', {}, RELAY_DISPLAY_NAME));
-  sendRow.append(btnAttach, relayBadge, modelMini, effortMini, btnSend);
+  sendRow.append(agentBtn, relayBadge, modelBtn, btnSend);
   box.append(input, sendRow);
   composer.append(attachBar, queueSec, box, suggest);
 
@@ -1386,19 +1387,6 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     input.value = input.value.slice(0, pos) + mention + input.value.slice(pos);
     input.focus();
     autoGrow();
-  };
-
-  btnAttach.onclick = () => {
-    void (async () => {
-      let picked;
-      try {
-        picked = await barang().app.pickFiles();
-      } catch (e) {
-        if (!/cancelled/i.test((e as Error).message)) hooks.toast((e as Error).message, 'error');
-        return;
-      }
-      await addPickedFiles(picked.files.map((f) => ({ name: f.name, path: f.path, size: f.size, blob: null })));
-    })();
   };
 
   // Paste + drag-drop (opencode-style): images attach inline, other files
@@ -1484,64 +1472,367 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
     void addPickedFiles(files).finally(() => input.focus());
   });
 
-  const paintModelMini = () => {
+  const paintModelBtn = () => {
     const s = agentStore.get();
     const models = listSelectableModels();
     // Identity key (not length): provider metadata refreshes can swap the
     // list 1:1 (same count, different IDs) — a stale option list then shows
     // a blank for the picked model. Fresh-download symptom exactly.
     const key = modelListKey(models);
-    if (modelMini.dataset.key !== key) {
-      modelMini.innerHTML = '';
-      modelMini.append(el('option', { value: '' }, 'Auto') as HTMLOptionElement);
-      let lastProv = '';
-      for (const m of models) {
-        if (m.providerID !== lastProv) {
-          const g = document.createElement('optgroup');
-          g.label = m.providerID;
-          modelMini.append(g);
-          lastProv = m.providerID;
-        }
-        (modelMini.lastElementChild as HTMLOptGroupElement)?.append(el('option', { value: m.label }, m.modelID) as HTMLOptionElement);
-      }
-      modelMini.dataset.key = key;
+    if (modelBtn.dataset.key !== key) {
+      modelBtn.innerHTML = '';
+      modelBtn.append(el('span', { class: 'model-name' }, 'Auto'));
+      const chev = el('span', { class: 'dd-chev' });
+      chev.append(iconEl('chevD', 12));
+      modelBtn.append(chev);
+      modelBtn.dataset.key = key;
     }
     const cur = s.model ? `${s.model.providerID}/${s.model.modelID}` : '';
-    modelMini.value = cur;
-    modelMini.title = s.model ? `Model: ${cur}` : 'Model: auto (Kilo Code default)';
+    const name = s.model ? s.model.modelID : 'Auto';
+    const modelNameSpan = modelBtn.querySelector('.model-name') as HTMLSpanElement;
+    modelNameSpan.textContent = name;
+    modelBtn.title = s.model ? `Model: ${cur}` : 'Model: auto (Kilo Code default)';
+    modelBtn.onclick = (e) => {
+      e.stopPropagation();
+      void showModelPicker();
+    };
   };
-  modelMini.onchange = () => applyModelSelection(modelMini.value);
 
-  // Reasoning effort (opencode model variants): options come from the
-  // selected model's advertised variants; Default omits the field.
-  const paintEffortMini = () => {
-    const s = agentStore.get();
-    const entry = s.model
-      ? s.providerModels.find((m) => m.providerID === s.model!.providerID && m.modelID === s.model!.modelID)
-      : undefined;
-    const variants = entry?.variants ?? [];
-    const key = `${s.model ? `${s.model.providerID}/${s.model.modelID}` : 'auto'}|${variants.join(',')}`;
-    if (effortMini.dataset.key !== key) {
-      effortMini.innerHTML = '';
-      effortMini.append(el('option', { value: '' }, 'Default') as HTMLOptionElement);
-      for (const v of variants) {
-        effortMini.append(el('option', { value: v }, v[0].toUpperCase() + v.slice(1)) as HTMLOptionElement);
-      }
-      effortMini.dataset.key = key;
+  /** Qoder-style anchoring: open below the trigger, flip above when the
+   *  viewport would clip it, clamp horizontally. Call after the dropdown
+   *  is in the DOM (its measured size drives the flip). */
+  const placePicker = (dropdown: HTMLElement, rect: DOMRect) => {
+    const r = dropdown.getBoundingClientRect();
+    if (rect.bottom + 6 + r.height > window.innerHeight - 8) {
+      dropdown.style.top = Math.max(8, rect.top - 6 - r.height) + 'px';
     }
-    const saved = readSettings().effort;
-    const active = saved && variants.includes(saved) ? saved : '';
-    effortMini.value = active;
-    effortMini.title = variants.length
-      ? `Reasoning effort${active ? `: ${active}` : ' (Default)'} — ${s.model ? `${s.model.providerID}/${s.model.modelID}` : 'auto'}`
-      : 'Reasoning effort: this model advertises no variants';
+    const wantLeft = parseFloat(dropdown.style.left);
+    const left = Number.isFinite(wantLeft) ? wantLeft : rect.left;
+    dropdown.style.left = Math.max(8, Math.min(left, window.innerWidth - r.width - 8)) + 'px';
   };
-  effortMini.onchange = () => {
-    const settings = readSettings();
-    settings.effort = effortMini.value || null;
-    writeSettings(settings);
-    paintEffortMini();
+
+  /** Open a Qoder-style custom dropdown model picker below the model button. Accessible. */
+  let modelPickerDropdown: HTMLElement | null = null;
+  const showModelPicker = async () => {
+    if (modelPickerDropdown) { closeModelPicker(); return; }
+    const s = agentStore.get();
+    // Ensure provider models are loaded before showing the picker
+    if (!s.providerModels || s.providerModels.length === 0) {
+      await loadMeta();
+    }
+    const s2 = agentStore.get();
+    const models = listSelectableModels();
+    const rect = modelBtn.getBoundingClientRect();
+
+    const dropdown = el('div', { class: 'model-picker-dropdown', role: 'listbox', 'aria-label': 'Model' });
+    dropdown.style.left = rect.left + 'px';
+    dropdown.style.top = (rect.bottom + 6) + 'px';
+    dropdown.style.width = rect.width + 'px';
+    modelBtn.classList.add('open');
+
+    // Qoder menu: one flat list under a single "Models" header.
+    dropdown.append(el('div', { class: 'model-picker-head' }, 'Models'));
+
+    const body = el('div', { class: 'model-picker-body', role: 'presentation' });
+    const curModel = s2.model;
+    const rows: HTMLElement[] = [];
+    let selectedIndex = -1;
+    for (let i = 0; i < models.length; i++) {
+      const m = models[i];
+      const entry = s2.providerModels.find((pm) => pm.providerID === m.providerID && pm.modelID === m.modelID);
+      const isSelected = curModel && curModel.providerID === m.providerID && curModel.modelID === m.modelID;
+      if (isSelected) selectedIndex = i;
+      const row = el('div', {
+        class: `model-picker-row${isSelected ? ' is-selected' : ''}`,
+        role: 'option',
+        'aria-selected': String(isSelected),
+        tabindex: isSelected ? '0' : '-1',
+        'aria-label': m.modelID + (typeof entry?.limit === 'number' ? ', context ' + entry.limit.toLocaleString() + ' tokens' : '') + (isFreeModel(m.providerID, m.modelID) || entry?.isFree === true ? ', free' : ''),
+      }) as HTMLDivElement;
+      const info = el('div', { class: 'model-picker-info' });
+      info.append(el('span', { class: 'model-picker-name' }, m.modelID));
+      // "Free" marks no-cost models (kilo's flag, else the explicit :free id).
+      const isFree = entry?.isFree === true || isFreeModel(m.providerID, m.modelID);
+      if (isFree) {
+        info.append(el('span', { class: 'model-picker-free' }, 'Free'));
+      }
+      const right = el('div', { class: 'model-picker-right' });
+      // Qoder edit affordance: opens this model's settings when Kilo exposes
+      // any (context window, reasoning variants). Never selects the row.
+      const btnEdit = el('button', { class: 'model-picker-edit', title: 'Edit model settings' }) as HTMLButtonElement;
+      btnEdit.append(iconEl('pencil', 13));
+      btnEdit.onclick = (e) => {
+        e.stopPropagation();
+        closeModelPicker();
+        void showModelSettings(m);
+      };
+      btnEdit.onkeydown = (e) => { e.stopPropagation(); };
+      right.append(btnEdit);
+      // Qoder marks the picked row with a check, not a stripe on the edge.
+      if (isSelected) {
+        const ck = el('span', { class: 'model-picker-check' });
+        ck.append(iconEl('check', 13));
+        right.append(ck);
+      }
+      row.append(info, right);
+      const select = () => {
+        applyModelSelection(`${m.providerID}/${m.modelID}`);
+        paintModelBtn();
+        closeModelPicker();
+      };
+      row.onclick = select;
+      row.onkeydown = (e: KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
+      };
+      rows.push(row);
+      body.append(row);
+    }
+    dropdown.append(body);
+
+    const backdrop = el('div', { class: 'model-picker-backdrop' });
+    backdrop.onclick = () => closeModelPicker();
+    const container = el('div', { class: 'model-picker-container' });
+    container.append(backdrop, dropdown);
+    document.body.append(container);
+    placePicker(dropdown, rect);
+    requestAnimationFrame(() => dropdown.classList.add('open'));
+    modelPickerDropdown = container;
+
+    // Focus the selected row or first row
+    const focusRow = (idx: number) => {
+      rows.forEach((r, i) => { r.setAttribute('tabindex', i === idx ? '0' : '-1'); });
+      rows[idx]?.focus();
+    };
+    if (selectedIndex >= 0) focusRow(selectedIndex);
+    else if (rows.length > 0) focusRow(0);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { closeModelPicker(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        let idx = rows.findIndex(r => r.getAttribute('tabindex') === '0');
+        if (idx < 0) idx = 0;
+        if (e.key === 'ArrowDown') idx = (idx + 1) % rows.length;
+        else idx = (idx - 1 + rows.length) % rows.length;
+        focusRow(idx);
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        const active = rows.find(r => r.getAttribute('tabindex') === '0');
+        active?.click();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    (container as any)._onKey = onKey;
   };
+
+  const closeModelPicker = () => {
+    if (modelPickerDropdown) {
+      document.removeEventListener('keydown', (modelPickerDropdown as any)._onKey);
+      modelPickerDropdown.remove();
+      modelPickerDropdown = null;
+      modelBtn.classList.remove('open');
+      modelBtn.focus();
+    }
+  };
+
+  /** Show model settings dialog to edit context size and thinking (if kilo allows). */
+  const showModelSettings = async (m: ReturnType<typeof listSelectableModels>[number]) => {
+    const s = agentStore.get();
+    const entry = s.providerModels.find((pm) => pm.providerID === m.providerID && pm.modelID === m.modelID);
+    const overlay = el('div', { class: 'model-settings-overlay' });
+    const dialog = el('div', { class: 'model-settings-dialog' });
+    const head = el('div', { class: 'model-settings-head' });
+    head.append(el('span', { class: 'model-settings-title' }, 'Model Settings'));
+    const btnClose = el('button', { class: 'icon-btn', title: 'Close (Esc)' }) as HTMLButtonElement;
+    btnClose.append(iconEl('x', 15));
+    btnClose.onclick = () => closeModelSettings();
+    head.append(btnClose);
+    dialog.append(head);
+    const body = el('div', { class: 'model-settings-body' });
+    body.append(el('h3', { class: 'model-settings-h3' }, m.modelID));
+    // Context size (read-only display from kilo metadata)
+    if (typeof entry?.limit === 'number') {
+      const row = el('div', { class: 'model-settings-row' });
+      row.append(el('span', { class: 'model-settings-label' }, 'Context window'));
+      row.append(el('span', { class: 'model-settings-value' }, `${entry.limit.toLocaleString()} tokens`));
+      body.append(row);
+    }
+    // Thinking / reasoning variants
+    const variants = entry?.variants ?? [];
+    if (variants.length) {
+      const row = el('div', { class: 'model-settings-row' });
+      row.append(el('span', { class: 'model-settings-label' }, 'Reasoning effort'));
+      const sel = el('select', { class: 'model-settings-sel' }) as HTMLSelectElement;
+      sel.append(el('option', { value: '' }, 'Default') as HTMLOptionElement);
+      for (const v of variants) sel.append(el('option', { value: v }, v[0].toUpperCase() + v.slice(1)) as HTMLOptionElement);
+      const saved = readSettings().effort;
+      sel.value = saved && variants.includes(saved) ? saved : '';
+      sel.onchange = () => {
+        const settings = readSettings();
+        settings.effort = sel.value || null;
+        writeSettings(settings);
+      };
+      row.append(sel);
+      body.append(row);
+    }
+    // Free status
+    if (entry?.isFree === true) {
+      const row = el('div', { class: 'model-settings-row' });
+      row.append(el('span', { class: 'model-settings-label' }, 'Pricing'));
+      row.append(el('span', { class: 'model-settings-value is-free' }, 'Free'));
+      body.append(row);
+    }
+    dialog.append(body);
+    overlay.append(dialog);
+    document.body.append(overlay);
+    requestAnimationFrame(() => overlay.classList.add('open'));
+    modelSettingsOverlay = overlay;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeModelSettings(); };
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeModelSettings(); });
+    (overlay as any)._onKey = onKey;
+  };
+
+  let modelSettingsOverlay: HTMLElement | null = null;
+  const closeModelSettings = () => {
+    if (modelSettingsOverlay) {
+      document.removeEventListener('keydown', (modelSettingsOverlay as any)._onKey);
+      modelSettingsOverlay.remove();
+      modelSettingsOverlay = null;
+    }
+  };
+  // Agent picker (opencode agents): options come from the loaded agent list.
+  const AGENT_ICONS: Record<string, IconName> = {
+    build: 'spark',
+    analyze: 'search',
+    write: 'pencil',
+    review: 'check',
+    plan: 'compass',
+    debug: 'prompt',
+    ask: 'dot',
+  };
+  const paintAgentBtn = () => {
+    const s = agentStore.get();
+    const agents = s.agents ?? [];
+    const key = agents.map((a) => a.name).join(',');
+    if (agentBtn.dataset.key !== key) {
+      agentBtn.dataset.key = key;
+    }
+    const cur = s.agent || agents[0]?.name || 'build';
+    const name = cur.charAt(0).toUpperCase() + cur.slice(1);
+    const icon = AGENT_ICONS[cur] || 'compass';
+    agentBtn.innerHTML = '';
+    agentBtn.append(iconEl(icon, 14), el('span', { class: 'agent-name' }, name));
+    const chev = el('span', { class: 'dd-chev' });
+    chev.append(iconEl('chevD', 12));
+    agentBtn.append(chev);
+    agentBtn.title = s.agent ? `Agent: ${cur}` : 'Agent: default';
+    agentBtn.onclick = (e) => {
+      e.stopPropagation();
+      void showAgentPicker();
+    };
+  };
+
+  /** Open agent picker dropdown with icons (Qoder-style, accessible). */
+  let agentPickerDropdown: HTMLElement | null = null;
+  const showAgentPicker = async () => {
+    if (agentPickerDropdown) { closeAgentPicker(); return; }
+    const s = agentStore.get();
+    const agents = s.agents ?? [];
+    const rect = agentBtn.getBoundingClientRect();
+
+    const dropdown = el('div', { class: 'model-picker-dropdown', role: 'listbox', 'aria-label': 'Agent' });
+    dropdown.style.left = rect.left + 'px';
+    dropdown.style.top = (rect.bottom + 6) + 'px';
+    dropdown.style.width = rect.width + 'px';
+    agentBtn.classList.add('open');
+
+    const body = el('div', { class: 'model-picker-body', role: 'presentation' });
+    const rows: HTMLElement[] = [];
+    let selectedIndex = -1;
+    for (let i = 0; i < agents.length; i++) {
+      const a = agents[i];
+      const iconName = AGENT_ICONS[a.name] || 'compass';
+      const isSelected = s.agent === a.name;
+      if (isSelected) selectedIndex = i;
+      const row = el('div', {
+        class: `model-picker-row${isSelected ? ' is-selected' : ''}`,
+        role: 'option',
+        'aria-selected': String(isSelected),
+        tabindex: isSelected ? '0' : '-1',
+        'aria-label': a.name.charAt(0).toUpperCase() + a.name.slice(1) + (a.mode ? ', ' + a.mode : ''),
+      }) as HTMLDivElement;
+      const info = el('div', { class: 'model-picker-info' });
+      info.append(iconEl(iconName, 14), el('span', { class: 'model-picker-name' }, a.name.charAt(0).toUpperCase() + a.name.slice(1)));
+      row.append(info);
+      if (isSelected) {
+        const ck = el('span', { class: 'model-picker-check' });
+        ck.append(iconEl('check', 13));
+        row.append(ck);
+      }
+      const select = () => {
+        const settings = readSettings();
+        settings.agent = a.name;
+        writeSettings(settings);
+        agentStore.set({ agent: a.name });
+        paintAgentBtn();
+        closeAgentPicker();
+      };
+      row.onclick = select;
+      row.onkeydown = (e: KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
+      };
+      rows.push(row);
+      body.append(row);
+    }
+    dropdown.append(body);
+
+    const backdrop = el('div', { class: 'model-picker-backdrop' });
+    backdrop.onclick = () => closeAgentPicker();
+    const container = el('div', { class: 'model-picker-container' });
+    container.append(backdrop, dropdown);
+    document.body.append(container);
+    placePicker(dropdown, rect);
+    requestAnimationFrame(() => dropdown.classList.add('open'));
+    agentPickerDropdown = container;
+
+    const focusRow = (idx: number) => {
+      rows.forEach((r, i) => { r.setAttribute('tabindex', i === idx ? '0' : '-1'); });
+      rows[idx]?.focus();
+    };
+    if (selectedIndex >= 0) focusRow(selectedIndex);
+    else if (rows.length > 0) focusRow(0);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { closeAgentPicker(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        let idx = rows.findIndex(r => r.getAttribute('tabindex') === '0');
+        if (idx < 0) idx = 0;
+        if (e.key === 'ArrowDown') idx = (idx + 1) % rows.length;
+        else idx = (idx - 1 + rows.length) % rows.length;
+        focusRow(idx);
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        const active = rows.find(r => r.getAttribute('tabindex') === '0');
+        active?.click();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    (container as any)._onKey = onKey;
+  };
+
+  const closeAgentPicker = () => {
+    if (agentPickerDropdown) {
+      document.removeEventListener('keydown', (agentPickerDropdown as any)._onKey);
+      agentPickerDropdown.remove();
+      agentPickerDropdown = null;
+      agentBtn.classList.remove('open');
+      agentBtn.focus();
+    }
+  };
+
+  agentBtn.onclick = () => void showAgentPicker();
 
   // opencode TUI built-ins the server doesn't expose as /commands.
   // 1:1 behavior: compact/undo/redo/share/unshare act, models/agents/help
@@ -2210,8 +2501,8 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
 
   const paint = () => {
     const s = agentStore.get();
-    paintModelMini();
-    paintEffortMini();
+    paintModelBtn();
+    paintAgentBtn();
     // CLI Relay badge: the route for the currently selected model.
     const viaRelay = relayRouteFor(s.model);
     relayBadge.classList.toggle('hidden', !viaRelay);

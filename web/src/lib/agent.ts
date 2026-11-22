@@ -42,6 +42,7 @@ export interface SessionInfo {
   time?: { created?: number; updated?: number };
   cost?: number; // dollars, server-reported (0 on free logins)
   tokens?: SessionTokens; // server-reported totals (exact, no 200-msg cap)
+  model?: { id?: string; providerID?: string; variant?: string }; // last model used (per-session)
 }
 
 /** Compact token count (999 / 1.5K / 12.0M). Pure. */
@@ -246,6 +247,52 @@ export const agentStore = createStore<AgentState>({
 
 const scheduleRefresh = debounce(() => void refreshActive().catch(() => {}), 300);
 const scheduleSessions = debounce(() => void loadSessions().catch(() => {}), 800);
+
+// --- Busy heartbeat -------------------------------------------------------
+// The run's busy flag is normally cleared by the `session.idle` event, but that
+// event can arrive a beat before the /session/status entry flips (or be missed
+// if the SSE stream hiccups), leaving the UI stuck on "working" after the reply
+// is already done. While busy, poll /session/status so the UI always reflects
+// "done" promptly. Pure decision + an imperative poller.
+export function shouldKeepPolling(
+  s: { busy: boolean; activeId: string | null },
+  relaySessionID: string | null,
+): boolean {
+  if (!s.busy || !s.activeId) return false;
+  if (relaySessionID && s.activeId === relaySessionID) return false; // relay manages its own
+  return true;
+}
+
+let statusPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleStatusPoll() {
+  if (statusPollTimer) return;
+  statusPollTimer = setTimeout(() => {
+    void runStatusPoll();
+  }, 1200);
+}
+
+/** One status poll: if the run is no longer busy, pull a final snapshot so a
+ *  missed completion event (final message + todos) still lands. Exported so the
+ *  heartbeat's effect on the store can be tested without timers. */
+export async function pollStatusOnce(): Promise<void> {
+  const s = agentStore.get();
+  const relaySessionID = relayRun && relayRun.sessionID ? relayRun.sessionID : null;
+  if (!shouldKeepPolling(s, relaySessionID)) return;
+  const wasBusy = s.busy;
+  await refreshStatus(s.activeId as string).catch(() => {});
+  if (wasBusy && !agentStore.get().busy) {
+    await refreshActive().catch(() => {});
+  }
+}
+
+async function runStatusPoll() {
+  statusPollTimer = null;
+  await pollStatusOnce();
+  if (shouldKeepPolling(agentStore.get(), relayRun && relayRun.sessionID ? relayRun.sessionID : null)) {
+    scheduleStatusPoll();
+  }
+}
 
 let eventsConnected = false;
 let lastProgressAt = Date.now();
@@ -581,6 +628,13 @@ export function describeActivity(messages: ChatMessage[], permissions: PendingPe
 export function connectEvents() {
   if (eventsConnected) return;
   eventsConnected = true;
+  // Start/keep the busy heartbeat going whenever the store says we're busy.
+  // (No-op while idle, so it costs nothing between runs.)
+  agentStore.subscribe(() => {
+    if (shouldKeepPolling(agentStore.get(), relayRun && relayRun.sessionID ? relayRun.sessionID : null)) {
+      scheduleStatusPoll();
+    }
+  });
   // Relay completions arrive on their own channel (see sendRelay).
   ensureRelayEvents();
   // Upstream /event frames forwarded by the desktop main process.
@@ -906,10 +960,10 @@ export function isFreeModel(providerID: string, modelID: string): boolean {
 }
 
 /** Default model chain: Kilo Code's `kilo-auto/free` router first (free,
- *  no credits, no config), then any free model from the `kilo` provider,
- *  then any other free model, else auto (null). Only free models are ever
- *  auto-picked — paid models need an explicit pick. Prefers the authoritative
- *  `isFree` flag when present. */
+ *  no credits, no config), then any other free model from the `kilo`
+ *  provider, else auto (null). Only free KILO models are ever auto-picked
+ *  — other providers' free models and all paid models need an explicit
+ *  pick. Prefers the authoritative `isFree` flag when present. */
 export function pickDefaultModel(models: Array<{ providerID: string; modelID: string; isFree?: boolean }>): { providerID: string; modelID: string } | null {
   const isFree = (m: { providerID: string; modelID: string; isFree?: boolean }) =>
     m.providerID === 'kilo' && (typeof m.isFree === 'boolean' ? m.isFree : isFreeModel(m.providerID, m.modelID));

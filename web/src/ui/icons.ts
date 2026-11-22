@@ -5,7 +5,7 @@ export type IconName =
   | 'logo' | 'folder' | 'folderOpen' | 'file' | 'filePlus' | 'folderPlus'
   | 'refresh' | 'trash' | 'plus' | 'x' | 'chevL' | 'chevR' | 'chevD'
   | 'send' | 'stop' | 'shield' | 'spark' | 'search' | 'prompt'
-  | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip' | 'download'
+  | 'alert' | 'check' | 'info' | 'history' | 'external' | 'dot' | 'gear' | 'pencil' | 'clip' | 'download' | 'mic'
   | 'splitV' | 'maximize' | 'branch' | 'minus' | 'upload' | 'sync' | 'discard' | 'meatball' | 'bolt' | 'help' | 'timer' | 'eye'
   | 'user' | 'copy' | 'arrowDown' | 'compass' | 'thumbUp' | 'thumbDown';
 
@@ -36,6 +36,7 @@ export const ICONS: Record<IconName, string> = {
   stop: `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>`,
   shield: S('<path d="M12 3l7 2.8v5.4c0 4.8-3.4 7.8-7 9-3.6-1.2-7-4.2-7-9V5.8z"/><path d="M9.3 11.8l2 2 3.6-4.2"/>'),
   spark: S('<path d="M12 3.5l1.8 4.8 4.8 1.8-4.8 1.8L12 16.7l-1.8-4.8-4.8-1.8 4.8-1.8z"/><path d="M18.5 15.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>'),
+  mic: S('<path d="M12 2a6 6 0 0 0 6 6v4a6 6 0 0 0-6 6h0a6 6 0 0 0-6-6V8a6 6 0 0 0 6-6z"/><path d="M9 10h6v2H9z"/>'),
   search: S('<circle cx="11" cy="11" r="7"/><path d="M20.5 20.5L16 16"/>'),
   prompt: S('<path d="M4 17.5l6-6-6-6"/><path d="M12 19.5h8"/>'),
   alert: S('<path d="M12 3.5L22 20H2z"/><path d="M12 9.5V14"/><path d="M12 17h.01"/>'),

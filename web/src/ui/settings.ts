@@ -5,6 +5,7 @@
 import {
   agentStore, loadMeta, readSettings, writeSettings, isFreeKiloModel, pickDefaultModel,
   setAgent, listSelectableModels, applyModelSelection, aggregateUsage,
+  type SessionInfo,
 } from '../lib/agent';
 import {
   parseMcpFile, toServerList, buildFileText, validateServer, parseKvLines,
@@ -832,7 +833,7 @@ export function openSettings(hooks: SettingsHooks) {
 
   // --- Providers (extra OpenAI-compatible model endpoints) ---
   section('Providers');
-  body.append(el('p', { class: 'settings-note' }, 'Extra model providers for the picker (OpenAI-compatible: OpenRouter, Groq, Ollama, …). Saved to Barang’s global file — your own configs are never touched. New models appear after an agent-server restart. For OAuth / API-key logins, `kilo auth login` in a terminal is easier.'));
+  body.append(el('p', { class: 'settings-note' }, 'Extra model providers for the picker (OpenAI-compatible: OpenRouter, Groq, Ollama, …). Saved to Barang’s global file — your own configs are never touched. Providers added with `kilo auth login` are picked up when the agent server restarts — use Refresh below (or restart Barang).'));
   const provBox = el('div', { class: 'mcp-box' });
   body.append(provBox);
 
@@ -882,7 +883,29 @@ export function openSettings(hooks: SettingsHooks) {
       seen.set(m.providerID, (seen.get(m.providerID) ?? 0) + 1);
     }
     const detected = el('div', { class: 'mcp-group' });
-    detected.append(el('div', { class: 'mcp-group-title' }, 'Detected'));
+    const detHead = el('div', { class: 'mcp-group-head' });
+    detHead.append(el('div', { class: 'mcp-group-title' }, 'Detected'));
+    // One-click refresh: restarts the agent server (so it re-reads auth.json)
+    // and reloads the provider catalog — picks up providers added via the CLI.
+    const btnRefresh = el('button', { class: 'btn btn-sm', title: 'Restart the agent server to load providers added with kilo auth login' }, 'Refresh') as HTMLButtonElement;
+    btnRefresh.onclick = () => {
+      void (async () => {
+        btnRefresh.disabled = true;
+        try {
+          await barang().app.retryOpencode();
+          hooks.toast('Restarting the agent server to pick up new providers…', 'info');
+          await loadMeta().catch(() => {});
+          paintProviders();
+          hooks.toast('Providers refreshed.', 'info');
+        } catch (e) {
+          hooks.toast(`Refresh failed: ${(e as Error).message}`, 'error');
+        } finally {
+          btnRefresh.disabled = false;
+        }
+      })();
+    };
+    detHead.append(btnRefresh);
+    detected.append(detHead);
     if (!seen.size) {
       detected.append(el('div', { class: 'scm-none' }, 'No providers reported — is the agent server running?'));
     } else {

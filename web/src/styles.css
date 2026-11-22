@@ -629,7 +629,7 @@ body.agentic .agent-wrap:not(.agentic-empty) .agentic-meta { display: none; }
  * room so the card never kisses the status bar (meta row hidden mid-chat). */
 body.agentic .composer { border-top: none; padding: 6px 18px 14px; background: transparent; }
 body.agentic .composer-box {
-  border-radius: 14px; padding: 8px 8px 6px 16px;
+  border-radius: 6px; padding: 8px 8px 6px 16px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, .45);
 }
 body.agentic .composer-input { font-size: 13.5px; padding: 10px 10px 4px 0; }
@@ -651,9 +651,6 @@ body.agentic .msg-runerr {
   background: transparent; border-color: #f7768e33; border-radius: 8px; padding: 8px 10px;
 }
 body.agentic .send-row { gap: 8px; margin-top: 6px; }
-body.agentic .model-mini { flex: 0 1 210px; max-width: 210px; }
-body.agentic .effort-mini { flex: 0 0 auto; }
-body.agentic .send-row .btn-primary { margin-left: auto; }
 .agentic-branch { display: flex; align-items: center; gap: 5px; color: var(--text-faint); }
 .agentic-branch.hidden { display: none; }
 .agent-section { padding: 12px 14px 0; }
@@ -1065,10 +1062,11 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* composer (Qoder): one rounded card, controls live inside it */
+/* composer (Qoder): one card, controls live inside it. Corners stay boxy —
+ * the rounding is a subtle break, not a pill. */
 .composer { border-top: 1px solid var(--border); padding: 10px 14px 12px; position: relative; background: var(--panel); }
 .composer-box {
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: 14px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 6px 6px 14px;
   transition: border-color .14s ease, box-shadow .14s ease;
 }
@@ -1077,42 +1075,128 @@ body.agentic .send-row .btn-primary { margin-left: auto; }
   width: 100%; resize: none; background: transparent; border: none; color: var(--text);
   font-family: inherit; font-size: 13px; line-height: 1.55; outline: none; padding: 8px 8px 2px 0;
 }
-.send-row { display: flex; align-items: center; gap: 4px; margin-top: 2px; padding-bottom: 3px; }
-/* Square send control (Qoder): icon only, presses like a hardware key. */
+.send-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; padding-bottom: 5px; }
+/* Square send control (Qoder): icon only, presses like a hardware key.
+ * margin-left auto pins it to the far right of the row, Qoder-style. */
 .send-row .btn-primary {
   width: 30px; height: 30px; padding: 0; justify-content: center; flex: 0 0 auto;
-  border-radius: 9px; transition: transform .12s ease, background .12s ease, opacity .12s ease;
+  margin-left: auto;
+  border-radius: 6px; transition: transform .12s ease, background .12s ease, opacity .12s ease;
 }
-.send-row .btn-primary:active:not([disabled]) { transform: scale(.92); }
+.send-row .btn-primary:active:not([disabled]) { transform: scale(.94); }
 /* Disabled send reads as a quiet slot, not a lit button. */
 .send-row .btn-primary[disabled] {
   opacity: 1; background: #ffffff14; border-color: transparent; color: var(--text-faint);
 }
-.model-mini {
-  flex: 1; min-width: 0;
+/* Qoder-style dropdown chips: quiet boxes on the card surface, hairline
+ * edge, trailing chevron that flips while the picker is open. */
+.agent-btn {
+  flex: 0 0 auto; max-width: 120px;
+  background-color: #ffffff08; color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; font-size: 12px; padding: 4px 10px 4px 11px; outline: none; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: border-color .12s, background .12s;
+}
+.agent-btn:hover { border-color: var(--border-strong); background-color: #ffffff10; color: var(--text); }
+.agent-btn:focus, .agent-btn.open { border-color: var(--accent-line); background-color: #ffffff10; }
+.agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-weight: 500; }
+.agent-btn .ic { flex: 0 0 auto; }
+.model-btn {
+  flex: 0 0 auto; max-width: 220px;
+  background-color: #ffffff08; color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; font-size: 12.5px; padding: 5px 11px 5px 13px; outline: none; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: border-color .12s, background .12s;
+}
+.model-btn:hover { border-color: var(--border-strong); background-color: #ffffff10; color: var(--text); }
+.model-btn:focus, .model-btn.open { border-color: var(--accent-line); background-color: #ffffff10; }
+.model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-weight: 500; }
+.model-btn .ic { flex: 0 0 auto; }
+.dd-chev { display: inline-flex; align-items: center; flex: 0 0 auto; opacity: .55; transition: transform .14s ease; }
+.agent-btn.open .dd-chev, .model-btn.open .dd-chev { transform: rotate(180deg); }
+/* Dropdown layer: above app chrome, but visually inert (no dim/blur). */
+.model-picker-container {
+  position: fixed; inset: 0; z-index: 60; pointer-events: none;
+}
+/* Click-catcher only: a dropdown must not dim or blur the app behind it. */
+.model-picker-backdrop {
+  position: fixed; inset: 0; background: transparent;
+  pointer-events: auto; cursor: default;
+}
+.model-picker-dropdown {
+  position: fixed; background: var(--panel-2); border: 1px solid var(--border-strong);
+  border-radius: 8px; overflow: hidden; box-shadow: var(--shadow-pop);
+  pointer-events: auto; min-width: 200px; max-width: 420px;
+  animation: pop .12s ease-out;
+  will-change: transform, opacity;
+  opacity: 0; transform: translateY(-4px);
+}
+.model-picker-dropdown.open { opacity: 1; transform: translateY(0); }
+.model-picker-head {
+  padding: 9px 14px 8px; font-size: 11.5px; font-weight: 600;
+  color: var(--text-dim); border-bottom: 1px solid var(--border);
+}
+.model-picker-body { padding: 6px; max-height: 340px; overflow-y: auto; }
+.model-picker-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 9px; border-radius: 5px; cursor: pointer; transition: background .12s;
+}
+.model-picker-row:hover { background: #ffffff0c; }
+.model-picker-row:focus-visible { outline: 1px solid var(--accent-line); outline-offset: -1px; }
+/* Qoder: the picked row carries a soft tint + a check, never an edge stripe. */
+.model-picker-row.is-selected { background: var(--accent-dim); }
+.model-picker-info { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; }
+.model-picker-info .ic { flex: 0 0 auto; }
+.model-picker-name { font-weight: 600; font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker-free { flex: 0 0 auto; font-size: 9px; font-weight: 700; color: var(--brand-strong); background: var(--brand-dim); padding: 1px 6px; border-radius: 4px; letter-spacing: 0.3px; }
+.model-picker-right { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.model-picker-check { display: inline-flex; align-items: center; flex: 0 0 auto; color: var(--brand); }
+/* Qoder edit affordance: revealed per-row, opens the model settings dialog. */
+.model-picker-edit {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; flex: 0 0 auto;
+  background: transparent; border: none; border-radius: 5px; color: var(--text-faint);
+  cursor: pointer; opacity: 0; transition: opacity .12s, background .12s, color .12s;
+}
+.model-picker-row:hover .model-picker-edit,
+.model-picker-row:focus-within .model-picker-edit { opacity: 1; }
+.model-picker-edit:hover { background: #ffffff14; color: var(--text); }
+/* Model settings dialog */
+.model-settings-overlay {
+  position: fixed; inset: 0; background: #04060acc; backdrop-filter: blur(2px); z-index: 60;
+  display: flex; justify-content: center; align-items: flex-start; padding-top: 10vh;
+  animation: fade .12s ease-out;
+}
+.model-settings-overlay.open { animation: none; }
+.model-settings-dialog {
+  width: min(460px, 92vw); background: var(--panel-2); border: 1px solid var(--border-strong);
+  border-radius: 8px; overflow: hidden; box-shadow: var(--shadow-pop);
+  animation: pop .14s ease-out;
+}
+.model-settings-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 12px 16px;
+  border-bottom: 1px solid var(--border); color: var(--text-faint);
+}
+.model-settings-title { font-weight: 600; font-size: 13px; color: var(--text); }
+.model-settings-body { padding: 16px; }
+.model-settings-h3 { font-size: 15px; font-weight: 600; margin: 0 0 16px 0; color: var(--text); }
+.model-settings-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 0; border-bottom: 1px solid var(--border-strong);
+}
+.model-settings-row:last-child { border-bottom: none; }
+.model-settings-label { font-size: 12px; color: var(--text-dim); }
+.model-settings-value { font-size: 12px; color: var(--text); font-family: var(--mono); }
+.model-settings-value.is-free { color: var(--brand-strong); font-weight: 600; }
+.model-settings-sel {
   appearance: none; -webkit-appearance: none;
-  background-color: transparent; color: var(--text-faint); border: 1px solid transparent;
+  background-color: var(--panel-3); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; font-size: 11.5px; padding: 5px 24px 5px 8px; outline: none; cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right 6px center; background-size: 12px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  transition: border-color .12s, color .12s;
+  min-width: 120px;
 }
-.model-mini:hover { border-color: var(--border); color: var(--text); }
-.model-mini option, .model-mini optgroup { background: var(--panel-2); color: var(--text); }
-.effort-mini {
-  flex: 0 0 auto; max-width: 112px;
-  appearance: none; -webkit-appearance: none;
-  background-color: transparent; color: var(--text-faint); border: 1px solid transparent;
-  border-radius: 6px; font-size: 11.5px; padding: 5px 22px 5px 8px; outline: none; cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right 5px center; background-size: 12px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  transition: border-color .12s, color .12s;
-}
-.effort-mini:hover { border-color: var(--border); color: var(--text); }
-.effort-mini option { background: var(--panel-2); color: var(--text); }
-.send-row .attach-btn { flex: 0 0 auto; }
+.model-settings-sel:hover { border-color: var(--border-strong); background-color: #1c2436; }
 .btn-icon { padding: 6px 10px; }
 .attach-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .attach-bar.hidden { display: none; }
@@ -1745,6 +1829,7 @@ button.status-item:hover { color: var(--text); }
 .mcp-box { display: flex; flex-direction: column; gap: 12px; }
 .mcp-bar { display: flex; gap: 7px; }
 .mcp-group { display: flex; flex-direction: column; gap: 7px; }
+.mcp-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .mcp-group-title { font-size: 12.5px; font-weight: 650; }
 .mcp-row {
   display: flex; align-items: flex-start; gap: 9px;
@@ -2109,5 +2194,6 @@ a { color: var(--brand-strong); }
   .qstep-dot.now { animation: none !important; }
   .scroll-bottom, .msg-actions, .msg-action, .md-copy, .composer-box,
   .send-row .btn-primary, .tab, .sess-tab, .tree-label,
+  .agent-btn, .model-btn, .dd-chev, .model-picker-row,
   .file-changes-wrap, .file-changes-more svg { transition: none !important; }
 }

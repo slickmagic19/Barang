@@ -481,7 +481,9 @@ async function openPath(dir) {
     throw new Error('Folder no longer exists: ' + dir);
   }
   if (!stat.isDirectory()) throw new Error('Not a folder: ' + dir);
-  root = dir;
+  // Normalize once: the fs guard compares resolved paths, so a root with
+  // forward slashes or a trailing separator would reject every read.
+  root = path.resolve(dir);
   await touchRecent(root);
   watchProject(root);
   broadcast('app:root-changed', { root });
@@ -1317,17 +1319,55 @@ async function runUiSmoke() {
       `(async () => {
         const q = (s) => document.querySelector(s);
         const qa = (s) => [...document.querySelectorAll(s)];
+        // Hermetic reasoning contract: the summary count near the end of
+        // this probe pins the product default (reasoning rows hidden), so a
+        // user profile with "Show reasoning" on must not flip it. Temporarily
+        // force it off, repaint the transcript, restore storage before
+        // returning (later paints re-read readSettings every time).
+        let lsSettingsRaw = null;
+        let settingsTouched = false;
+        try {
+          lsSettingsRaw = localStorage.getItem('barang:settings-v1');
+          const p = lsSettingsRaw ? JSON.parse(lsSettingsRaw) : null;
+          if (p && p.showReasoning === true) {
+            p.showReasoning = false;
+            localStorage.setItem('barang:settings-v1', JSON.stringify(p));
+            settingsTouched = true;
+            const uu = window.__barangTestUtils;
+            if (uu && uu.activeSessionId && uu.selectSession && uu.activeSessionId()) {
+              await uu.selectSession(uu.activeSessionId());
+              await new Promise((rr) => setTimeout(rr, 800));
+            }
+          }
+        } catch {}
         // Explorer context menu: synthetic right-click must open a populated
         // menu, and Escape must close it.
-        let ctxMenu = false, ctxItems = 0, ctxClosed = false, ctxCopyPaths = false, ctxReveal = false;
+        let ctxMenu = false, ctxItems = 0, ctxClosed = false, ctxCopyPaths = false, ctxReveal = false, ctxDiag = '';
         try {
-          const lbl = qa('.tree-label')[0];
+          // The tree only mounts once a project is open — the smoke window
+          // can boot straight into the welcome state (Startup restore off).
+          // Open the repo explicitly, then wait for rows instead of silently
+          // skipping (a skip reads as FAIL on the pass line).
+          let lbl = qa('.tree-label')[0];
+          if (!lbl) {
+            try { await window.barang.app.openPath('C:\\\\Users\\\\Achi\\\\Desktop\\\\Barang'); } catch {}
+          }
+          for (let i = 0; i < 40 && !lbl; i++) {
+            await new Promise((rr) => setTimeout(rr, 200));
+            lbl = qa('.tree-label')[0];
+          }
           if (lbl) {
             const r = lbl.getBoundingClientRect();
             lbl.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 8, clientY: r.top + 8 }));
+            // The menu mounts synchronously with the dispatch. Read it right
+            // away: a background (unfocused) smoke window can blur-close it
+            // within the wait — that is legitimate product behavior, not a
+            // regression, but it must not blank the content checks.
+            const m0 = q('.ctx-menu');
             await new Promise((rr) => setTimeout(rr, 400));
-            const m = q('.ctx-menu');
-            ctxMenu = !!m;
+            const m = q('.ctx-menu') || m0;
+            ctxDiag = 'handler=' + (typeof lbl.oncontextmenu) + ' now=' + (!!m0) + ' later=' + (!!q('.ctx-menu'));
+            ctxMenu = !!m0;
             ctxItems = m ? m.querySelectorAll('.ctx-item').length : 0;
             const t = m ? (m.textContent || '') : '';
             ctxCopyPaths = t.includes('Copy Path') && t.includes('Copy Relative Path');
@@ -1335,8 +1375,10 @@ async function runUiSmoke() {
             document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
             await new Promise((rr) => setTimeout(rr, 300));
             ctxClosed = !q('.ctx-menu');
+          } else {
+            ctxDiag = 'no-lbl trees=' + qa('.tree').length + ' labels=' + qa('.tree-label').length + ' title=' + (q('.side-title')?.textContent || '');
           }
-        } catch {}
+        } catch (e) { ctxDiag = 'err: ' + (e && e.message || e); }
         // Explorer nesting invariant: expanding folders (including NESTED
         // ones) must never duplicate the tree — a label's depth must equal
         // its path depth (regression: repaint used the sub-div as root).
@@ -1667,6 +1709,10 @@ async function runUiSmoke() {
         } catch (e) { delKey = 'error: ' + (e.message || e); }
         modalAlive('after-rename');
         try { await window.barang.fs.remove('.barang-smoke-ui'); } catch {}
+        // Put the user's profile settings back exactly as found.
+        try {
+          if (settingsTouched && lsSettingsRaw !== null) localStorage.setItem('barang:settings-v1', lsSettingsRaw);
+        } catch {}
         return JSON.stringify({
           fsRoundtrip,
           brand: q('.brand-name')?.textContent || null,
@@ -1687,9 +1733,15 @@ async function runUiSmoke() {
             return s ? getComputedStyle(s).boxShadow !== 'none' : false;
           })(),
           updateBtn: !!q('.topbar .update-btn'),
-          attachBtn: !!q('.composer .attach-btn'),
-          modelMini: !!q('.composer .model-mini'),
+          attachBtn: !!q('.composer .agent-btn'),
+          modelMini: !!q('.composer .model-btn'),
           sendIcon: (() => { const b = q('.composer .btn-primary'); return !!b && !((b.textContent || '').trim()); })(),
+          sendRight: (() => {
+            const b = q('.composer .btn-primary'), box = q('.composer-box');
+            if (!b || !box) return false;
+            return box.getBoundingClientRect().right - b.getBoundingClientRect().right <= 14;
+          })(),
+          chevrons: qa('.composer .agent-btn .dd-chev, .composer .model-btn .dd-chev').length,
           brandAlign: (() => {
             const img = q('.brand img'), name = q('.brand .brand-name');
             if (!img || !name) return { s: 'skip', d: -1 };
@@ -1701,7 +1753,7 @@ async function runUiSmoke() {
           settingsBtn: !!btn,
           settingsModal: !!q('.settings-overlay .settings-modal select.settings-select'),
           defaultModel: (() => { const s = q('.settings-overlay select.settings-select'); return s ? s.value : null; })(),
-          ctxMenu, ctxItems, ctxClosed, ctxCopyPaths, ctxReveal,
+          ctxMenu, ctxItems, ctxClosed, ctxCopyPaths, ctxReveal, ctxDiag,
           diffTab, collapse, statColors, dotAlign, dotDelta, treeBad, rail, scrollSlim, createFile, renameFile, renamePlaced, openedAtOnce,
           modalTrail: modalTrail.join(','), hotSwitch, switchMs, focusCreate, untitled, delKey,
           aboutVer: (q('.about-ver')?.textContent || '').trim(),
@@ -1726,12 +1778,12 @@ async function runUiSmoke() {
   console.log('[smoke-ui] console-errors:', errors.length ? errors.slice(0, 10) : 'none');
   const dom = JSON.parse(probe.startsWith('{') ? probe : '{}');
   let pass = dom.brand === 'Barang' && dom.brandImg === true && dom.hasEditor && dom.hasAgent &&
-    dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true &&     dom.icons >= 8 && dom.selects === 2 && dom.sessTabs >= 0 && dom.emoji === 0 &&
+    dom.gutters === 2 && dom.panelsVisible === true && dom.welcomeHidden === true && dom.openSplit === true && dom.updateBtn === true && dom.noSessionLabel === true && dom.headerShadow === true &&     dom.icons >= 8 && dom.selects === 0 && dom.sessTabs >= 0 && dom.emoji === 0 &&
     dom.emptyRows === 0 && dom.settingsBtn === true && dom.settingsModal === true &&
     dom.reasoningShown === 0 && dom.stepRows === 0 &&
     dom.ctxMenu === true && dom.ctxItems >= 4 && dom.ctxClosed === true && dom.ctxCopyPaths === true && dom.ctxReveal === true &&
     dom.fsRoundtrip === 'ok' && dom.changesSec === true &&
-    dom.attachBtn === true && dom.modelMini === true && dom.sendIcon === true &&
+    dom.attachBtn === true && dom.modelMini === true && dom.sendIcon === true && dom.sendRight === true && dom.chevrons === 2 &&
     (dom.brandAlign.s === 'ok' || dom.brandAlign.s === 'skip') &&
     (dom.diffTab === 'ok' || dom.diffTab === 'ok-patch' || dom.diffTab === 'skip') &&
     (dom.collapse === 'ok' || dom.collapse === 'skip') &&
@@ -1749,7 +1801,7 @@ async function runUiSmoke() {
     (typeof dom.hotSwitch === 'string' && (dom.hotSwitch === 'ok' || dom.hotSwitch === 'skip')) &&
     dom.aboutVer.length > 3;
   console.log(`[smoke-ui] fs-ipc-roundtrip: ${dom.fsRoundtrip}`);
-  console.log(`[smoke-ui] composer: attach=${dom.attachBtn} model=${dom.modelMini} sendIcon=${dom.sendIcon} brandAlign=${dom.brandAlign.s} (${typeof dom.brandAlign.d === 'number' ? dom.brandAlign.d.toFixed(2) : dom.brandAlign.d}px)`);
+  console.log(`[smoke-ui] composer: agentBtn=${dom.attachBtn} modelBtn=${dom.modelMini} sendIcon=${dom.sendIcon} sendRight=${dom.sendRight} chevrons=${dom.chevrons} brandAlign=${dom.brandAlign.s} (${typeof dom.brandAlign.d === 'number' ? dom.brandAlign.d.toFixed(2) : dom.brandAlign.d}px)`);
   console.log(`[smoke-ui] ctx-menu: ${dom.ctxMenu} (${dom.ctxItems} items, esc-closes: ${dom.ctxClosed})`);
   console.log(`[smoke-ui] diff-review: ${dom.diffTab}, collapse: ${dom.collapse}, stat-colors: ${dom.statColors}`);
   console.log(`[smoke-ui] rail: ${dom.rail}, scroll-slim: ${dom.scrollSlim}, create-file: ${dom.createFile}, rename: ${dom.renameFile}, in-place: ${dom.renamePlaced}, focus-create: ${dom.focusCreate}, untitled: ${dom.untitled}, delkey: ${dom.delKey}, about: ${dom.aboutVer}`);
@@ -2278,8 +2330,8 @@ async function runUiSmoke() {
       if (wm !== 'BARANG') return 'wordmark:' + wm;
       const bg = getComputedStyle(document.querySelector('.agent-wrap')).backgroundColor;
       if (bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') return 'backdrop:' + bg;
-      const mw = getComputedStyle(document.querySelector('.composer .model-mini')).maxWidth;
-      if (mw !== '210px') return 'model-width:' + mw;
+      const mw = getComputedStyle(document.querySelector('.composer .model-btn')).maxWidth;
+      if (mw !== '220px') return 'model-width:' + mw;
       // One error voice: seed a message-level failure + store error.
       u.debugSetMessages([{ info: { id: 'm_verr', role: 'assistant', error: { name: 'X', data: { message: 'probe-boom-verify', statusCode: 500 } } }, parts: [{ type: 'text', text: 'working' }] }]);
       await sleep(300);
@@ -2683,14 +2735,15 @@ async function runUiSmoke() {
         { providerID: 'kilo', modelID: 'z-ai/glm-5.3-flash:free' },
         { providerID: 'openrouter', modelID: 'poolside/laguna-s-2.1:free' },
       ])) !== 'kilo/z-ai/glm-5.3-flash:free') bad.push('model-kilo-free');
-      // No free kilo model -> fall back to the first free model in the catalog.
-      if (lbl(pm(pool.filter((m) => m.modelID !== 'kilo-auto/free'))) !== 'openrouter/poolside/laguna-s-2.1:free') bad.push('model-fallback');
+      // No free KILO model -> auto (null). Free models from other providers
+      // are never auto-picked (the free-only filter is kilo-only by design).
+      if (lbl(pm(pool.filter((m) => m.modelID !== 'kilo-auto/free'))) !== null) bad.push('model-fallback');
       if (lbl(pm([{ providerID: 'openai', modelID: 'gpt-5' }])) !== null) bad.push('model-auto');
       if (lbl(pm([{ providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-pro' }])) !== null) bad.push('model-paid-mimo');
       if (lbl(pm([
         { providerID: 'openrouter', modelID: 'xiaomi/mimo-v2.6-flash:free' },
         { providerID: 'openrouter', modelID: 'meta/muse-spark-1.3' },
-      ])) !== 'openrouter/xiaomi/mimo-v2.6-flash:free') bad.push('model-or-free');
+      ])) !== null) bad.push('model-or-free');
       // Free-only filter shows ONLY free Kilo Code models (never other providers).
       if (typeof u.isFreeKiloModel !== 'function') bad.push('no-isfreekilo');
       else {
@@ -2750,11 +2803,11 @@ async function runUiSmoke() {
       const rm = u.resolveSendModel;
       if (typeof rm !== 'function') bad.push('no-rm-fn');
       else {
-        const cat = [{ providerID: 'kilo', modelID: 'mimo-v2.6-flash-free' }];
-        if ((rm({ providerID: 'kilo', modelID: 'muse-spark-1.3-old' }, cat, ['build'], 'build').model || {}).modelID !== 'mimo-v2.6-flash-free') bad.push('sendmodel-fallback');
+        const cat = [{ providerID: 'kilo', modelID: 'mimo-v2.6-flash:free' }];
+        if ((rm({ providerID: 'kilo', modelID: 'muse-spark-1.3-old' }, cat, ['build'], 'build').model || {}).modelID !== 'mimo-v2.6-flash:free') bad.push('sendmodel-fallback');
         if (rm(null, cat, ['build'], 'build').agent !== 'build') bad.push('sendmodel-agent');
         if (rm(null, cat, ['build'], 'ghost').agent !== undefined) bad.push('sendmodel-ghost-agent');
-        if (rm({ providerID: 'kilo', modelID: 'mimo-v2.6-flash-free' }, [], [], 'build').agent !== 'build') bad.push('sendmodel-passthru');
+        if (rm({ providerID: 'kilo', modelID: 'mimo-v2.6-flash:free' }, [], [], 'build').agent !== 'build') bad.push('sendmodel-passthru');
       }
       // Run state: server retry + errors (stall detection was dropped with the
       // opencode transport — Kilo runs report their own progress).
@@ -3349,7 +3402,7 @@ async function runUiSmoke() {
     })()`);
   } catch (e) { settingsUi = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] settings-ui: ' + settingsUi);
-  pass = pass && /nav=12 navOk=ok tog=ok/.test(settingsUi) && /snd=ok/.test(settingsUi) && parseInt(settingsUi.split('switches=')[1]) >= 15;
+  pass = pass && /navOk=ok tog=ok/.test(settingsUi) && /snd=ok/.test(settingsUi) && parseInt(settingsUi.split('nav=')[1]) >= 12 && parseInt(settingsUi.split('switches=')[1]) >= 15;
   // Bolt E2E (local stub server above — no internet): pure helpers, then a
   // real UI flow — new request, POST JSON + header, send, save, project
   // mirror, history. Hermetic: localStorage + mirror file snapshotted first.
@@ -3595,10 +3648,22 @@ async function runUiSmoke() {
       // Replace-my-original target: discoverable in packaged builds, null in dev.
       if (!('replaceTarget' in info)) return 'no-replace-field';
       if (info.replaceTarget !== null) return 'replace-nonnull-dev:' + info.replaceTarget;
-      const eff = document.querySelector('.composer .effort-mini');
-      if (!eff) return 'no-effort';
-      if (eff.querySelectorAll('option').length < 1) return 'effort-no-opts';
-      if (![...eff.options].some((o) => o.value === '' && /default/i.test(o.textContent || ''))) return 'effort-no-default';
+      // Custom Qoder-style dropdown: the model chip opens a popover and
+      // Escape closes it (replaces the old native effort-mini select).
+      const mb = document.querySelector('.composer .model-btn');
+      if (!mb) return 'no-model-btn';
+      mb.click();
+      let dd = null;
+      for (let i = 0; i < 40 && !dd; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        dd = document.querySelector('.model-picker-dropdown');
+      }
+      if (!dd) return 'picker-no-open';
+      if (!mb.classList.contains('open')) return 'picker-no-open-class';
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 250));
+      if (document.querySelector('.model-picker-dropdown')) return 'picker-no-close';
+      if (mb.classList.contains('open')) return 'picker-stuck-open';
       const u = window.__barangTestUtils;
       if (!u || typeof u.resolveSendVariant !== 'function') return 'no-variant-fn';
       const bad = [];

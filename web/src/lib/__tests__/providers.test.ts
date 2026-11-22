@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   listProviderEntries,
   migrateLegacyProviders,
@@ -91,5 +92,31 @@ describe('migrateLegacyProviders', () => {
     expect(migrateLegacyProviders('')).toBeNull();
     expect(migrateLegacyProviders(setProviderEntry('', ENTRY))).toBeNull();
     expect(migrateLegacyProviders('{"mcp":{}}')).toBeNull();
+  });
+});
+
+// --- Settings → Providers section contract ---------------------------------
+// No headless browser here: the Refresh affordance (which restarts the agent
+// server so CLI-added providers like orcarouter load) is pinned against source.
+const settingsSrc = readFileSync(new URL('../../ui/settings.ts', import.meta.url), 'utf8');
+
+describe('Providers settings section', () => {
+  it('registers a Providers section', () => {
+    expect(settingsSrc).toMatch(/section\('Providers'\)/);
+  });
+
+  it('offers a Refresh action that restarts the agent server', () => {
+    expect(settingsSrc).toContain('btnRefresh');
+    expect(settingsSrc).toContain('barang().app.retryOpencode');
+  });
+
+  it('reloads the provider catalog after refresh', () => {
+    expect(settingsSrc).toMatch(/await loadMeta\(\)/);
+    expect(settingsSrc).toContain('paintProviders');
+  });
+
+  it('explains that CLI-added providers need a refresh/restart', () => {
+    expect(settingsSrc).toMatch(/kilo auth login/);
+    expect(settingsSrc).toMatch(/Refresh|restart/i);
   });
 });

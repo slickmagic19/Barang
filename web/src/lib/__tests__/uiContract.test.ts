@@ -228,7 +228,45 @@ describe('agent transcript (Qoder 1:1)', () => {
   it('keeps a compact square send control', () => {
     expect(decl('.send-row .btn-primary', 'width')).toEqual(['30px']);
     expect(decl('.send-row .btn-primary', 'height')).toEqual(['30px']);
-    expect(decl('.composer-box', 'border-radius')).toEqual(['14px']);
+    // Boxy card: the rounding is a subtle break, not a pill.
+    expect(decl('.composer-box', 'border-radius')).toEqual(['6px']);
+  });
+
+  it('pins the send button to the far right of the row (Qoder)', () => {
+    expect(decl('.send-row .btn-primary', 'margin-left')).toContain('auto');
+  });
+
+  it('styles the composer pickers as subtle-radius chips with chevrons', () => {
+    expect(decl('.agent-btn', 'border-radius')).toEqual(['6px']);
+    expect(decl('.model-btn', 'border-radius')).toEqual(['6px']);
+    expect(decl('.send-row .btn-primary', 'border-radius')).toEqual(['6px']);
+    // The chevron flips while the picker is open — one quiet motion cue.
+    expect(decl('.dd-chev', 'transition').join(' ')).toContain('transform');
+    expect(decl('.agent-btn.open .dd-chev, .model-btn.open .dd-chev', 'transform')).toEqual(['rotate(180deg)']);
+    // The old native selects must not creep back into the composer.
+    expect(css).not.toContain('.model-mini');
+    expect(css).not.toContain('.effort-mini');
+  });
+
+  it('marks the picked dropdown row with a check, not an edge stripe', () => {
+    expect(decl('.model-picker-dropdown', 'border-radius')).toContain('8px');
+    expect(decl('.model-picker-row.is-selected', 'border-left')).toEqual([]);
+    expect(decl('.model-picker-check', 'color')).toContain('var(--brand)');
+  });
+
+  it('opens the model menu as a plain dropdown, not a modal', () => {
+    // Click-catcher only: no dim, no blur behind the list.
+    expect(decl('.model-picker-backdrop', 'background')).toEqual(['transparent']);
+    expect(decl('.model-picker-backdrop', 'backdrop-filter')).toEqual([]);
+    // One flat list under a single header — no tabs, no price multipliers.
+    expect(decl('.model-picker-head', 'font-weight')).toEqual(['600']);
+    expect(css).not.toContain('.model-picker-tab');
+    expect(css).not.toContain('.model-picker-multiplier');
+    // "Free" badge is brand-tinted (the green NEW chip is gone).
+    expect(decl('.model-picker-free', 'color')).toContain('var(--brand-strong)');
+    expect(css).not.toContain('.model-picker-new');
+    // Per-row edit affordance for the model settings dialog.
+    expect(decl('.model-picker-edit', 'cursor')).toEqual(['pointer']);
   });
 });
 

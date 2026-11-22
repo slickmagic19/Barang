@@ -93,6 +93,13 @@ button { font-family: inherit; }
 }
 .top-btn:hover { color: var(--text); background: #ffffff0a; border-color: var(--border); }
 .top-btn:active { transform: translateY(1px); }
+/* Background work (repo wiki) reads on the trigger itself. */
+.top-btn.is-busy { color: var(--accent-strong); }
+.top-btn.is-busy::after {
+  content: ''; width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid var(--border-strong); border-top-color: var(--accent-strong);
+  animation: spin .8s linear infinite;
+}
 .top-split { display: inline-flex; align-items: stretch; }
 .top-split .top-btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .top-split-chev { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid var(--border); padding-left: 7px; padding-right: 7px; }
@@ -1314,6 +1321,9 @@ button.status-item { background: none; border: none; font: inherit; color: inher
 button.status-item:hover { color: var(--text); }
 .status-term.is-open { color: var(--text); }
 .status-term.is-open .ic { color: var(--accent-strong); }
+/* Repo wiki activity in the status bar (spinner + done/total). */
+.status-wiki { color: var(--text-dim); }
+.status-wiki .status-spinner { width: 9px; height: 9px; border-width: 1.5px; flex: 0 0 9px; }
 
 /* integrated terminal panel (VSCode bottom panel) */
 #term-panel {
@@ -1565,16 +1575,37 @@ button.status-item:hover { color: var(--text); }
 .ctx-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctx-sep { height: 1px; background: var(--border); margin: 5px 8px; }
 
-/* skeleton loading (explorer tree + agent messages) */
+/* skeleton loading (explorer tree + agent panel) */
 .skel-row { display: flex; align-items: center; height: 29px; padding: 0 12px; }
 .skel-ic { width: 15px; height: 15px; border-radius: 4px; flex: 0 0 auto; }
 .skel-bar { height: 11px; border-radius: 5px; }
-.skel-ic, .skel-bar, .skel-msg {
+.skel-ic, .skel-bar, .skel-msg, .skel-avatar, .skel-line, .skel-send {
   background: linear-gradient(90deg, #ffffff09 25%, #ffffff14 50%, #ffffff09 75%);
   background-size: 200% 100%;
   animation: shimmer 1.3s ease-in-out infinite;
 }
 .skel-msg { border-radius: 12px; padding: 26px 12px; }
+/* Session strip skeleton: tab-shaped slots with a shimmering title bar. */
+.sess-skel {
+  display: flex; align-items: center; flex: 0 0 auto;
+  height: 100%; padding: 0 12px; box-shadow: inset -1px 0 0 var(--border);
+}
+.sess-skel .skel-bar { height: 9px; }
+/* Transcript skeleton mirrors the real rhythm (agent block, user bubble,
+   agent block) so booting reads as "loading my chat", not a blank panel. */
+.msg-skel { display: flex; align-items: flex-start; gap: 10px; }
+.msg-skel.is-user { justify-content: flex-end; }
+.skel-avatar { width: 22px; height: 22px; border-radius: 6px; flex: 0 0 auto; }
+.skel-lines { display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto; max-width: 88%; }
+.msg-skel.is-user .skel-lines { flex: 0 1 62%; max-width: 62%; align-items: flex-end; }
+.skel-line { height: 10px; border-radius: 5px; }
+/* Composer skeleton stands in for the live chatbox during first boot. */
+.composer-skel .skel-box {
+  display: flex; align-items: center; gap: 12px;
+  padding: 15px 10px 15px 14px;
+}
+.skel-box .skel-lines { flex: 1 1 auto; max-width: none; gap: 9px; }
+.skel-send { width: 30px; height: 30px; border-radius: 6px; flex: 0 0 auto; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
 /* reveal-in-tree flash */
@@ -2225,7 +2256,8 @@ a { color: var(--brand-strong); }
   .file-changes.is-new,
   .memory-badge.is-new,
   .stream-caret,
-  .skel-ic, .skel-bar, .skel-msg,
+  .skel-ic, .skel-bar, .skel-msg, .skel-avatar, .skel-line, .skel-send,
+  .top-btn.is-busy::after,
   .tool-dot.is-run,
   .tool-row > summary.is-running .step-ic::after,
   .tool-row > summary.is-running .tool-name, .spinner, .qstep-dot.now { animation: none !important; }

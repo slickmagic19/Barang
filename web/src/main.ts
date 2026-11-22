@@ -25,6 +25,7 @@ import { iconEl } from './ui/icons';
 import { fileIconEl } from './ui/fileIcons';
 import { openSettings } from './ui/settings';
 import { openWiki } from './ui/wiki';
+import { wikiStore } from './lib/repoWiki';
 import { confirmDialog } from './ui/dialog';
 import logoUrl from './assets/barang-logo.png';
 
@@ -171,6 +172,16 @@ async function boot() {
   const btnWiki = el('button', { class: 'top-btn', title: 'Repo wiki (generated docs)' }) as HTMLButtonElement;
   btnWiki.append(iconEl('book', 15));
   btnWiki.onclick = () => openWiki({ toast });
+  // Background wiki work is visible from any screen: the book button carries
+  // a small spinner and the current step while planning/generating.
+  const paintWikiButton = () => {
+    const st = wikiStore.get();
+    const busy = st.status === 'planning' || st.status === 'generating';
+    btnWiki.classList.toggle('is-busy', busy);
+    btnWiki.title = busy ? (st.message || 'Updating repo wiki…') : 'Repo wiki (generated docs)';
+  };
+  wikiStore.subscribe(paintWikiButton);
+  paintWikiButton();
   const btnSettings = el('button', { class: 'top-btn settings-btn', title: 'Settings' }) as HTMLButtonElement;
   btnSettings.append(iconEl('gear', 15));
   const btnUpdate = el('button', { class: 'top-btn update-btn hidden', title: 'Check for updates' }) as HTMLButtonElement;
@@ -624,6 +635,7 @@ async function boot() {
       void scmApi.openBranchMenu(x, y);
     },
     onOpenPomo: () => setSideView('pomo'),
+    onOpenWiki: () => openWiki({ toast }),
   });
 
   // Integrated terminal (bottom panel). Statusbar toggle lives next to agent-idle.

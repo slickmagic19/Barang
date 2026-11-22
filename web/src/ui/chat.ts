@@ -958,10 +958,31 @@ let dcOut: ChangeEntry[] = [];
 // enter animations are keyed to turns/rows the previous paint already showed.
 let msgSeenKeys = new Set<string>();
 let memoryBadgeSeen = new Set<string>();
+// First boot paints the whole agent panel as a skeleton (session strip,
+// transcript, composer) until the initial session load settles.
+let sessionsBooted = false;
 let seenSteps = new Set<string>();
 let suppressAnim = false; // true for the first paint of a session switch
 // "N Files Changed" cards the reader collapsed (survives stream repaints).
 let collapsedFileCards = new Set<string>();
+
+/** Loading skeleton that mirrors the transcript's rhythm: agent block,
+ *  user bubble, agent block — avatar + bars instead of a blank card. */
+function appendMessageSkeletons(list: HTMLElement) {
+  const rows: Array<{ user: boolean; widths: string[] }> = [
+    { user: false, widths: ['78%', '64%', '41%'] },
+    { user: true, widths: ['58%', '34%'] },
+    { user: false, widths: ['86%', '70%', '52%', '28%'] },
+  ];
+  for (const r of rows) {
+    const row = el('div', { class: `msg-skel${r.user ? ' is-user' : ''}` });
+    if (!r.user) row.append(el('span', { class: 'skel-avatar' }));
+    const lines = el('div', { class: 'skel-lines' });
+    for (const w of r.widths) lines.append(el('span', { class: 'skel-line', style: `width:${w}` }));
+    row.append(lines);
+    list.append(row);
+  }
+}
 
 function renderMessages(list: HTMLElement, hooks: ChatHooks) {
   const { messages, activeId, busy, status, statusInfo, error, memoryUpdatedIds, errorLog } = agentStore.get();
@@ -979,13 +1000,9 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     lastChatSession = activeId;
     chatShown = CHAT_WINDOW; // fresh session starts at the tail
   }
-  if (!messages.length && (busy || status === 'connecting')) {
-    // Loading skeleton (connecting / first response streaming in).
-    for (let i = 0; i < 2; i++) {
-      const sk = el('div', { class: 'msg is-agent' });
-      sk.append(el('div', { class: 'skel-msg' }));
-      list.append(sk);
-    }
+  if (!messages.length && (busy || status === 'connecting' || !sessionsBooted)) {
+    // Loading skeleton (boot / connecting / first response streaming in).
+    appendMessageSkeletons(list);
     return;
   }
   if (!messages.length) {
@@ -1396,7 +1413,20 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   box.append(input, sendRow);
   composer.append(attachBar, queueSec, box, suggest);
 
-  panel.append(sessSection, perms, quests, chatScroll, errBox, busyRow, todosSec, changesSec, composer);
+  // Chatbox skeleton for first boot: the live composer normally mounts with
+  // the panel, so a boot would otherwise show an empty transcript above a
+  // ready-to-type box. Swap it in until the initial session load settles.
+  const composerSkel = el('div', { class: 'composer composer-skel hidden' });
+  const skelBox = el('div', { class: 'composer-box skel-box' });
+  const skelLines = el('div', { class: 'skel-lines' });
+  skelLines.append(
+    el('span', { class: 'skel-line', style: 'width:66%' }),
+    el('span', { class: 'skel-line', style: 'width:40%' }),
+  );
+  skelBox.append(skelLines, el('span', { class: 'skel-send' }));
+  composerSkel.append(skelBox);
+
+  panel.append(sessSection, perms, quests, chatScroll, errBox, busyRow, todosSec, changesSec, composerSkel, composer);
 
   // --- attachments (opencode-style): images inline, files as @mentions ---
   interface ImgAttach { filename: string; mime: string; dataUrl: string }
@@ -2581,9 +2611,16 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
         ? `${RELAY_DISPLAY_NAME}: sends go through your local kilo CLI. Auto-approves anything not denied — set deny rules in opencode.json.`
         : `${RELAY_DISPLAY_NAME}: sends go through your local kilo CLI. Auto-approve is off, so tool runs may stall on permission prompts.`;
     }
-    // sessions (Cursor-style pill list)
+    // sessions (Cursor-style pill list) — skeleton tabs while booting.
     const cur = s.activeId;
     sessList.innerHTML = '';
+    if (!sessionsBooted && !s.sessions.length) {
+      for (const w of [62, 88, 48]) {
+        const sk = el('div', { class: 'sess-skel' });
+        sk.append(el('span', { class: 'skel-bar', style: `width:${w}px` }));
+        sessList.append(sk);
+      }
+    }
     for (const sess of s.sessions) {
       const name = sessionDisplayTitle(sess, sess.id === cur ? s.messages : []);
       // Session strip reuses the file-tab language (.tab metrics, hairline
@@ -2769,6 +2806,9 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
   } else errBox.classList.add('hidden');
     paintQueue(s.activeId, s.busy);
     paintSendBtn();
+    // First boot: the skeleton chatbox stands in for the live composer.
+    composerSkel.classList.toggle('hidden', sessionsBooted);
+    composer.classList.toggle('hidden', !sessionsBooted);
   };
   const paintDebounced = debounce(paint, 120);
   requestChatPaint = paint;
@@ -2776,5 +2816,10 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
   paint();
 
   // boot data (non-fatal if opencode is unreachable — banner is handled in main.ts)
-  void loadSessions().then(paint).catch((e) => hooks.toast(`opencode sessions: ${e.message}`, 'error'));
+  void loadSessions()
+    .catch((e) => hooks.toast(`opencode sessions: ${e.message}`, 'error'))
+    .finally(() => {
+      sessionsBooted = true;
+      paint();
+    });
 }

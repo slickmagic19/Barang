@@ -13,8 +13,6 @@ const css = readFileSync(new URL('../../styles.css', import.meta.url), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 const editorTs = readFileSync(new URL('../../ui/editor.ts', import.meta.url), 'utf8');
 const chatTs = readFileSync(new URL('../../ui/chat.ts', import.meta.url), 'utf8');
-const statusbarTs = readFileSync(new URL('../../ui/statusbar.ts', import.meta.url), 'utf8');
-const mainTs = readFileSync(new URL('../../main.ts', import.meta.url), 'utf8');
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -403,24 +401,6 @@ describe('agent panel loading skeleton', () => {
 
   it('keeps the skeleton animations in the reduced-motion opt-out', () => {
     expect(css).toContain('.skel-avatar, .skel-line, .skel-send,');
-  });
-});
-
-describe('repo wiki activity indicator', () => {
-  it('shows a spin cue on the topbar book button', () => {
-    expect(mainTs).toContain('wikiStore.subscribe(paintWikiButton)');
-    expect(mainTs).toContain("btnWiki.classList.toggle('is-busy', busy)");
-    expect(css).toContain('.top-btn.is-busy::after');
-    expect(decl('.top-btn.is-busy', 'color')).toEqual(['var(--accent-strong)']);
-  });
-
-  it('shows planning/generating progress in the status bar', () => {
-    expect(statusbarTs).toContain("class: 'status-item status-wiki hidden'");
-    expect(statusbarTs).toContain('wikiStore.subscribe(paint)');
-    expect(statusbarTs).toContain('repo wiki ${w.done}/${w.total}');
-    expect(statusbarTs).toContain('onOpenWiki');
-    expect(mainTs).toContain('onOpenWiki: () => openWiki({ toast })');
-    expect(decl('.status-wiki .status-spinner', 'width')).toEqual(['9px']);
   });
 });
 

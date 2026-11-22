@@ -2,7 +2,6 @@
 import { agentStore, readSettings, sessionUsage, usageCard, relayActive, relayRouteFor, relayQuietMs, formatQuiet, RELAY_QUIET_NOTICE_MS } from '../lib/agent';
 import { RELAY_DISPLAY_NAME } from '../lib/relay';
 import { pomoStore, formatClock } from '../lib/pomodoro';
-import { wikiStore } from '../lib/repoWiki';
 import { editorStore } from './editor';
 import type { GitRepoInfo } from './scm';
 import { el } from '../lib/util';
@@ -20,7 +19,7 @@ function dot(cls: string): HTMLElement {
   return s;
 }
 
-export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void; onOpenScm?: (x: number, y: number) => void; onOpenPomo?: () => void; onOpenWiki?: () => void } = {}) {
+export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onToggleTerminal?: () => void; onOpenScm?: (x: number, y: number) => void; onOpenPomo?: () => void } = {}) {
   const left = el('div', { class: 'status-left' });
   const right = el('div', { class: 'status-right' });
   bar.append(left, right);
@@ -33,9 +32,6 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   gitEl.append(iconEl('branch', 12), gitLabel);
   gitEl.onclick = (e) => hooks.onOpenScm?.(e.clientX, e.clientY);
   const ocEl = el('span', { class: 'status-item' });
-  // Background repo-wiki work (planning / writing pages) is visible here too.
-  const wikiEl = el('button', { class: 'status-item status-wiki hidden', title: 'Repo wiki' }) as HTMLButtonElement;
-  wikiEl.onclick = () => hooks.onOpenWiki?.();
   const termEl = el('button', { class: 'status-item status-term', title: 'Toggle terminal (Ctrl+`)' }) as HTMLButtonElement;
   const termLabel = el('span', {}, 'Terminal');
   termEl.append(iconEl('prompt', 12), termLabel);
@@ -113,7 +109,7 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   const dirtyEl = el('span', { class: 'status-item' });
   const posEl = el('span', { class: 'status-item' }, 'Ln 1, Col 1');
   left.append(rootEl, gitEl, ocEl);
-    right.append(termEl, sessEl, wikiEl, modelEl, usageEl, pomoEl, dirtyEl, posEl);
+    right.append(termEl, sessEl, modelEl, usageEl, pomoEl, dirtyEl, posEl);
   let termCount = 0;
   let termOpen = false;
   let git: GitRepoInfo | null = null;
@@ -151,25 +147,6 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
       ocEl.append(dot('bad'), el('span', {}, 'kilo idle'));
     }
     ocEl.classList.toggle('is-busy', a.busy);
-
-    // Repo wiki activity (background generation / refresh), clickable.
-    const w = wikiStore.get();
-    const wBusy = w.status === 'planning' || w.status === 'generating';
-    const wError = w.status === 'error';
-    wikiEl.classList.toggle('hidden', !(wBusy || wError));
-    wikiEl.classList.toggle('is-busy', wBusy);
-    if (wBusy) {
-      wikiEl.innerHTML = '';
-      wikiEl.append(
-        el('span', { class: 'spinner status-spinner' }),
-        el('span', {}, w.total > 0 ? `repo wiki ${w.done}/${w.total}` : 'repo wiki scanning'),
-      );
-      wikiEl.title = w.message || 'Updating repo wiki…';
-    } else if (wError) {
-      wikiEl.innerHTML = '';
-      wikiEl.append(dot('warn'), el('span', {}, 'repo wiki failed'));
-      wikiEl.title = w.error || w.message || 'Repo wiki update failed';
-    }
 
     sessEl.innerHTML = '';
     sessEl.classList.toggle('is-warn', a.permissions.length > 0);
@@ -219,7 +196,6 @@ export function initStatusbar(bar: HTMLElement, info: StatusInfo, hooks: { onTog
   agentStore.subscribe(paint);
   editorStore.subscribe(paint);
   pomoStore.subscribe(paint);
-  wikiStore.subscribe(paint);
   paint();
 
   return {

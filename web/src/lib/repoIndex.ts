@@ -13,7 +13,7 @@ export interface IndexedFile {
   size: number;
   symbols: string[]; // exported / top-level names (capped)
   imports: string[]; // module specifiers (capped)
-  mtime?: number; // ms — lets the wiki detect edits, not just size changes
+  mtime?: number; // ms — lets consumers detect edits, not just size changes
 }
 
 export interface RepoIndex {
@@ -227,7 +227,7 @@ export async function buildRepoIndex(_root: string, opts: IndexOptions = {}): Pr
   return { files, truncated, builtAt: Date.now() };
 }
 
-// One cached index per project root (shared by the repo map + repo wiki).
+// One cached index per project root.
 const indexCache = new Map<string, { at: number; index: RepoIndex }>();
 export const INDEX_TTL_MS = 5 * 60_000;
 

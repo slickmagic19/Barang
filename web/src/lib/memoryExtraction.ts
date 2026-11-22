@@ -10,6 +10,7 @@
 // leaves memory untouched.
 import { oc } from './api';
 import { barang } from './transport';
+import { forgetHiddenSession, registerHiddenSession } from './hiddenSessions';
 import {
   MEMORY_SLUG_RE,
   parseMemoryMarkdown,
@@ -275,6 +276,7 @@ async function extractReply(
     }
   }
   if (!sessionId) return '';
+  registerHiddenSession(sessionId);
   try {
     await oc.post(`/session/${sessionId}/prompt_async`, {
       ...(model ? { model } : {}),
@@ -300,6 +302,7 @@ async function extractReply(
   } catch {
     return '';
   } finally {
+    forgetHiddenSession(sessionId);
     void oc.del(`/session/${sessionId}`).catch(() => {});
   }
 }

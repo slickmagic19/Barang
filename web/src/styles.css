@@ -93,13 +93,6 @@ button { font-family: inherit; }
 }
 .top-btn:hover { color: var(--text); background: #ffffff0a; border-color: var(--border); }
 .top-btn:active { transform: translateY(1px); }
-/* Background work (repo wiki) reads on the trigger itself. */
-.top-btn.is-busy { color: var(--accent-strong); }
-.top-btn.is-busy::after {
-  content: ''; width: 10px; height: 10px; border-radius: 50%;
-  border: 1.5px solid var(--border-strong); border-top-color: var(--accent-strong);
-  animation: spin .8s linear infinite;
-}
 .top-split { display: inline-flex; align-items: stretch; }
 .top-split .top-btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .top-split-chev { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid var(--border); padding-left: 7px; padding-right: 7px; }
@@ -1321,9 +1314,6 @@ button.status-item { background: none; border: none; font: inherit; color: inher
 button.status-item:hover { color: var(--text); }
 .status-term.is-open { color: var(--text); }
 .status-term.is-open .ic { color: var(--accent-strong); }
-/* Repo wiki activity in the status bar (spinner + done/total). */
-.status-wiki { color: var(--text-dim); }
-.status-wiki .status-spinner { width: 9px; height: 9px; border-width: 1.5px; flex: 0 0 9px; }
 
 /* integrated terminal panel (VSCode bottom panel) */
 #term-panel {
@@ -2257,7 +2247,6 @@ a { color: var(--brand-strong); }
   .memory-badge.is-new,
   .stream-caret,
   .skel-ic, .skel-bar, .skel-msg, .skel-avatar, .skel-line, .skel-send,
-  .top-btn.is-busy::after,
   .tool-dot.is-run,
   .tool-row > summary.is-running .step-ic::after,
   .tool-row > summary.is-running .tool-name, .spinner, .qstep-dot.now { animation: none !important; }
@@ -2266,46 +2255,3 @@ a { color: var(--brand-strong); }
   .agent-btn, .model-btn, .dd-chev, .model-picker-row,
   .file-changes-wrap, .file-changes-more svg { transition: none !important; }
 }
-
-/* Repo wiki viewer (generated markdown pages) */
-.wiki-overlay {
-  position: fixed; inset: 0; z-index: 90;
-  display: flex; align-items: center; justify-content: center;
-  background: #00000070; backdrop-filter: blur(2px);
-}
-.wiki-modal {
-  width: min(1120px, 94vw); height: min(780px, 88vh);
-  display: flex; flex-direction: column; overflow: hidden;
-  background: var(--panel); border: 1px solid var(--border-strong);
-  border-radius: 14px; box-shadow: 0 30px 80px #00000080;
-}
-.wiki-head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
-.wiki-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
-.wiki-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: 11.5px; }
-.wiki-status.is-error { color: var(--red); }
-.wiki-actions { display: flex; align-items: center; gap: 7px; }
-.wiki-progress { height: 3px; background: #ffffff0c; }
-.wiki-progress-fill { height: 100%; width: 0; background: var(--brand-strong); transition: width .25s ease; }
-.wiki-main { flex: 1; min-height: 0; display: grid; grid-template-columns: 240px 1fr; }
-.wiki-nav { overflow-y: auto; border-right: 1px solid var(--border); padding: 8px; display: flex; flex-direction: column; gap: 2px; }
-.wiki-nav-item {
-  display: flex; align-items: center; gap: 8px; padding: 7px 9px;
-  border: none; border-radius: 7px; background: transparent;
-  color: var(--text-dim); text-align: left; cursor: pointer; font-size: 12.5px;
-}
-.wiki-nav-item:hover { background: #ffffff08; color: var(--text); }
-.wiki-nav-item.active { background: #ffffff10; color: var(--text); }
-.wiki-nav-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wiki-kind {
-  font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
-  color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px;
-}
-.wiki-kind.is-overview { color: var(--brand-strong); }
-.wiki-content { overflow-y: auto; min-width: 0; background: var(--bg); }
-.wiki-article { max-width: 820px; }
-.wiki-empty { padding: 40px 30px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
-.wiki-empty-title { font-size: 15px; font-weight: 650; }
-.wiki-empty-sub { color: var(--text-dim); font-size: 12.5px; line-height: 1.6; max-width: 560px; }
-.wiki-foot { padding: 8px 14px; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 10.5px; }
-.wiki-settings-actions { display: flex; gap: 8px; margin-top: 8px; }
-.wiki-state { margin-top: 8px; }

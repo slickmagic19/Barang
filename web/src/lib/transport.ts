@@ -34,23 +34,6 @@ export interface FsBridge {
   pathForFile(file: File): string;
 }
 
-/** Bridge-shaped wiki manifest (canonical types live in repoWiki.ts). */
-export interface WikiManifestData {
-  version: number;
-  generatedAt: number;
-  model: string;
-  fingerprint: string;
-  files: Record<string, number>;
-  pages: Array<{ slug: string; title: string; kind: string; summary: string; sources: string[] }>;
-  modules: Array<{
-    id: string;
-    name: string;
-    paths: string[];
-    relations: Array<{ type: string; to: string }>;
-  }>;
-  complete: boolean;
-}
-
 export interface BarangBridge {
   fs: FsBridge;
   oc(path: string, opts?: { method?: string; body?: unknown; timeoutMs?: number }): Promise<unknown>;
@@ -111,13 +94,6 @@ export interface BarangBridge {
     write(scope: 'user' | 'project', slug: string, text: string): Promise<{ path: string }>;
     writeIndex(scope: 'user' | 'project', text: string): Promise<{ path: string }>;
     remove(scope: 'user' | 'project', slug: string): Promise<{ ok: boolean }>;
-  };
-  /** Repo wiki: generated pages live in .barang/wiki (manifest + markdown). */
-  wiki: {
-    manifest(): Promise<WikiManifestData | null>;
-    read(): Promise<{ manifest: WikiManifestData | null; pages: Record<string, string> }>;
-    write(manifest: WikiManifestData, pages: Record<string, string>): Promise<{ ok: boolean; pages: number }>;
-    clear(): Promise<{ ok: boolean }>;
   };
   auth: {
     status(): Promise<{ loggedIn: boolean; name: string; email: string; team: string; balance: number | null; source?: string; hasKey?: boolean }>;

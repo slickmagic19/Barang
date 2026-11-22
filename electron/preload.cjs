@@ -119,13 +119,6 @@ const barang = {
     writeIndex: (scope, text) => invoke('memory:write-index', { scope, text }),
     remove: (scope, slug) => invoke('memory:remove', { scope, slug }),
   },
-  /** Repo wiki: generated manifest + markdown pages under .barang/wiki. */
-  wiki: {
-    manifest: () => invoke('wiki:manifest'),
-    read: () => invoke('wiki:read'),
-    write: (manifest, pages) => invoke('wiki:write', { manifest, pages }),
-    clear: () => invoke('wiki:clear'),
-  },
   /** Bolt API client: main-process HTTP (no CORS), cancellable. */
   api: {
     send: (req) => invoke('api:send', req),

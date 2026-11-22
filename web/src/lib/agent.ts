@@ -13,6 +13,12 @@ import {
   type MemoryEntry,
 } from './memory';
 import { runMemoryExtraction, turnAnswerMessageId, EXTRACT_SESSION_TITLE } from './memoryExtraction';
+import { buildRepoMap, getRepoIndex, invalidateRepoIndex, type RepoIndex } from './repoIndex';
+import {
+  WIKI_SESSION_TITLE, buildWikiIndexBlock, planGeneration, readWiki, readWikiManifest,
+  runWikiBuild, shouldRunAutoSync, wikiStore,
+  type WikiBuildResult,
+} from './repoWiki';
 import {
   shouldRelayRoute, buildRelayArgs, relayProgressLabel, redactSecrets,
   RELAY_DISPLAY_NAME,
@@ -356,6 +362,8 @@ export async function pollStatusOnce(): Promise<void> {
     await refreshActive().catch(() => {});
     // Post-turn memory extraction (Qoder-style auto-memory)
     scheduleMemoryExtraction();
+    // Repo wiki catches up with whatever the turn changed.
+    void syncRepoWiki('turn').catch(() => {});
   }
 }
 
@@ -712,6 +720,13 @@ export function connectEvents() {
   ensureRelayEvents();
   // Upstream /event frames forwarded by the desktop main process.
   barang().events.onConn((c) => agentStore.set({ connected: c }));
+  // Source files changed on disk — rebuild the repo map / wiki on the next turn.
+  try {
+    barang().app.onFsChanged((ev) => {
+      invalidateRepoMap(ev?.root);
+      scheduleWikiSync();
+    });
+  } catch { /* bridge missing */ }
   barang().events.subscribe((data: string) => {
     // Hot path (every streamed frame): match on the raw string. Parsing +
     // re-stringifying multi-MB frames here used to stall the UI.
@@ -828,6 +843,8 @@ export interface BarangSettings {
   skillsEnabled: boolean; // inject the skills catalog + slash commands, default true
   memoryEnabled: boolean; // inject relevant memories each turn, default true
   memoryAutoUpdate: boolean; // auto-extract memories after each turn, default true
+  repoMapEnabled: boolean; // inject a compact repo map (local symbol index) each turn, default true
+  repoWikiEnabled: boolean; // auto-generate + inject a repo wiki index, default true
 }
 
 const SETTINGS_KEY = 'barang:settings-v1';
@@ -875,6 +892,8 @@ const SETTING_DEFAULTS: BarangSettings = {
   skillsEnabled: true,
   memoryEnabled: true,
   memoryAutoUpdate: true,
+  repoMapEnabled: true,
+  repoWikiEnabled: true,
 };
 
 /** Builtin notification sound ids (mirrors notify.BUILTIN_SOUNDS — kept
@@ -984,6 +1003,9 @@ export function readSettings(): BarangSettings {
       notifToastFocused: p.notifToastFocused !== false,
       skillsEnabled: p.skillsEnabled !== false,
       memoryEnabled: p.memoryEnabled !== false,
+      memoryAutoUpdate: p.memoryAutoUpdate !== false,
+      repoMapEnabled: p.repoMapEnabled !== false,
+      repoWikiEnabled: p.repoWikiEnabled !== false,
       model: p.model?.providerID && p.model?.modelID ? { providerID: p.model.providerID, modelID: p.model.modelID } : null,
       modelChosen: p.modelChosen === true || !!(p.model?.providerID && p.model?.modelID),
       agent: typeof p.agent === 'string' ? p.agent : null,
@@ -1129,8 +1151,10 @@ export async function loadSessions() {
   // Scope chat history to the open project: opencode sessions carry the
   // project root in `directory`. No project open = no sessions shown.
   const root = normDir(agentStore.get().root || '');
+  const hidden = (title: unknown) =>
+    String(title ?? '') === EXTRACT_SESSION_TITLE || String(title ?? '') === WIKI_SESSION_TITLE;
   const sessions = (root
-    ? all.filter((x) => normDir(String(x.directory || '')) === root && String(x.title ?? '') !== EXTRACT_SESSION_TITLE)
+    ? all.filter((x) => normDir(String(x.directory || '')) === root && !hidden(x.title))
     : []).slice();
   sessions.sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0));
   const s = agentStore.get();
@@ -1259,8 +1283,11 @@ export async function refreshStatus(sessionId: string) {
     const next = decideStatus(st?.[sessionId], agentStore.get());
     agentStore.set(next);
     // The event path and the heartbeat both land here — trigger the Qoder-
-    // style memory scan on the single canonical busy→idle transition.
-    if (wasBusy && !next.busy) scheduleMemoryExtraction();
+    // style memory scan + wiki refresh on the single canonical busy→idle transition.
+    if (wasBusy && !next.busy) {
+      scheduleMemoryExtraction();
+      void syncRepoWiki('turn').catch(() => {});
+    }
   } catch { /* non-fatal */ }
 }
 
@@ -1510,7 +1537,7 @@ export async function sendCommand(name: string, args: string): Promise<boolean> 
   if (known.length && !known.some((c) => c.name === name)) return false;
   const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
   // Skills + memory context accompanies slash commands too (Qoder parity).
-  const augmentation = await currentAugmentation().catch(() => '');
+  const augmentation = await currentAugmentation(`${name} ${args}`).catch(() => '');
   agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `running /${name}…` });
   lastSubmitAt = Date.now();
   clearSessionQuestions(id);
@@ -1781,15 +1808,22 @@ export async function loadMemories(): Promise<MemoryEntry[]> {
   }
 }
 
-/** Build the augmentation block (skills catalog + memory) for one turn.
- *  Empty string when both are disabled or nothing is found. Pure given its
- *  inputs (helpers above do the I/O). */
-export function augmentationBlock(skills: SkillMeta[], memories: MemoryEntry[]): string {
+/** Build the augmentation block (skills catalog + memory + repo map + wiki
+ *  index) for one turn. Empty string when everything is disabled or nothing
+ *  is found. Pure given its inputs (helpers above do the I/O). */
+export function augmentationBlock(
+  skills: SkillMeta[],
+  memories: MemoryEntry[],
+  repoMap = '',
+  wiki = '',
+): string {
   const parts: string[] = [];
   const cat = skillsCatalog(skills);
   if (cat) parts.push(cat);
   const mem = memoryPromptBlock(memories);
   if (mem) parts.push(mem);
+  if (repoMap) parts.push(repoMap);
+  if (wiki) parts.push(wiki);
   return parts.join('\n\n');
 }
 
@@ -1799,7 +1833,7 @@ export function augmentationBlock(skills: SkillMeta[], memories: MemoryEntry[]):
 export function augmentBody(body: string, augmentation: string): string {
   if (!augmentation) return body;
   return [
-    '[Barang context — skills + memory. Use what is relevant; do not repeat it back. Memory is maintained automatically by the client after each turn; never write memory files or AGENTS.md entries yourself.]',
+    '[Barang context — skills + memory + repo map + repo wiki. Use what is relevant; do not repeat it back. Memory is maintained automatically by the client after each turn; never write memory files or AGENTS.md entries yourself. The repo wiki is generated documentation in .barang/wiki — read a page when it helps.]',
     augmentation,
     '',
     '---',
@@ -1824,14 +1858,56 @@ export function isAugmentedMessage(text: unknown): boolean {
   return /\[Barang context — skills \+ memory[^\]]*\][\s\S]*?\n---\n\[User message\]/.test(String(text ?? ''));
 }
 
+// --- Repo map (local structural index + query retrieval) ------------------
+// Qoder-style codebase awareness without a service: index the open project's
+// source files once, cache the index, then select the files relevant to each
+// request. The map tells the agent where things live; it still reads files.
+
+/** Forget cached indexes (fs changed / project switched). */
+export function invalidateRepoMap(root?: string) {
+  invalidateRepoIndex(root);
+}
+
+/** Last user message text (augmentation wrapper stripped) for retrieval. */
+function lastUserQuery(): string {
+  const messages = agentStore.get().messages;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (String(m?.info?.role ?? '').toLowerCase() !== 'user') continue;
+    const text = (m.parts ?? [])
+      .filter((p) => p?.type === 'text' && typeof p.text === 'string')
+      .map((p) => String(p.text))
+      .join('\n')
+      .trim();
+    if (text) return stripAugmentation(text).slice(0, 2000);
+  }
+  return '';
+}
+
+/** Query-relevant repo map for the open project (index cached per root). */
+export async function loadRepoMap(query = ''): Promise<string> {
+  const root = agentStore.get().root || '';
+  if (!root) return '';
+  const index = await getRepoIndex(root);
+  return index ? buildRepoMap(index, { query }) : '';
+}
+
+/** Compact repo-wiki index (titles + summaries + page paths) for a turn. */
+async function loadWikiBlock(): Promise<string> {
+  return buildWikiIndexBlock(await readWikiManifest());
+}
+
 /** Resolve the augmentation for the current settings + backend. */
-async function currentAugmentation(): Promise<string> {
+async function currentAugmentation(query = ''): Promise<string> {
   const settings = readSettings();
-  const [skills, memories] = await Promise.all([
+  const repoQuery = [lastUserQuery(), String(query ?? '')].filter(Boolean).join('\n').slice(0, 4000);
+  const [skills, memories, repoMap, wiki] = await Promise.all([
     settings.skillsEnabled ? loadSkills() : Promise.resolve([] as Skill[]),
     settings.memoryEnabled ? loadMemories() : Promise.resolve([] as MemoryEntry[]),
+    settings.repoMapEnabled ? loadRepoMap(repoQuery) : Promise.resolve(''),
+    settings.repoWikiEnabled ? loadWikiBlock() : Promise.resolve(''),
   ]);
-  return augmentationBlock(skills, memories);
+  return augmentationBlock(skills, memories, repoMap, wiki);
 }
 
 /** Qoder-style automatic memory update: after a turn goes idle, scan the
@@ -1850,6 +1926,144 @@ function maybeExtractMemory() {
       if (res.wrote > 0 && targetId) markMemoryUpdated(sid, targetId);
     })
     .catch(() => {});
+}
+
+// --- Repo wiki (auto-generated documentation) ------------------------------
+// Qoder-style: the project is documented automatically into .barang/wiki and
+// refreshed incrementally as files change. Planning is deterministic; only
+// page bodies use a model (hidden sessions). Auto runs are capped and backed
+// off so a large repo never turns into a burst of calls.
+
+export type WikiSyncMode = 'auto' | 'turn' | 'retry' | 'manual';
+
+let wikiRunning = false;
+let lastWikiRunAt = 0;
+let wikiRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let wikiRetryStreak = 0; // consecutive runs that generated nothing
+const WIKI_RETRY_BASE_MS = 25_000;
+
+const wikiSyncDebounced = debounce(() => void syncRepoWiki('auto').catch(() => {}), 1500);
+
+/** Queue an automatic wiki sync (debounced; used for file-change triggers). */
+export function scheduleWikiSync() {
+  if (!readSettings().repoWikiEnabled) return;
+  wikiSyncDebounced();
+}
+
+function scheduleWikiRetry(delay: number) {
+  if (wikiRetryTimer) clearTimeout(wikiRetryTimer);
+  wikiRetryTimer = setTimeout(() => {
+    wikiRetryTimer = null;
+    void syncRepoWiki('retry').catch(() => {});
+  }, delay);
+}
+
+/** Generate/refresh the repo wiki. `auto` respects the cooldown, `turn` runs
+ *  right after a turn, `retry` continues a capped run, `manual` overrides the
+ *  toggle (Settings > Rebuild). Never throws. */
+export async function syncRepoWiki(
+  mode: WikiSyncMode = 'auto',
+  opts: { force?: boolean } = {},
+): Promise<WikiBuildResult | null> {
+  const s = agentStore.get();
+  const enabled = readSettings().repoWikiEnabled;
+  if (mode !== 'manual' && !enabled) return null;
+  if (!s.root || wikiRunning) return null;
+  if (mode === 'turn' || mode === 'retry') {
+    if (s.busy) return null; // next idle transition picks it up
+  } else if (mode === 'auto') {
+    const ok = shouldRunAutoSync({
+      enabled,
+      busy: s.busy,
+      running: wikiRunning,
+      root: s.root,
+      lastRunAt: lastWikiRunAt,
+      now: Date.now(),
+    });
+    if (!ok) return null;
+  }
+  wikiRunning = true;
+  lastWikiRunAt = Date.now();
+  try {
+    wikiStore.set({ status: 'planning', message: 'Checking project changes…', done: 0, total: 0, error: null });
+    const index = await getRepoIndex(s.root);
+    if (!index) {
+      wikiStore.set({ status: 'error', message: 'Project index unavailable', error: 'index' });
+      return null;
+    }
+    const existing = await readWiki();
+    const plan = planGeneration({
+      manifest: existing.manifest,
+      index,
+      force: mode === 'manual' && !!opts.force,
+      existingBodies: Object.keys(existing.pages),
+    });
+    if (plan.fresh) {
+      wikiStore.set({
+        status: 'done',
+        message: existing.manifest?.pages.length ? 'Repo wiki is up to date' : 'Nothing to document yet',
+        done: 0,
+        total: 0,
+        manifest: existing.manifest,
+      });
+      return { manifest: existing.manifest ?? plan.baseManifest, generated: [], failed: [], pending: 0, written: false };
+    }
+    const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
+    const count = plan.targets.length;
+    wikiStore.set({
+      manifest: existing.manifest,
+      status: 'generating',
+      message: `Writing ${count} page${count === 1 ? '' : 's'}…`,
+      done: 0,
+      total: count,
+    });
+    const result = await runWikiBuild(plan, {
+      model: sel.model ?? null,
+      existingPages: existing.pages,
+      onProgress: (ev) => wikiStore.set({
+        status: 'generating',
+        message: `Writing ${ev.title} (${ev.done}/${ev.total})`,
+        done: ev.done,
+        total: ev.total,
+      }),
+    });
+    wikiStore.set({
+      status: result.failed.length && !result.generated.length ? 'error' : 'done',
+      message: result.pending > 0
+        ? `Wiki updated — ${result.pending} page${result.pending === 1 ? '' : 's'} pending`
+        : 'Repo wiki updated',
+      done: result.generated.length,
+      total: result.generated.length + result.failed.length,
+      manifest: result.manifest,
+      error: result.failed.length
+        ? `${result.failed.length} page(s) failed`
+        : (!result.written ? 'Could not save the wiki to disk' : null),
+    });
+    if (result.pending > 0 && enabled) {
+      wikiRetryStreak = result.generated.length ? 0 : wikiRetryStreak + 1;
+      if (wikiRetryStreak < 3) {
+        scheduleWikiRetry(WIKI_RETRY_BASE_MS * Math.min(4, wikiRetryStreak + 1));
+      }
+    } else {
+      wikiRetryStreak = 0;
+    }
+    return result;
+  } catch (e) {
+    wikiStore.set({
+      status: 'error',
+      message: 'Repo wiki update failed',
+      error: String((e as Error)?.message ?? e),
+    });
+    return null;
+  } finally {
+    wikiRunning = false;
+  }
+}
+
+/** Reload manifest + pages from disk into the wiki store (viewer boot). */
+export async function refreshWikiStore(): Promise<void> {
+  const r = await readWiki();
+  wikiStore.set({ manifest: r.manifest, error: null });
 }
 
 export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): Promise<boolean> {
@@ -1887,7 +2101,7 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   // The client messageID makes submit retries idempotent; a reconcile check
   // after any failure guarantees we never stack duplicate user messages.
   // Skills + memory context is prepended here (once, before the retry loop).
-  const augmentation = await currentAugmentation().catch(() => '');
+  const augmentation = await currentAugmentation(body).catch(() => '');
   const parts = [
     ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
     ...(body ? [{ type: 'text', text: augmentBody(body, augmentation) }] : []),
@@ -2243,6 +2457,7 @@ async function finishRelay(exit: RelayExit) {
     relayTitle = null;
     // Post-turn memory extraction (Qoder-style auto-memory)
     scheduleMemoryExtraction();
+    void syncRepoWiki('turn').catch(() => {});
     const view = agentStore.get().activeId;
     if (view) await drainQueue(view).catch(() => {});
   } else {

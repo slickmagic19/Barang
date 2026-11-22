@@ -8,7 +8,7 @@ import { connectEvents, agentStore, createSession, selectSession, loadMeta, load
   questionFromEvent, describeActivity, decideStatus, shortenMiddle, classifyAttachFile, usageCard,
 resolveSendVariant, loadCommands, parseSlashCommand, isRepeatAsk, pruneQuestions, upsertQuestion, removeQuestion,
 upsertPermission, removePermission, markPermissionAnswered, clearSessionPermissions, isPermissionStaleError,
-pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, relayActive, relayRouteFor, modelListKey, derivePromptTitle, isUntitledSessionTitle, sessionDisplayTitle, decideRelayStuck, stuckContinueText, formatQuiet, relayQuietText, relayQuietMs, RELAY_QUIET_NOTICE_MS, RELAY_STUCK_MS, normEchoText, findUserMessageLoose, insertBeforeCurrentTurn, relayEchoGuard, isTransientRelayEcho } from './lib/agent';
+pruneAnsweredKeys, enqueueFollowUp, queuedFollowUps, dequeueFollowUp, removeQueuedFollowUp, clearQueuedFollowUps, drainQueue, deriveSessionChanges, normalizeNotifSoundSettings, quietNextStop, consumeQuietStop, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, relayActive, relayRouteFor, modelListKey, derivePromptTitle, isUntitledSessionTitle, sessionDisplayTitle, decideRelayStuck, stuckContinueText, formatQuiet, relayQuietText, relayQuietMs, RELAY_QUIET_NOTICE_MS, RELAY_STUCK_MS, normEchoText, findUserMessageLoose, insertBeforeCurrentTurn, relayEchoGuard, isTransientRelayEcho, scheduleWikiSync } from './lib/agent';
 import {
   shouldRelayRoute, buildRelayArgs, parseRelayLine, relayProgressLabel, redactSecrets, RELAY_DISPLAY_NAME,
 } from './lib/relay';
@@ -24,6 +24,7 @@ import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
 import { fileIconEl } from './ui/fileIcons';
 import { openSettings } from './ui/settings';
+import { openWiki } from './ui/wiki';
 import { confirmDialog } from './ui/dialog';
 import logoUrl from './assets/barang-logo.png';
 
@@ -167,11 +168,14 @@ async function boot() {
   const btnIDE = el('button', { class: 'top-btn hidden', title: 'Back to editor (IDE)' }) as HTMLButtonElement;
   btnIDE.append(iconEl('file', 14), el('span', {}, 'IDE'));
   btnIDE.onclick = () => exitAgentic();
+  const btnWiki = el('button', { class: 'top-btn', title: 'Repo wiki (generated docs)' }) as HTMLButtonElement;
+  btnWiki.append(iconEl('book', 15));
+  btnWiki.onclick = () => openWiki({ toast });
   const btnSettings = el('button', { class: 'top-btn settings-btn', title: 'Settings' }) as HTMLButtonElement;
   btnSettings.append(iconEl('gear', 15));
   const btnUpdate = el('button', { class: 'top-btn update-btn hidden', title: 'Check for updates' }) as HTMLButtonElement;
   btnUpdate.append(iconEl('download', 14));
-  topActions.append(openSplit, btnPalette, btnAgent, btnIDE, btnSettings, btnUpdate);
+  topActions.append(openSplit, btnPalette, btnWiki, btnAgent, btnIDE, btnSettings, btnUpdate);
 
   // Self-updater: the button exists only while a newer release is known.
   // Click downloads the portable and restarts into it (dev builds open the
@@ -1023,6 +1027,7 @@ async function boot() {
     void refreshAgenticMeta();
     paintModeButtons();
     void ensureSession();
+    scheduleWikiSync();
   }
 
   // ---- Agentic Coding mode (opencode-style centered chat, no IDE) ----
@@ -1232,6 +1237,7 @@ async function boot() {
     }
   }
   void ensureSession();
+  scheduleWikiSync();
   // Tab session: reopen this project's working set (incl. detached tabs).
   void restoreTabSession().catch(() => {});
   paintModeButtons();
@@ -1502,6 +1508,7 @@ async function boot() {
       setSideView('api');
       boltApi?.newRequest(true);
     },
+    openWiki: () => openWiki({ toast }),
     refreshExplorer: () => {
       refreshExplorer();
       explorer.repaint();

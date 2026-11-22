@@ -20,6 +20,7 @@ import * as api from './api.js';
 import * as auth from './auth.js';
 import * as skills from './skills.js';
 import * as memstore from './memory.js';
+import * as wikistore from './wiki.js';
 import { findKilo, isDirectBinary } from './kilo.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // electron/main
@@ -136,7 +137,11 @@ function watchProject(dir) {
   }
   if (!dir) return;
   try {
-    rootWatcher = fsWatch(dir, { recursive: true }, () => {
+    rootWatcher = fsWatch(dir, { recursive: true }, (_ev, file) => {
+      // The repo wiki lives in .barang/wiki and is written by the app itself —
+      // ignoring it keeps page writes from re-triggering index invalidation.
+      const rel = String(file ?? '').replace(/\\/g, '/');
+      if (rel === '.barang/wiki' || rel.startsWith('.barang/wiki/')) return;
       if (watchTimer) clearTimeout(watchTimer);
       watchTimer = setTimeout(() => {
         watchTimer = null;
@@ -1107,6 +1112,14 @@ function registerIpc() {
     }, p.slug);
     return { ok: true };
   }));
+
+  // --- Repo wiki (Qoder-style generated documentation) --------------------
+  ipcMain.handle('wiki:manifest', ok(needRoot(() => wikistore.readManifest(root))));
+  ipcMain.handle('wiki:read', ok(needRoot(() => wikistore.readWiki(root))));
+  ipcMain.handle('wiki:write', ok(async (p = {}) => {
+    return wikistore.writeWiki(root, p.manifest, p.pages);
+  }));
+  ipcMain.handle('wiki:clear', ok(needRoot(() => wikistore.clearWiki(root))));
 }
 
 // --- smoke modes (headless CI without a display) --------------------------

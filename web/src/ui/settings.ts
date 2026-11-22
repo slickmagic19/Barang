@@ -5,6 +5,7 @@
 import {
   agentStore, loadMeta, readSettings, writeSettings, isFreeKiloModel, pickDefaultModel,
   setAgent, listSelectableModels, applyModelSelection, aggregateUsage, loadSkills,
+  scheduleWikiSync, syncRepoWiki,
   type SessionInfo,
 } from '../lib/agent';
 import { parseSkillMarkdown, skillsByScope } from '../lib/skills';
@@ -22,8 +23,10 @@ import {
   migrateLegacyProviders,
   type CustomProviderEntry, type ProviderListItem,
 } from '../lib/providers';
-import { parseJsonc } from '../lib/util';
+import { parseJsonc, timeAgo } from '../lib/util';
 import { confirmDialog } from './dialog';
+import { openWiki } from './wiki';
+import { readWikiManifest } from '../lib/repoWiki';
 import { appState, oc } from '../lib/api';
 import { barang } from '../lib/transport';
 import { el } from '../lib/util';
@@ -63,7 +66,7 @@ export function openSettings(hooks: SettingsHooks) {
 
   // Section registry (single source of truth for the nav rail). Every
   // section() call below must use one of these titles.
-  const SECTIONS = ['Account', 'Usage', 'Model', 'Agent', 'Skills', 'Memory', 'MCP', 'Providers', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
+  const SECTIONS = ['Account', 'Usage', 'Model', 'Agent', 'Skills', 'Repo map', 'Repo wiki', 'Memory', 'MCP', 'Providers', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
   const secSlug = (t: string) => 'sec-' + t.toLowerCase();
   const section = (title: string) => body.append(el('p', { class: 'settings-label', id: secSlug(title) }, title));
   // Toggle switch row (VSCode-style). The real checkbox stays in the DOM
@@ -1622,6 +1625,66 @@ export function openSettings(hooks: SettingsHooks) {
     }
   };
   onShow.set('Skills', () => void skillsRefresh());
+
+  // --- Repo map (local structural index injected each turn) ---
+  section('Repo map');
+  const repoMapBox = checkRow('Inject a repo map into each turn (local symbol index — no embeddings or cloud service)');
+  repoMapBox.checked = readSettings().repoMapEnabled;
+  repoMapBox.onchange = () => {
+    commit((s) => { s.repoMapEnabled = repoMapBox.checked; });
+  };
+  body.append(el('p', { class: 'settings-note' },
+    'Barang scans the open project for source files and their exported symbols, then prepends a compact ' +
+    'map (paths + exports, capped at a few KB) so the agent can find the right files instead of guessing. ' +
+    'Each turn lists only the files that match your request, plus the most-imported files for orientation. ' +
+    'The index is local and in-memory: it rebuilds when files change and is cached for a few minutes.'));
+  onShow.set('Repo map', () => { repoMapBox.checked = readSettings().repoMapEnabled; });
+
+  // --- Repo wiki (Qoder-style generated documentation) ---
+  section('Repo wiki');
+  const repoWikiBox = checkRow('Automatically generate and update a repo wiki for this project');
+  repoWikiBox.checked = readSettings().repoWikiEnabled;
+  repoWikiBox.onchange = () => {
+    commit((s) => { s.repoWikiEnabled = repoWikiBox.checked; });
+    if (repoWikiBox.checked) scheduleWikiSync();
+  };
+  body.append(el('p', { class: 'settings-note' },
+    'Barang documents the open project into .barang/wiki: an overview, architecture, tech stack, ' +
+    'conventions, and one page per module. Pages are written by the model in hidden sessions and ' +
+    'refreshed incrementally when their source files change — your chat is never touched. ' +
+    'A compact page index (titles + summaries) is also added to each turn so the agent can read a page instead of exploring blindly.'));
+  const wikiState = el('div', { class: 'settings-note wiki-state' }, 'Checking…');
+  const wikiActions = el('div', { class: 'wiki-settings-actions' });
+  const btnWikiOpen = el('button', { class: 'btn btn-sm' }, 'Open wiki') as HTMLButtonElement;
+  const btnWikiRebuild = el('button', { class: 'btn btn-sm' }, 'Rebuild now') as HTMLButtonElement;
+  wikiActions.append(btnWikiOpen, btnWikiRebuild);
+  body.append(wikiState, wikiActions);
+  const wikiPaint = async () => {
+    const m = await readWikiManifest();
+    if (!m?.pages.length) {
+      wikiState.textContent = 'No wiki generated yet — it will start automatically after the next turn, or use Open wiki.';
+      return;
+    }
+    const when = m.generatedAt ? ` · updated ${timeAgo(m.generatedAt)}` : '';
+    wikiState.textContent = `${m.pages.length} page${m.pages.length === 1 ? '' : 's'}${m.complete ? '' : ' · incomplete'}${when}`;
+  };
+  btnWikiOpen.onclick = () => openWiki({ toast: hooks.toast });
+  btnWikiRebuild.onclick = () => {
+    void confirmDialog({
+      title: 'Rebuild the repo wiki?',
+      message: 'Regenerates every page with the model. This can take a few minutes and uses tokens.',
+      confirmLabel: 'Rebuild',
+      danger: false,
+    }).then((okd) => {
+      if (!okd) return;
+      hooks.toast('Rebuilding the repo wiki…', 'info');
+      void syncRepoWiki('manual', { force: true });
+    });
+  };
+  onShow.set('Repo wiki', () => {
+    repoWikiBox.checked = readSettings().repoWikiEnabled;
+    void wikiPaint();
+  });
 
   // --- Memory (Qoder-style typed memory + MEMORY.md index) ---
   section('Memory');

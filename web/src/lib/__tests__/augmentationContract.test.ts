@@ -59,15 +59,25 @@ describe('augmentBody', () => {
 
 describe('agent.ts wiring', () => {
   it('prepends augmentation inside sendMessage before building the payload', () => {
-    const idx = agentTs.indexOf('const augmentation = await currentAugmentation()');
+    const idx = agentTs.indexOf('const augmentation = await currentAugmentation(body)');
     expect(idx).toBeGreaterThan(-1);
     const payloadIdx = agentTs.indexOf('const payload = {', idx);
     expect(payloadIdx).toBeGreaterThan(idx);
     expect(agentTs.slice(idx, payloadIdx)).toContain('augmentBody(body, augmentation)');
   });
 
-  it('augments slash-command arguments too', () => {
+  it('passes the user text into retrieval for slash commands too', () => {
+    expect(agentTs).toContain('const augmentation = await currentAugmentation(`${name} ${args}`)');
     expect(agentTs).toContain('arguments: augmentBody(args, augmentation)');
+  });
+
+  it('conditions the repo map on the request text', () => {
+    expect(agentTs).toContain('async function currentAugmentation(query = \'\')');
+    expect(agentTs).toContain('loadRepoMap(repoQuery)');
+    expect(agentTs).toContain('function lastUserQuery()');
+    expect(agentTs).toContain('export async function loadRepoMap(query = \'\')');
+    expect(agentTs).toContain('const index = await getRepoIndex(root)');
+    expect(agentTs).toContain('return index ? buildRepoMap(index, { query }) : \'\'');
   });
 
   it('guards skills/memory behind settings flags', () => {

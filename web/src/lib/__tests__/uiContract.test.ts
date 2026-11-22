@@ -12,6 +12,7 @@ const css = readFileSync(new URL('../../styles.css', import.meta.url), 'utf8')
   .replace(/\r\n/g, '\n')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 const editorTs = readFileSync(new URL('../../ui/editor.ts', import.meta.url), 'utf8');
+const chatTs = readFileSync(new URL('../../ui/chat.ts', import.meta.url), 'utf8');
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -383,5 +384,17 @@ describe('quick diff (VS Code quickDiffDecorator + QuickDiffWidget)', () => {
 
   it('makes the tab git letter the entry point to the changes view', () => {
     expect(decl('.tab-git', 'cursor')).toEqual(['pointer']);
+  });
+});
+
+describe('memory updated badge', () => {
+  it('animates only when the badge is new to this paint', () => {
+    // The transcript is rebuilt on every stream frame; an unconditional
+    // animation makes the badge flash continuously.
+    expect(decl('.memory-badge', 'animation')).toEqual([]);
+    expect(decl('.memory-badge.is-new', 'animation')).toEqual(['memory-badge-in .2s ease-out']);
+    expect(chatTs).toContain("if (!firstPaintOfSession && !memoryBadgeSeen.has(badgeKey)) badge.classList.add('is-new')");
+    expect(chatTs).toContain('memoryBadgeSeen = nextBadgeSeen');
+    expect(chatTs).toContain('memoryBadgeSeen = new Set()');
   });
 });

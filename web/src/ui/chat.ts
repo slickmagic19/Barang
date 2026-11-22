@@ -957,6 +957,7 @@ let dcOut: ChangeEntry[] = [];
 // Transcript chrome: a full rebuild happens on every stream frame, so the
 // enter animations are keyed to turns/rows the previous paint already showed.
 let msgSeenKeys = new Set<string>();
+let memoryBadgeSeen = new Set<string>();
 let seenSteps = new Set<string>();
 let suppressAnim = false; // true for the first paint of a session switch
 // "N Files Changed" cards the reader collapsed (survives stream repaints).
@@ -1052,9 +1053,11 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     suppressAnim = true;
     seenSteps.clear();
     msgSeenKeys = new Set();
+    memoryBadgeSeen = new Set();
     collapsedFileCards = new Set();
   }
   const nextSeen = new Set<string>();
+  const nextBadgeSeen = new Set<string>();
   const renderedIds = new Set<string>(); // messages that got a transcript row
   const firstPaintOfSession = suppressAnim;
   let shown = 0;
@@ -1209,6 +1212,11 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     if (!isUser && m.info?.id && badgeIds.includes(String(m.info.id))) {
       const badge = el('div', { class: 'memory-badge' });
       badge.append(iconEl('bulb', 13), el('span', {}, 'Memory Updated'));
+      // Keyed like the rows: the transcript is rebuilt on every stream frame,
+      // so an unconditional animation would replay the badge constantly.
+      const badgeKey = String(m.info.id);
+      if (!firstPaintOfSession && !memoryBadgeSeen.has(badgeKey)) badge.classList.add('is-new');
+      nextBadgeSeen.add(badgeKey);
       wrap.append(badge);
     }
     // Enter animation: only the tail turns the previous paint did not show.
@@ -1226,6 +1234,7 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     shown++;
   }
   msgSeenKeys = nextSeen;
+  memoryBadgeSeen = nextBadgeSeen;
   suppressAnim = false;
   // Streaming caret: a soft block right after the newest answer text (Qoder).
   if (busy) {

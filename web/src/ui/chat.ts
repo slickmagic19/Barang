@@ -963,7 +963,7 @@ let suppressAnim = false; // true for the first paint of a session switch
 let collapsedFileCards = new Set<string>();
 
 function renderMessages(list: HTMLElement, hooks: ChatHooks) {
-  const { messages, activeId, busy, status, statusInfo, error } = agentStore.get();
+  const { messages, activeId, busy, status, statusInfo, error, memoryUpdatedIds, errorLog } = agentStore.get();
   const showReasoning = readSettings().showReasoning;
   const showActivity = readSettings().showActivity;
   // Scroll anchor: capture BEFORE clearing (innerHTML resets scrollTop).
@@ -1008,6 +1008,39 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     list.append(more);
   }
   const shownRunErrors = new Set<string>();
+  // Store-level failures are logged per session and anchored to the message
+  // they followed (timeline order survives later sends).
+  const appendErrorRow = (text: string) => {
+    shownRunErrors.add(text);
+    const eb = el('div', { class: 'msg is-agent' });
+    const errBody = el('div', { class: 'msg-body' });
+    const row = el('div', { class: 'msg-runerr' });
+    row.append(iconEl('alert', 13), el('span', {}, text));
+    errBody.append(row);
+    if (isFreeTierGateError(text)) {
+      const g = el('div', { class: 'msg-runerr is-guide' });
+      g.append(iconEl('info', 13), el('span', {}, freeTierGuidance()));
+      errBody.append(g);
+    }
+    if (isModelAccessError(text)) {
+      const g = el('div', { class: 'msg-runerr is-guide' });
+      g.append(iconEl('info', 13), el('span', {}, modelAccessGuidance()));
+      errBody.append(g);
+    }
+    eb.append(errBody);
+    list.append(eb);
+  };
+  const errorById = new Map<string, string[]>();
+  const orphanErrors: string[] = [];
+  for (const e of activeId ? errorLog[activeId] ?? [] : []) {
+    if (e.afterId && visible.some((m) => String(m?.info?.id ?? '') === e.afterId)) {
+      const arr = errorById.get(e.afterId) ?? [];
+      arr.push(e.text);
+      errorById.set(e.afterId, arr);
+    } else {
+      orphanErrors.push(e.text); // anchor scrolled out of the window
+    }
+  }
   // Relay echo guard: while a relay run owns this session, the server holds
   // transitional partial echoes (file staged, tool chatter, then the prompt)
   // that look like duplicated chats/images mid-run. Hide those; the
@@ -1022,6 +1055,7 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     collapsedFileCards = new Set();
   }
   const nextSeen = new Set<string>();
+  const renderedIds = new Set<string>(); // messages that got a transcript row
   const firstPaintOfSession = suppressAnim;
   let shown = 0;
   // One rendered row per message (filters applied) so the file-change card can
@@ -1037,7 +1071,7 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
           (showActivity || !isActivityPart(p as { type?: unknown })),
       ),
     }))
-    .filter((r) => r.parts.length > 0); // fully hidden message — skip the bubble
+    .filter((r) => r.parts.length > 0 || (r.role !== 'user' && !!messageErrorText(r.m.info?.error))); // keep error-only runs visible
   const filePlans = planTurnFiles(rows);
   const actionPlans = planTurnActions(rows);
   const renderedFileCards = new Set<ChatPart[]>(); // one card per run
@@ -1083,7 +1117,7 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
         }
       } else for (const p of g.parts) renderPart(p as Record<string, unknown>, body, openKeys);
     }
-    wrap.append(body);
+    if (parts.length) wrap.append(body);
     // Server-reported run failures live on the assistant message — show them
     // inline in the transcript, not just as a toast.
     if (role !== 'user') {
@@ -1169,6 +1203,14 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
       }
       wrap.append(actions);
     }
+    // Memory Updated badge (Qoder-style): belongs to the assistant message of
+    // the turn that wrote memory — it stays with that turn across later sends.
+    const badgeIds = activeId ? memoryUpdatedIds[activeId] ?? [] : [];
+    if (!isUser && m.info?.id && badgeIds.includes(String(m.info.id))) {
+      const badge = el('div', { class: 'memory-badge' });
+      badge.append(iconEl('bulb', 13), el('span', {}, 'Memory Updated'));
+      wrap.append(badge);
+    }
     // Enter animation: only the tail turns the previous paint did not show.
     const msgKey = String(m.info?.id ?? '') || `i${shown}`;
     if (!firstPaintOfSession && !msgSeenKeys.has(msgKey) && shouldAnimate(shown, rows.length)) {
@@ -1176,6 +1218,11 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     }
     nextSeen.add(msgKey);
     list.append(wrap);
+    const msgId = String(m.info?.id ?? '');
+    renderedIds.add(msgId);
+    for (const t of errorById.get(msgId) ?? []) {
+      if (!shownRunErrors.has(t)) appendErrorRow(t);
+    }
     shown++;
   }
   msgSeenKeys = nextSeen;
@@ -1191,32 +1238,14 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
   // Transport/submit failures (store error) also land in the transcript —
   // a toast alone is gone before the user reads it. Skipped when the same
   // text already renders on a run-error row above.
-  if (error && !shownRunErrors.has(error)) {
-    const eb = el('div', { class: 'msg is-agent' });
-    const errBody = el('div', { class: 'msg-body' });
-    const row = el('div', { class: 'msg-runerr' });
-    row.append(iconEl('alert', 13), el('span', {}, error));
-    errBody.append(row);
-    if (isFreeTierGateError(error)) {
-      const g = el('div', { class: 'msg-runerr is-guide' });
-      g.append(iconEl('info', 13), el('span', {}, freeTierGuidance()));
-      errBody.append(g);
-    }
-    if (isModelAccessError(error)) {
-      const g = el('div', { class: 'msg-runerr is-guide' });
-      g.append(iconEl('info', 13), el('span', {}, modelAccessGuidance()));
-      errBody.append(g);
-    }
-    eb.append(errBody);
-    list.append(eb);
+  for (const [id, texts] of errorById) {
+    if (renderedIds.has(id)) continue; // anchor had no row — fall back to the tail
+    for (const text of texts) if (!shownRunErrors.has(text)) appendErrorRow(text);
   }
-  // Memory Updated badge (Qoder-style): shown when post-turn extraction
-  // wrote or updated a memory entry during the last turn.
-  if (activeId && agentStore.get().memoryUpdated) {
-    const badge = el('div', { class: 'memory-badge' });
-    badge.append(iconEl('bulb', 13), el('span', {}, 'Memory Updated'));
-    list.append(badge);
+  for (const text of orphanErrors) {
+    if (!shownRunErrors.has(text)) appendErrorRow(text);
   }
+  if (error && !shownRunErrors.has(error)) appendErrorRow(error);
   if (chatKeepScroll) {
     // "Show more" prepends above: hold the reading position steady.
     list.scrollTop = list.scrollHeight - prevHeight + prevTop;

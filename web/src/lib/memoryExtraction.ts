@@ -24,7 +24,7 @@ import {
 export const EXTRACT_SESSION_TITLE = '__barang_memory_extract__';
 
 export interface ExtractionMessage {
-  info?: { role?: unknown; error?: unknown; time?: { created?: unknown; completed?: unknown } };
+  info?: { id?: unknown; role?: unknown; error?: unknown; time?: { created?: unknown; completed?: unknown } };
   parts?: Array<{ type?: unknown; text?: unknown }>;
 }
 
@@ -154,6 +154,22 @@ function lastText(messages: ExtractionMessage[], role: string): { text: string; 
       .trim();
     if (!text) continue;
     return { text, error: !!m.info?.error };
+  }
+  return null;
+}
+
+/** The turn's final assistant message id — the message the "Memory Updated"
+ *  badge attaches to. Null when that message carries no text (failed turn).
+ *  Pure. */
+export function turnAnswerMessageId(messages: ExtractionMessage[]): string | null {
+  for (let i = (messages?.length ?? 0) - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (String(m?.info?.role ?? '').toLowerCase() !== 'assistant') continue;
+    const hasText = (m.parts ?? []).some(
+      (p) => p?.type === 'text' && typeof p.text === 'string' && p.text.trim(),
+    );
+    const id = typeof m.info?.id === 'string' ? m.info.id : '';
+    return hasText && id ? id : null;
   }
   return null;
 }

@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildExtractionPrompt, conversationSlice, formatExisting,
-  normalizeCandidate, parseExtractionResponse,
+  normalizeCandidate, parseExtractionResponse, turnAnswerMessageId,
   type ExtractionMessage,
 } from '../memoryExtraction';
 import { serializeMemory } from '../memory';
@@ -128,6 +128,30 @@ describe('conversationSlice', () => {
       msg('assistant', 'a'.repeat(5000)),
     ], 300);
     expect(s).toHaveLength(300);
+  });
+});
+
+describe('turnAnswerMessageId', () => {
+  const withId = (role: string, text: string, id: string) => msg(role, text, { id });
+
+  it('returns the last assistant message id (the badge target)', () => {
+    expect(turnAnswerMessageId([
+      withId('user', 'q1', 'u1'),
+      withId('assistant', 'a1', 'm1'),
+      withId('user', 'q2', 'u2'),
+      withId('assistant', 'a2', 'm2'),
+    ])).toBe('m2');
+  });
+
+  it('returns null when the final assistant turn has no text (failed run)', () => {
+    expect(turnAnswerMessageId([
+      withId('assistant', 'ok', 'm1'),
+      { info: { id: 'm2', role: 'assistant', error: { message: 'boom' } }, parts: [] },
+    ])).toBeNull();
+  });
+
+  it('returns null without an assistant message', () => {
+    expect(turnAnswerMessageId([withId('user', 'q', 'u1')])).toBeNull();
   });
 });
 

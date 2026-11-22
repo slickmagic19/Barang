@@ -12,7 +12,7 @@ import {
   parseMemoryMarkdown, memoryPromptBlock, mergeMemories,
   type MemoryEntry,
 } from './memory';
-import { runMemoryExtraction, EXTRACT_SESSION_TITLE } from './memoryExtraction';
+import { runMemoryExtraction, turnAnswerMessageId, EXTRACT_SESSION_TITLE } from './memoryExtraction';
 import {
   shouldRelayRoute, buildRelayArgs, relayProgressLabel, redactSecrets,
   RELAY_DISPLAY_NAME,
@@ -231,7 +231,17 @@ interface AgentState {
   relayStuck: RelayStuck | null; // quiet-tool escalation (Stop & continue offer)
   connected: boolean;
   error: string | null;
-  memoryUpdated: boolean; // set true after post-turn extraction writes a memory
+  // Session-scoped transcript history for things that are not message parts:
+  // rechatting must not wipe them (the store `error` is transient by design).
+  memoryUpdatedIds: Record<string, string[]>; // sessionId → assistant message ids whose turn wrote memory
+  errorLog: Record<string, TranscriptError[]>; // sessionId → store-level (non-message) failures
+}
+
+/** A store-level failure anchored to the message it followed, so the
+ *  transcript can show it in place instead of at the bottom of the session. */
+export interface TranscriptError {
+  text: string;
+  afterId: string | null;
 }
 
 export const agentStore = createStore<AgentState>({
@@ -253,13 +263,61 @@ export const agentStore = createStore<AgentState>({
   relayStuck: null,
   connected: false,
   error: null,
-  memoryUpdated: false,
+  memoryUpdatedIds: {},
+  errorLog: {},
 });
 
 const scheduleRefresh = debounce(() => void refreshActive().catch(() => {}), 300);
 const scheduleSessions = debounce(() => void loadSessions().catch(() => {}), 800);
 // Settles just after a turn ends so the final transcript is in the store.
 const scheduleMemoryExtraction = debounce(() => maybeExtractMemory(), 800);
+
+// --- Per-session transcript history ---------------------------------------
+// Badges and failures that are not message parts still belong to the session
+// transcript: rechatting resets the transient store `error`, which used to
+// erase them. These logs keep them visible for the life of the session view.
+
+const TRANSCRIPT_LOG_CAP = 20;
+
+/** Append an entry, collapsing consecutive duplicates and keeping the tail. Pure. */
+export function appendLogged(list: string[], text: string, cap = TRANSCRIPT_LOG_CAP): string[] {
+  if (!text || list[list.length - 1] === text) return list;
+  return [...list, text].slice(-cap);
+}
+
+/** Same for transcript errors, anchored to the message they followed. Pure. */
+export function logTranscriptError(
+  list: TranscriptError[],
+  text: string,
+  afterId: string | null,
+  cap = TRANSCRIPT_LOG_CAP,
+): TranscriptError[] {
+  if (!text || list[list.length - 1]?.text === text) return list;
+  return [...list, { text, afterId }].slice(-cap);
+}
+
+/** Record a store-level (non-message) failure so it survives a new send.
+ *  Anchored to the last message of the turn, which keeps it in timeline
+ *  order no matter how many later turns are added. */
+function rememberError(sessionId: string | null, text: string) {
+  if (!sessionId || !text) return;
+  const log = agentStore.get().errorLog;
+  const messages = agentStore.get().messages;
+  const last = messages[messages.length - 1];
+  const afterId = typeof last?.info?.id === 'string' ? last.info.id : null;
+  const next = logTranscriptError(log[sessionId] ?? [], text, afterId);
+  if (next === log[sessionId]) return;
+  agentStore.set({ errorLog: { ...log, [sessionId]: next } });
+}
+
+/** Attach the "Memory Updated" badge to the assistant message it belongs to. */
+function markMemoryUpdated(sessionId: string, messageId: string) {
+  if (!messageId) return;
+  const map = agentStore.get().memoryUpdatedIds;
+  const next = appendLogged(map[sessionId] ?? [], messageId);
+  if (next === map[sessionId]) return;
+  agentStore.set({ memoryUpdatedIds: { ...map, [sessionId]: next } });
+}
 
 // --- Busy heartbeat -------------------------------------------------------
 // The run's busy flag is normally cleared by the `session.idle` event, but that
@@ -684,7 +742,9 @@ export function connectEvents() {
               // prompts must not ask for attention.
               const card = d.card;
               void respondPermission(card, 'always').catch((e) => {
-                agentStore.set({ error: `Auto-approve failed: ${(e as Error).message}` });
+                const msg = `Auto-approve failed: ${(e as Error).message}`;
+                rememberError(agentStore.get().activeId, msg);
+                agentStore.set({ error: msg });
               });
             }
           } else if (ev.type === 'permission.replied') {
@@ -1075,7 +1135,7 @@ export async function loadSessions() {
   sessions.sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0));
   const s = agentStore.get();
   const activeId = s.activeId && sessions.some((x) => x.id === s.activeId) ? s.activeId : (sessions[0]?.id ?? null);
-  agentStore.set({ sessions, activeId, ...(activeId !== s.activeId ? { memoryUpdated: false } : {}) });
+  agentStore.set({ sessions, activeId });
   if (activeId && activeId !== s.activeId) await refreshActive();
   else if (activeId) await refreshStatus(activeId);
 }
@@ -1149,7 +1209,7 @@ export async function createSession(title?: string): Promise<string> {
   createFlight = (async () => {
     const { value: created } = await withSendRetries(() => oc.post<SessionInfo>('/session', title ? { title } : {}));
     await loadSessions();
-    agentStore.set({ activeId: created.id, messages: [], todos: [], permissions: [], busy: false, error: null, memoryUpdated: false });
+    agentStore.set({ activeId: created.id, messages: [], todos: [], permissions: [], busy: false, error: null });
     await refreshActive();
     return created.id;
   })();
@@ -1161,7 +1221,7 @@ export async function createSession(title?: string): Promise<string> {
 }
 
 export async function selectSession(id: string) {
-  agentStore.set({ activeId: id, messages: [], todos: [], permissions: [], busy: false, error: null, memoryUpdated: false });
+  agentStore.set({ activeId: id, messages: [], todos: [], permissions: [], busy: false, error: null });
   await refreshActive();
 }
 
@@ -1171,12 +1231,18 @@ export async function deleteSession(id: string) {
   clearQueuedFollowUps(id);
   const s = agentStore.get();
   const rest = s.sessions.filter((x) => x.id !== id);
+  const memoryUpdatedIds = { ...s.memoryUpdatedIds };
+  const errorLog = { ...s.errorLog };
+  delete memoryUpdatedIds[id];
+  delete errorLog[id];
   agentStore.set({
     sessions: rest,
     activeId: s.activeId === id ? (rest[0]?.id ?? null) : s.activeId,
     messages: s.activeId === id ? [] : s.messages,
     permissions: s.permissions.filter((p) => p.sessionID !== id),
     questions: s.questions.filter((q) => q.sessionID !== id),
+    memoryUpdatedIds,
+    errorLog,
   });
   if (agentStore.get().activeId) await refreshActive();
 }
@@ -1445,7 +1511,7 @@ export async function sendCommand(name: string, args: string): Promise<boolean> 
   const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
   // Skills + memory context accompanies slash commands too (Qoder parity).
   const augmentation = await currentAugmentation().catch(() => '');
-  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `running /${name}…`, memoryUpdated: false });
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `running /${name}…` });
   lastSubmitAt = Date.now();
   clearSessionQuestions(id);
   clearSessionPermissions(id);
@@ -1458,7 +1524,9 @@ export async function sendCommand(name: string, args: string): Promise<boolean> 
       arguments: augmentBody(args, augmentation),
     }, { timeoutMs: SUBMIT_TIMEOUT_MS });
   } catch (e) {
-    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
+    const msg = (e as Error)?.message ?? String(e);
+    rememberError(id, msg);
+    agentStore.set({ error: msg, busy: false, status: 'error', statusInfo: null });
     return false;
   }
   await refreshActive().catch(() => {});
@@ -1490,7 +1558,9 @@ export async function compactSession(id: string): Promise<boolean> {
   try {
     await oc.post(`/session/${id}/summarize`, { providerID: model.providerID, modelID: model.modelID });
   } catch (e) {
-    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
+    const msg = (e as Error)?.message ?? String(e);
+    rememberError(id, msg);
+    agentStore.set({ error: msg, busy: false, status: 'error', statusInfo: null });
     return false;
   }
   await refreshActive().catch(() => {});
@@ -1766,19 +1836,18 @@ async function currentAugmentation(): Promise<string> {
 
 /** Qoder-style automatic memory update: after a turn goes idle, scan the
  *  last exchange for durable facts and persist them. Best-effort and
- *  backgrounded — a failure never affects the turn. Sets the chat badge
- *  when something actually changed. */
+ *  backgrounded — a failure never affects the turn. The badge attaches to
+ *  the turn's own answer message, so later sends keep it in the transcript. */
 function maybeExtractMemory() {
   const s = agentStore.get();
   const settings = readSettings();
   if (s.busy || !settings.memoryEnabled || !settings.memoryAutoUpdate || !s.activeId) return;
   const sid = s.activeId;
+  const targetId = turnAnswerMessageId(s.messages);
   const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
   void runMemoryExtraction({ sessionId: sid, messages: s.messages, model: sel.model ?? null })
     .then((res) => {
-      if (res.wrote > 0 && agentStore.get().activeId === sid) {
-        agentStore.set({ memoryUpdated: true });
-      }
+      if (res.wrote > 0 && targetId) markMemoryUpdated(sid, targetId);
     })
     .catch(() => {});
 }
@@ -1790,7 +1859,11 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   if (!body && !files.length) {
     // Everything attached was malformed — say so instead of sending a
     // part-less request the provider would reject as invalid parameters.
-    if (rawFiles.length) agentStore.set({ error: 'Attachment unreadable (only PNG, JPG, GIF, WebP, BMP up to 8 MB). Re-attach and try again.', busy: false, status: 'idle', statusInfo: null });
+    if (rawFiles.length) {
+      const msg = 'Attachment unreadable (only PNG, JPG, GIF, WebP, BMP up to 8 MB). Re-attach and try again.';
+      rememberError(s.activeId, msg);
+      agentStore.set({ error: msg, busy: false, status: 'idle', statusInfo: null });
+    }
     return false;
   }
   let id = s.activeId;
@@ -1820,7 +1893,7 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
     ...(body ? [{ type: 'text', text: augmentBody(body, augmentation) }] : []),
   ];
   const messageID = `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: 'sending…', memoryUpdated: false });
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: 'sending…' });
   lastSubmitAt = Date.now();
   clearSessionQuestions(id); // a fresh run supersedes any dead waits
   clearSessionPermissions(id);
@@ -1852,7 +1925,9 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
     }
   }
   if (!sent) {
-    agentStore.set({ error: lastErr || 'The message was not accepted. The agent may be down — retry in a moment.', busy: false, status: 'error', statusInfo: null });
+    const msg = lastErr || 'The message was not accepted. The agent may be down — retry in a moment.';
+    rememberError(id, msg);
+    agentStore.set({ error: msg, busy: false, status: 'error', statusInfo: null });
     return false;
   }
   await loadSessions().catch(() => {});
@@ -2152,6 +2227,7 @@ async function finishRelay(exit: RelayExit) {
   // Refresh first: refreshActive recomputes the store error from the
   // transcript and would clobber the relay failure below.
   await refreshActive().catch(() => {});
+  if (!ok) rememberError(sid, errText ?? '');
   agentStore.set({
     busy: false,
     status: ok ? 'idle' : 'error',
@@ -2211,11 +2287,13 @@ async function sendRelay(
       auto: settings.opencodeRelayAuto,
     });
   } catch (e) {
-    agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'idle', statusInfo: null });
+    const msg = (e as Error)?.message ?? String(e);
+    rememberError(sessionID, msg);
+    agentStore.set({ error: msg, busy: false, status: 'idle', statusInfo: null });
     return false;
   }
   relayTitle = derivePromptTitle(body, files);
-  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `Sending via ${RELAY_DISPLAY_NAME}…`, memoryUpdated: false });
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `Sending via ${RELAY_DISPLAY_NAME}…` });
   lastSubmitAt = Date.now();
   clearSessionQuestions(sessionID); // a fresh run supersedes any dead waits
   clearSessionPermissions(sessionID);
@@ -2259,9 +2337,11 @@ async function sendRelay(
     // Spawn never happened: retract the optimistic bubble (nothing was
     // stored server-side) instead of leaving a phantom message.
     const oid = optimistic.info?.id;
+    const msg = (e as Error)?.message ?? String(e);
+    rememberError(sessionID, msg);
     agentStore.set({
       messages: agentStore.get().messages.filter((m) => m?.info?.id !== oid),
-      error: (e as Error)?.message ?? String(e),
+      error: msg,
       busy: false,
       status: 'error',
       statusInfo: null,
@@ -2419,10 +2499,9 @@ export async function abortActive() {
     agentStore.set({ status: 'stopping' });
   }
   // Still busy server-side: say so plainly instead of pretending.
-  agentStore.set({
-    status: 'busy',
-    error: 'Stop did not take — the run is still going server-side. Switch projects (or restart Barang) to force-stop it.',
-  });
+  const msg = 'Stop did not take — the run is still going server-side. Switch projects (or restart Barang) to force-stop it.';
+  rememberError(id, msg);
+  agentStore.set({ status: 'busy', error: msg });
 }
 
 const SEND_FATAL = [

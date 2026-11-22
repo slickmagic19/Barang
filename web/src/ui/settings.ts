@@ -4,9 +4,14 @@
 // Layout (panel reset). Persisted to localStorage, applied immediately.
 import {
   agentStore, loadMeta, readSettings, writeSettings, isFreeKiloModel, pickDefaultModel,
-  setAgent, listSelectableModels, applyModelSelection, aggregateUsage,
+  setAgent, listSelectableModels, applyModelSelection, aggregateUsage, loadSkills,
   type SessionInfo,
 } from '../lib/agent';
+import { parseSkillMarkdown, skillsByScope } from '../lib/skills';
+import {
+  parseMemoryMarkdown, serializeMemory, renderMemoryIndex, upsertIndexLine, removeIndexLine,
+  validateMemoryInput,
+} from '../lib/memory';
 import {
   parseMcpFile, toServerList, buildFileText, validateServer, parseKvLines,
   toLiveConfig, wordpressQuickFill, mergeStatuses,
@@ -58,7 +63,7 @@ export function openSettings(hooks: SettingsHooks) {
 
   // Section registry (single source of truth for the nav rail). Every
   // section() call below must use one of these titles.
-  const SECTIONS = ['Account', 'Usage', 'Model', 'Agent', 'MCP', 'Providers', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
+  const SECTIONS = ['Account', 'Usage', 'Model', 'Agent', 'Skills', 'Memory', 'MCP', 'Providers', 'Chat', 'Editor', 'Terminal', 'Sessions', 'Notifications', 'Startup', 'Layout', 'About'];
   const secSlug = (t: string) => 'sec-' + t.toLowerCase();
   const section = (title: string) => body.append(el('p', { class: 'settings-label', id: secSlug(title) }, title));
   // Toggle switch row (VSCode-style). The real checkbox stays in the DOM
@@ -1524,6 +1529,213 @@ export function openSettings(hooks: SettingsHooks) {
     window.dispatchEvent(new Event('resize'));
     hooks.toast('Panel sizes reset to defaults.', 'info');
   };
+
+  // --- Skills (Qoder-compatible SKILL.md scopes) ---
+  section('Skills');
+  const skillsBox = el('div', { class: 'settings-skills' });
+  body.append(skillsBox);
+  body.append(el('p', { class: 'settings-note' },
+    'Skills are reusable instruction packs the agent loads on demand. Bundled skills ship with ' +
+    'Barang; project skills live in .barang/skills (shared via git); user skills apply to every project. ' +
+    'Type /skill:<name> in the composer to load one for a turn.'));
+  const skillsState: { list: Array<{ scope: 'bundled' | 'user' | 'project'; name: string; description: string; body: string; file: string }>; loading: boolean } = {
+    list: [], loading: true,
+  };
+  const skillsPaint = () => {
+    skillsBox.innerHTML = '';
+    if (skillsState.loading) {
+      skillsBox.append(el('div', { class: 'scm-none' }, 'Loading skills…'));
+      return;
+    }
+    const groups = skillsByScope(skillsState.list as never);
+    const order: Array<'bundled' | 'user' | 'project'> = ['bundled', 'user', 'project'];
+    const labels = { bundled: 'Bundled', user: 'User', project: 'Project (.barang/skills)' };
+    for (const scope of order) {
+      const list = groups[scope] || [];
+      if (!list.length && scope !== 'project') continue;
+      const head = el('div', { class: 'settings-subhead' });
+      head.append(el('span', {}, labels[scope]), el('span', { class: 'muted' }, String(list.length)));
+      skillsBox.append(head);
+      for (const sk of list) {
+        const row = el('div', { class: 'skill-row' });
+        row.append(el('div', { class: 'skill-name' }, sk.name));
+        row.append(el('div', { class: 'skill-desc' }, (sk.description || 'No description.').slice(0, 140)));
+        if (scope === 'project') {
+          const del = el('button', { class: 'btn btn-sm', title: 'Delete skill' }, 'Delete') as HTMLButtonElement;
+          del.onclick = () => void skillsDelete(sk.name);
+          row.append(del);
+        }
+        skillsBox.append(row);
+      }
+    }
+    const add = el('div', { class: 'settings-add-row' });
+    const nameIn = el('input', { class: 'settings-input', placeholder: 'skill-name (project)' }) as HTMLInputElement;
+    const fileIn = el('input', { class: 'settings-input', placeholder: 'SKILL.md text or leave to scaffold' }) as HTMLInputElement;
+    const btnAdd = el('button', { class: 'btn btn-sm' }, 'Add project skill') as HTMLButtonElement;
+    btnAdd.onclick = () => void skillsAdd(nameIn.value, fileIn.value);
+    add.append(nameIn, fileIn, btnAdd);
+    skillsBox.append(add);
+  };
+  const skillsRefresh = async () => {
+    skillsState.loading = true;
+    skillsPaint();
+    try {
+      const raw = await loadSkills();
+      const records = await barang().skills.list();
+      skillsState.list = records.map((r) => {
+        const sk = parseSkillMarkdown(r.text, { scope: r.scope, dir: r.dir, path: r.path, file: r.file });
+        return { scope: r.scope, name: sk?.name || r.dir, description: sk?.description || '', body: sk?.body || '', file: r.file };
+      });
+      // keep the parsed list authoritative for future paint calls
+      void raw;
+    } catch (e) {
+      hooks.toast((e as Error).message, 'error');
+    }
+    skillsState.loading = false;
+    skillsPaint();
+  };
+  const skillsAdd = async (name: string, text: string) => {
+    const slug = name.trim();
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) {
+      hooks.toast('Bad skill name (lowercase letters, numbers, dashes).', 'error');
+      return;
+    }
+    const body = text.trim() || `# ${slug}\n\nDescribe when to use this skill and the steps to follow.\n`;
+    const md = `---\nname: ${slug}\ndescription: Use when … (one-line summary).\n---\n\n${body}`;
+    try {
+      await barang().skills.write(slug, md);
+      hooks.toast(`Skill "${slug}" saved to .barang/skills.`, 'info');
+      await skillsRefresh();
+    } catch (e) {
+      hooks.toast((e as Error).message, 'error');
+    }
+  };
+  const skillsDelete = async (name: string) => {
+    const okd = await confirmDialog({ title: `Delete skill "${name}"?`, message: 'Removes the project skill directory.', danger: true });
+    if (!okd) return;
+    try {
+      await barang().skills.remove(name);
+      hooks.toast(`Skill "${name}" deleted.`, 'info');
+      await skillsRefresh();
+    } catch (e) {
+      hooks.toast((e as Error).message, 'error');
+    }
+  };
+  onShow.set('Skills', () => void skillsRefresh());
+
+  // --- Memory (Qoder-style typed memory + MEMORY.md index) ---
+  section('Memory');
+  body.append(el('p', { class: 'settings-note' },
+    'Memories persist facts and preferences across sessions. Relevant memories are injected into the ' +
+    'agent context each turn. User memories apply to all projects; project memories live in .barang/memory.'));
+  const memAutoBox = checkRow('Auto-update memory after each turn (runs a quick background extraction — one extra model call)');
+  memAutoBox.checked = readSettings().memoryAutoUpdate;
+  memAutoBox.onchange = () => {
+    commit((s) => { s.memoryAutoUpdate = memAutoBox.checked; });
+  };
+  const memBox = el('div', { class: 'settings-memory' });
+  body.append(memBox);
+  const memState: { entries: Array<{ scope: 'user' | 'project'; slug: string; title: string; hook: string; type: string; body: string; file: string; mtime: number }>; loading: boolean } = {
+    entries: [], loading: true,
+  };
+  const memPaint = () => {
+    memBox.innerHTML = '';
+    if (memState.loading) {
+      memBox.append(el('div', { class: 'scm-none' }, 'Loading memories…'));
+      return;
+    }
+    const sorted = memState.entries.slice().sort((a, b) => {
+      const order = ['user', 'feedback', 'project', 'reference'];
+      const t = order.indexOf(a.type) - order.indexOf(b.type);
+      return t || a.title.localeCompare(b.title);
+    });
+    for (const e of sorted) {
+      const row = el('div', { class: 'memory-row' });
+      const head = el('div', { class: 'memory-head' });
+      head.append(el('span', { class: `memory-type is-${e.type}` }, e.type));
+      head.append(el('span', { class: 'memory-title' }, e.title));
+      head.append(el('span', { class: 'muted' }, e.scope));
+      const del = el('button', { class: 'btn btn-sm', title: 'Delete memory' }, '×') as HTMLButtonElement;
+      del.onclick = () => void memDelete(e.scope, e.slug);
+      head.append(del);
+      row.append(head);
+      row.append(el('div', { class: 'memory-hook' }, (e.hook || '').slice(0, 160)));
+      memBox.append(row);
+    }
+    const add = el('div', { class: 'settings-add-row' });
+    const slugIn = el('input', { class: 'settings-input', placeholder: 'slug (e.g. user-role)' }) as HTMLInputElement;
+    const titleIn = el('input', { class: 'settings-input', placeholder: 'Title' }) as HTMLInputElement;
+    const typeSel = el('select', { class: 'settings-input' }) as HTMLSelectElement;
+    for (const t of ['user', 'feedback', 'project', 'reference']) typeSel.append(el('option', { value: t }, t));
+    const scopeSel = el('select', { class: 'settings-input' }) as HTMLSelectElement;
+    scopeSel.append(el('option', { value: 'project' }, 'project'));
+    scopeSel.append(el('option', { value: 'user' }, 'user'));
+    const bodyIn = el('input', { class: 'settings-input', placeholder: 'Memory body (markdown)' }) as HTMLInputElement;
+    const btnAdd = el('button', { class: 'btn btn-sm' }, 'Add memory') as HTMLButtonElement;
+    btnAdd.onclick = () => void memAdd({
+      slug: slugIn.value, title: titleIn.value, type: (typeSel.value || 'project') as never,
+      scope: (scopeSel.value || 'project') as never, body: bodyIn.value,
+    });
+    add.append(slugIn, titleIn, typeSel, scopeSel, bodyIn, btnAdd);
+    memBox.append(add);
+  };
+  const memRefresh = async () => {
+    memState.loading = true;
+    memPaint();
+    try {
+      const found = await barang().memory.discover();
+      const parse = (list: Array<{ scope: 'user' | 'project'; slug: string; file: string; mtime: number; text: string }>) =>
+        (list || [])
+          .map((r) => parseMemoryMarkdown(r.text, { slug: r.slug, scope: r.scope, file: r.file, mtime: r.mtime }))
+          .filter((m): m is NonNullable<typeof m> => !!m);
+      memState.entries = [...parse(found.user), ...parse(found.project)];
+    } catch (e) {
+      hooks.toast((e as Error).message, 'error');
+    }
+    memState.loading = false;
+    memPaint();
+  };
+  const memAdd = async (input: { slug: string; title: string; type: 'user' | 'feedback' | 'project' | 'reference'; scope: 'user' | 'project'; body: string }) => {
+    const errs = validateMemoryInput(input);
+    if (errs.length) {
+      hooks.toast(errs[0], 'error');
+      return;
+    }
+    const text = serializeMemory({
+      slug: input.slug.trim(), title: input.title.trim(), hook: input.body.trim().split(/\n/)[0].slice(0, 160),
+      type: input.type, scope: input.scope, body: input.body,
+    });
+    try {
+      await barang().memory.write(input.scope, input.slug.trim(), text);
+      // upsert the MEMORY.md index line
+      const found = await barang().memory.discover();
+      const idx = input.scope === 'user' ? found.userIndex : found.projectIndex;
+      const line = upsertIndexLine(idx, { slug: input.slug.trim(), title: input.title.trim(), hook: input.body.trim().split(/\n/)[0].slice(0, 160) });
+      await barang().memory.writeIndex(input.scope, line);
+      hooks.toast(`Memory "${input.title.trim()}" saved (${input.scope}).`, 'info');
+      await memRefresh();
+    } catch (e) {
+      hooks.toast((e as Error).message, 'error');
+    }
+  };
+  const memDelete = async (scope: 'user' | 'project', slug: string) => {
+    const okd = await confirmDialog({ title: `Delete memory "${slug}"?`, message: 'Removes the memory file and its index line.', danger: true });
+    if (!okd) return;
+    try {
+      await barang().memory.remove(scope, slug);
+      const found = await barang().memory.discover();
+      const idx = scope === 'user' ? found.userIndex : found.projectIndex;
+      await barang().memory.writeIndex(scope, removeIndexLine(idx, slug));
+      hooks.toast(`Memory "${slug}" deleted.`, 'info');
+      await memRefresh();
+    } catch (e) {
+      hooks.toast((e as Error).message, 'error');
+    }
+  };
+  onShow.set('Memory', () => {
+    memAutoBox.checked = readSettings().memoryAutoUpdate;
+    void memRefresh();
+  });
 
   // --- About ---
   section('About');

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 
 const isWin = process.platform === 'win32';
 const WEB_PORT = process.env.BARANG_WEB_PORT || '5173';
-const viteUrl = `http://127.0.0.1:${WEB_PORT}`;
+const viteUrl = `http://localhost:${WEB_PORT}`;
 const children = [];
 
 function run(cmd, args, env, tag) {

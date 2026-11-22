@@ -8,7 +8,7 @@ import {
   refreshActive, readSettings, writeSettings, deriveSessionChanges, listSelectableModels, applyModelSelection, loadMeta, isFreeModel,
   statusTextFor, messageErrorText, isFreeTierGateError, freeTierGuidance, isModelAccessError, modelAccessGuidance, todoProgress, classifyAttachFile,
   relayActive, relayRouteFor, modelListKey, sessionDisplayTitle, stuckContinueText, relayEchoGuard, isTransientRelayEcho,
-  loadCommands, parseSlashCommand, sendCommand,
+  loadCommands, parseSlashCommand, sendCommand, loadSkills,
   compactSession, shareSession, unshareSession, markQuestionAnswered,
   enqueueFollowUp, queuedFollowUps, removeQueuedFollowUp, drainQueue,
   type ChatMessage, type ChangeEntry, type PendingPermission, type PermissionResponse,
@@ -1210,6 +1210,13 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
     eb.append(errBody);
     list.append(eb);
   }
+  // Memory Updated badge (Qoder-style): shown when post-turn extraction
+  // wrote or updated a memory entry during the last turn.
+  if (activeId && agentStore.get().memoryUpdated) {
+    const badge = el('div', { class: 'memory-badge' });
+    badge.append(iconEl('bulb', 13), el('span', {}, 'Memory Updated'));
+    list.append(badge);
+  }
   if (chatKeepScroll) {
     // "Show more" prepends above: hold the reading position steady.
     list.scrollTop = list.scrollHeight - prevHeight + prevTop;
@@ -1957,6 +1964,24 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
       return; // keep the text so it can run right after
     }
     if (slash) {
+      // /skill:<name> — load a skill's instructions into this turn.
+      const skillM = /^skill:(.+)$/.exec(slash.name);
+      if (skillM) {
+        const skills = await loadSkills().catch(() => []);
+        const sk = skills.find((x) => x.name === skillM[1]);
+        if (!sk) {
+          hooks.toast(`Unknown skill: ${skillM[1]}`, 'error');
+          return;
+        }
+        pushComposerHist(v.trim());
+        input.value = '';
+        autoGrow();
+        suggest.classList.add('hidden');
+        await sendMessage(
+          `Use the "${sk.name}" skill for this task. Skill instructions:\n\n${sk.body}${slash.args ? `\n\nTask: ${slash.args}` : ''}`,
+        );
+        return;
+      }
       const local = LOCAL_COMMANDS[slash.name];
       if (local) {
         pushComposerHist(v.trim());
@@ -2045,8 +2070,14 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
         const local = Object.entries(LOCAL_COMMANDS)
           .filter(([name]) => !seen.has(name))
           .map(([name, c]) => ({ name, description: c.description }));
+        // Skills surface as /skill:<name> (load instructions into the turn).
+        const skills = await loadSkills().catch(() => []);
+        const skillCmds = skills
+          .filter((sk) => !seen.has(`skill:${sk.name}`))
+          .map((sk) => ({ name: `skill:${sk.name}`, description: sk.description || 'Load skill instructions' }));
         const all = [
           ...local.map((c) => ({ name: c.name, description: c.description })),
+          ...skillCmds,
           ...list.map((c) => ({ name: c.name, description: typeof c.description === 'string' ? c.description : '' })),
         ];
         const q = cmdM[1].toLowerCase();

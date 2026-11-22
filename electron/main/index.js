@@ -18,6 +18,8 @@ import * as term from './terminal.js';
 import * as scm from './git.js';
 import * as api from './api.js';
 import * as auth from './auth.js';
+import * as skills from './skills.js';
+import * as memstore from './memory.js';
 import { findKilo, isDirectBinary } from './kilo.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // electron/main
@@ -235,7 +237,6 @@ function createWindow() {
   });
   if (VITE_URL) {
     win.loadURL(VITE_URL);
-    win.webContents.openDevTools({ mode: 'detach' });
   } else {
     win.loadFile(path.join(DIST_DIR, 'index.html'));
   }
@@ -1036,6 +1037,76 @@ function registerIpc() {
     if (picked.canceled || !picked.filePath) return { ok: false, error: 'cancelled' };
     return { ok: true, data: { path: picked.filePath } };
   });
+
+  // --- Skills (Qoder-compatible SKILL.md scopes) -------------------------
+  // bundled (app resources) | user (<userData>/skills) | project (<root>/.barang/skills)
+  ipcMain.handle('skills:list', ok(async () => {
+    const records = await skills.discoverSkills({
+      appDir: here,
+      userDataDir: app.getPath('userData'),
+      root,
+    });
+    // Read each SKILL.md; the renderer parses frontmatter (single parser).
+    const out = [];
+    for (const r of records) {
+      const text = await fs.readFile(r.file, 'utf8').catch(() => null);
+      if (text === null) continue;
+      out.push({ scope: r.scope, dir: r.dir, path: r.path, file: r.file, text });
+    }
+    return out;
+  }));
+  ipcMain.handle('skills:write', ok(async (p = {}) => {
+    const file = await skills.writeProjectSkill(root, p.name, p.text);
+    return { path: file };
+  }));
+  ipcMain.handle('skills:remove', ok(async (p = {}) => {
+    await skills.removeProjectSkill(root, p.name);
+    return { ok: true };
+  }));
+
+  // --- Memory (Qoder-style typed memory + MEMORY.md index) ----------------
+  ipcMain.handle('memory:discover', ok(async () => {
+    const found = await memstore.discoverMemories({
+      userDataDir: app.getPath('userData'),
+      root,
+    });
+    const readAll = async (list) => {
+      const out = [];
+      for (const e of list) {
+        const text = await memstore.readMemoryFile(e.file);
+        if (text === null) continue;
+        out.push({ scope: e.scope, slug: e.slug, file: e.file, mtime: e.mtime, text });
+      }
+      return out;
+    };
+    const [user, project] = await Promise.all([readAll(found.user), readAll(found.project)]);
+    const [userIdx, projectIdx] = await Promise.all([
+      memstore.readMemoryIndex('user', { userDataDir: app.getPath('userData'), root }),
+      memstore.readMemoryIndex('project', { userDataDir: app.getPath('userData'), root }),
+    ]);
+    return { user, project, userIndex: userIdx.text, projectIndex: projectIdx.text };
+  }));
+  ipcMain.handle('memory:write', ok(async (p = {}) => {
+    const scope = p.scope === 'user' ? 'user' : 'project';
+    const file = await memstore.writeMemory(scope, {
+      userDataDir: app.getPath('userData'), root,
+    }, p.slug, p.text);
+    return { path: file };
+  }));
+  ipcMain.handle('memory:write-index', ok(async (p = {}) => {
+    const scope = p.scope === 'user' ? 'user' : 'project';
+    const path = await memstore.writeMemoryIndex(scope, {
+      userDataDir: app.getPath('userData'), root,
+    }, p.text);
+    return { path };
+  }));
+  ipcMain.handle('memory:remove', ok(async (p = {}) => {
+    const scope = p.scope === 'user' ? 'user' : 'project';
+    await memstore.removeMemory(scope, {
+      userDataDir: app.getPath('userData'), root,
+    }, p.slug);
+    return { ok: true };
+  }));
 }
 
 // --- smoke modes (headless CI without a display) --------------------------
@@ -1167,6 +1238,47 @@ async function runMainSmoke() {
     const ms = Date.now() - t0;
     if (r.totalFiles < 5) throw new Error(`suspiciously few hits (${r.totalFiles})`);
     return `${r.totalFiles} files in ${ms}ms`;
+  });
+  await check('skills-discover', async () => {
+    // Bundled skills must be discoverable + readable (Qoder skill pack).
+    const records = await skills.discoverSkills({
+      appDir: here,
+      userDataDir: app.getPath('userData'),
+      root,
+    });
+    if (!records.length) throw new Error('no skills discovered (bundled dir missing?)');
+    const names = records.map((r) => r.dir).sort();
+    for (const expected of ['skill-creator', 'imagegen', 'office-docx', 'sites']) {
+      if (!names.includes(expected)) throw new Error(`missing bundled skill: ${expected}`);
+    }
+    // every record must carry readable SKILL.md text with frontmatter
+    for (const r of records) {
+      const text = await fs.readFile(r.file, 'utf8').catch(() => '');
+      if (!/^---/.test(text)) throw new Error(`no frontmatter: ${r.dir}`);
+    }
+    return `${records.length} skills (${names.slice(0, 4).join(', ')}…)`;
+  });
+  await check('memory-roundtrip', async () => {
+    // Write a project memory + index, read it back, then remove it. Uses a
+    // throwaway root so a real project's .barang/memory is never touched.
+    const dir = path.join(app.getPath('temp'), `barang-mem-${process.pid}`);
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      const text = ['---', 'name: smoke-note', 'title: "Smoke note"', 'description: "A smoke-test memory."', 'metadata:', '  type: project', '---', '', 'Smoke body.'].join('\n');
+      await memstore.writeMemory('project', { userDataDir: app.getPath('userData'), root: dir }, 'smoke-note', text);
+      await memstore.writeMemoryIndex('project', { userDataDir: app.getPath('userData'), root: dir }, '- [Smoke note](smoke-note.md) — A smoke-test memory.\n');
+      const found = await memstore.discoverMemories({ userDataDir: app.getPath('userData'), root: dir });
+      const rec = found.project.find((e) => e.slug === 'smoke-note');
+      if (!rec) throw new Error('memory not discovered after write');
+      const back = await memstore.readMemoryFile(rec.file);
+      if (!back || !back.includes('Smoke body.')) throw new Error('memory roundtrip mismatch');
+      const idx = await memstore.readMemoryIndex('project', { userDataDir: app.getPath('userData'), root: dir });
+      if (!idx.text.includes('smoke-note')) throw new Error('index not written');
+      return 'write/discover/read/index ok';
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
   await check('git-cycle', async () => {
     // Full lifecycle in a THROWAWAY repo under temp (never user code):

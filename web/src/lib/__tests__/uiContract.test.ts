@@ -6,7 +6,10 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 // Comments are stripped first so declaration parsing never trips over them.
+// Line endings are normalized to LF so `\n`-based assertions are stable no
+// matter how git checks the stylesheet out on Windows.
 const css = readFileSync(new URL('../../styles.css', import.meta.url), 'utf8')
+  .replace(/\r\n/g, '\n')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 const editorTs = readFileSync(new URL('../../ui/editor.ts', import.meta.url), 'utf8');
 
@@ -232,10 +235,6 @@ describe('agent transcript (Qoder 1:1)', () => {
     expect(decl('.composer-box', 'border-radius')).toEqual(['6px']);
   });
 
-  it('pins the send button to the far right of the row (Qoder)', () => {
-    expect(decl('.send-row .btn-primary', 'margin-left')).toContain('auto');
-  });
-
   it('styles the composer pickers as subtle-radius chips with chevrons', () => {
     expect(decl('.agent-btn', 'border-radius')).toEqual(['6px']);
     expect(decl('.model-btn', 'border-radius')).toEqual(['6px']);
@@ -246,6 +245,20 @@ describe('agent transcript (Qoder 1:1)', () => {
     // The old native selects must not creep back into the composer.
     expect(css).not.toContain('.model-mini');
     expect(css).not.toContain('.effort-mini');
+  });
+
+  it('keeps composer buttons in a single row with send on the right', () => {
+    expect(decl('.composer-box', 'min-width')).toEqual(['0']);
+    expect(decl('.send-row', 'min-width')).toEqual(['0']);
+    // Single row, no wrapping.
+    expect(decl('.send-row', 'flex-wrap')).not.toContain('wrap');
+    // Send button pinned to the far right.
+    expect(decl('.send-row .btn-primary', 'margin-left')).toContain('auto');
+    // Pickers shrink when space is tight, but dropdown stays fixed.
+    expect(decl('.agent-btn', 'flex')).toContain('0 1 auto');
+    expect(decl('.model-btn', 'flex')).toContain('0 1 auto');
+    expect(decl('.model-picker-dropdown', 'min-width')).toContain('200px');
+    expect(decl('.model-picker-dropdown', 'flex-shrink')).toContain('0');
   });
 
   it('marks the picked dropdown row with a check, not an edge stripe', () => {

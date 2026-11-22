@@ -77,6 +77,24 @@ export interface BarangBridge {
     }) => void): () => void;
   };
   mcpConfig(action: 'read' | 'write', payload?: { scope?: 'managed' | 'project'; text?: string }): Promise<any>;
+  /** Qoder-compatible skills. list resolves raw SKILL.md records (renderer parses). */
+  skills: {
+    list(): Promise<Array<{ scope: 'bundled' | 'user' | 'project'; dir: string; path: string; file: string; text: string }>>;
+    write(name: string, text: string): Promise<{ path: string }>;
+    remove(name: string): Promise<{ ok: boolean }>;
+  };
+  /** Qoder-style memory (both scopes + MEMORY.md index text). */
+  memory: {
+    discover(): Promise<{
+      user: Array<{ scope: 'user'; slug: string; file: string; mtime: number; text: string }>;
+      project: Array<{ scope: 'project'; slug: string; file: string; mtime: number; text: string }>;
+      userIndex: string;
+      projectIndex: string;
+    }>;
+    write(scope: 'user' | 'project', slug: string, text: string): Promise<{ path: string }>;
+    writeIndex(scope: 'user' | 'project', text: string): Promise<{ path: string }>;
+    remove(scope: 'user' | 'project', slug: string): Promise<{ ok: boolean }>;
+  };
   auth: {
     status(): Promise<{ loggedIn: boolean; name: string; email: string; team: string; balance: number | null; source?: string; hasKey?: boolean }>;
     /** Begin the OAuth device flow; resolves when authorized/failed. */

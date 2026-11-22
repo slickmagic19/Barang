@@ -5,6 +5,15 @@ import { oc } from './api';
 import { barang } from './transport';
 import { createStore, debounce, timeAgo } from './util';
 import {
+  parseSkillMarkdown, skillsCatalog, mergeSkills,
+  type Skill, type SkillMeta,
+} from './skills';
+import {
+  parseMemoryMarkdown, memoryPromptBlock, mergeMemories,
+  type MemoryEntry,
+} from './memory';
+import { runMemoryExtraction, EXTRACT_SESSION_TITLE } from './memoryExtraction';
+import {
   shouldRelayRoute, buildRelayArgs, relayProgressLabel, redactSecrets,
   RELAY_DISPLAY_NAME,
   type RelayParsed,
@@ -222,6 +231,7 @@ interface AgentState {
   relayStuck: RelayStuck | null; // quiet-tool escalation (Stop & continue offer)
   connected: boolean;
   error: string | null;
+  memoryUpdated: boolean; // set true after post-turn extraction writes a memory
 }
 
 export const agentStore = createStore<AgentState>({
@@ -243,10 +253,13 @@ export const agentStore = createStore<AgentState>({
   relayStuck: null,
   connected: false,
   error: null,
+  memoryUpdated: false,
 });
 
 const scheduleRefresh = debounce(() => void refreshActive().catch(() => {}), 300);
 const scheduleSessions = debounce(() => void loadSessions().catch(() => {}), 800);
+// Settles just after a turn ends so the final transcript is in the store.
+const scheduleMemoryExtraction = debounce(() => maybeExtractMemory(), 800);
 
 // --- Busy heartbeat -------------------------------------------------------
 // The run's busy flag is normally cleared by the `session.idle` event, but that
@@ -283,6 +296,8 @@ export async function pollStatusOnce(): Promise<void> {
   await refreshStatus(s.activeId as string).catch(() => {});
   if (wasBusy && !agentStore.get().busy) {
     await refreshActive().catch(() => {});
+    // Post-turn memory extraction (Qoder-style auto-memory)
+    scheduleMemoryExtraction();
   }
 }
 
@@ -750,6 +765,9 @@ export interface BarangSettings {
   notifOnError: boolean; // notify on run errors, default true
   notifTaskbar: boolean; // taskbar badge + flash, default true
   notifToastFocused: boolean; // in-app toast when focused, default true
+  skillsEnabled: boolean; // inject the skills catalog + slash commands, default true
+  memoryEnabled: boolean; // inject relevant memories each turn, default true
+  memoryAutoUpdate: boolean; // auto-extract memories after each turn, default true
 }
 
 const SETTINGS_KEY = 'barang:settings-v1';
@@ -794,6 +812,9 @@ const SETTING_DEFAULTS: BarangSettings = {
   notifOnError: true,
   notifTaskbar: true,
   notifToastFocused: true,
+  skillsEnabled: true,
+  memoryEnabled: true,
+  memoryAutoUpdate: true,
 };
 
 /** Builtin notification sound ids (mirrors notify.BUILTIN_SOUNDS — kept
@@ -901,6 +922,8 @@ export function readSettings(): BarangSettings {
       notifOnError: p.notifOnError !== false,
       notifTaskbar: p.notifTaskbar !== false,
       notifToastFocused: p.notifToastFocused !== false,
+      skillsEnabled: p.skillsEnabled !== false,
+      memoryEnabled: p.memoryEnabled !== false,
       model: p.model?.providerID && p.model?.modelID ? { providerID: p.model.providerID, modelID: p.model.modelID } : null,
       modelChosen: p.modelChosen === true || !!(p.model?.providerID && p.model?.modelID),
       agent: typeof p.agent === 'string' ? p.agent : null,
@@ -1046,11 +1069,13 @@ export async function loadSessions() {
   // Scope chat history to the open project: opencode sessions carry the
   // project root in `directory`. No project open = no sessions shown.
   const root = normDir(agentStore.get().root || '');
-  const sessions = (root ? all.filter((x) => normDir(String(x.directory || '')) === root) : []).slice();
+  const sessions = (root
+    ? all.filter((x) => normDir(String(x.directory || '')) === root && String(x.title ?? '') !== EXTRACT_SESSION_TITLE)
+    : []).slice();
   sessions.sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0));
   const s = agentStore.get();
   const activeId = s.activeId && sessions.some((x) => x.id === s.activeId) ? s.activeId : (sessions[0]?.id ?? null);
-  agentStore.set({ sessions, activeId });
+  agentStore.set({ sessions, activeId, ...(activeId !== s.activeId ? { memoryUpdated: false } : {}) });
   if (activeId && activeId !== s.activeId) await refreshActive();
   else if (activeId) await refreshStatus(activeId);
 }
@@ -1124,7 +1149,7 @@ export async function createSession(title?: string): Promise<string> {
   createFlight = (async () => {
     const { value: created } = await withSendRetries(() => oc.post<SessionInfo>('/session', title ? { title } : {}));
     await loadSessions();
-    agentStore.set({ activeId: created.id, messages: [], todos: [], permissions: [], busy: false, error: null });
+    agentStore.set({ activeId: created.id, messages: [], todos: [], permissions: [], busy: false, error: null, memoryUpdated: false });
     await refreshActive();
     return created.id;
   })();
@@ -1136,7 +1161,7 @@ export async function createSession(title?: string): Promise<string> {
 }
 
 export async function selectSession(id: string) {
-  agentStore.set({ activeId: id, messages: [], todos: [], permissions: [], busy: false, error: null });
+  agentStore.set({ activeId: id, messages: [], todos: [], permissions: [], busy: false, error: null, memoryUpdated: false });
   await refreshActive();
 }
 
@@ -1164,7 +1189,12 @@ export async function refreshStatus(sessionId: string) {
     const st = await oc.get<Record<string, RunStatusInfo>>('/session/status');
     // Switched mid-flight — a stale session's busy flag must not leak in.
     if (agentStore.get().activeId !== sessionId) return;
-    agentStore.set(decideStatus(st?.[sessionId], agentStore.get()));
+    const wasBusy = agentStore.get().busy;
+    const next = decideStatus(st?.[sessionId], agentStore.get());
+    agentStore.set(next);
+    // The event path and the heartbeat both land here — trigger the Qoder-
+    // style memory scan on the single canonical busy→idle transition.
+    if (wasBusy && !next.busy) scheduleMemoryExtraction();
   } catch { /* non-fatal */ }
 }
 
@@ -1272,6 +1302,21 @@ export async function refreshActive() {
   // painting another session's messages into the current view.
   if (agentStore.get().activeId !== id) return;
   const messages = Array.isArray(msgs) ? msgs : [];
+  // Strip our wire-only augmentation wrapper from echoed user messages: the
+  // model received the skills+memory context, but the transcript must show
+  // only the user's real message (Qoder-style under-the-hood context).
+  const cleanMessages = messages.map((m) => {
+    if (String(m?.info?.role ?? '').toLowerCase() === 'user' && m?.parts) {
+      const parts = m.parts.map((p: MsgPart) => {
+        if (p?.type === 'text' && typeof p.text === 'string') {
+          return { ...p, text: stripAugmentation(p.text) };
+        }
+        return p;
+      });
+      return { ...m, parts };
+    }
+    return m;
+  });
   const todoList = Array.isArray(todos) ? todos : [];
   // Run errors live ON the assistant message (info.error) — rendered inline
   // by the chat list. The latest assistant message decides, so a new run
@@ -1287,10 +1332,10 @@ export async function refreshActive() {
   // message parts — the old part-scanner found nothing and is gone.
   const st = agentStore.get();
   agentStore.set({
-    messages,
+    messages: cleanMessages,
     todos: todoList,
     error: runError,
-    lastActivity: describeActivity(messages, st.permissions, st.questions),
+    lastActivity: describeActivity(cleanMessages, st.permissions, st.questions),
   });
   if (messages.length !== s.messages.length) bumpProgress();
   if (st.busy) void backfillQuestions().catch(() => {});
@@ -1398,7 +1443,9 @@ export async function sendCommand(name: string, args: string): Promise<boolean> 
   const known = await loadCommands().catch(() => [] as CommandInfo[]);
   if (known.length && !known.some((c) => c.name === name)) return false;
   const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
-  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `running /${name}…` });
+  // Skills + memory context accompanies slash commands too (Qoder parity).
+  const augmentation = await currentAugmentation().catch(() => '');
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `running /${name}…`, memoryUpdated: false });
   lastSubmitAt = Date.now();
   clearSessionQuestions(id);
   clearSessionPermissions(id);
@@ -1408,7 +1455,7 @@ export async function sendCommand(name: string, args: string): Promise<boolean> 
       ...(sel.model ? { model: { providerID: sel.model.providerID, modelID: sel.model.modelID } } : {}),
       ...(sel.agent ? { agent: sel.agent } : {}),
       command: name,
-      arguments: args,
+      arguments: augmentBody(args, augmentation),
     }, { timeoutMs: SUBMIT_TIMEOUT_MS });
   } catch (e) {
     agentStore.set({ error: (e as Error)?.message ?? String(e), busy: false, status: 'error', statusInfo: null });
@@ -1614,6 +1661,128 @@ export function isTransientRelayEcho(
   return true;
 }
 
+// --- Skills + Memory augmentation ----------------------------------------
+// Qoder-style agent capabilities: a catalog of loadable skills and a set of
+// relevant memories are prepended to each turn so the agent behaves like the
+// full IDE. Both are best-effort: any backend failure degrades to an
+// unaugmented turn instead of blocking the send.
+
+const augCache = new Map<string, { at: number; skills: Skill[] }>();
+const AUG_TTL_MS = 30000;
+
+/** Discover + parse skills across all scopes (cached per root, 30s TTL). */
+export async function loadSkills(): Promise<Skill[]> {
+  const root = agentStore.get().root || '';
+  const hit = augCache.get(root);
+  if (hit && Date.now() - hit.at < AUG_TTL_MS) return hit.skills;
+  let skills: Skill[] = [];
+  try {
+    const records = await barang().skills.list();
+    const parsed: Skill[] = [];
+    for (const r of records ?? []) {
+      const sk = parseSkillMarkdown(r.text, {
+        scope: r.scope, dir: r.dir, path: r.path, file: r.file,
+      });
+      if (sk) parsed.push(sk);
+    }
+    // merge by name (later scopes override): bundled < user < project
+    const order = { bundled: 0, user: 1, project: 2 } as const;
+    parsed.sort((a, b) => order[a.scope] - order[b.scope]);
+    skills = mergeSkills(parsed) as Skill[];
+  } catch {
+    skills = [];
+  }
+  augCache.set(root, { at: Date.now(), skills });
+  return skills;
+}
+
+/** Discover + parse memories across both scopes (fresh read each call —
+ *  memories are small and the agent expects the latest on every turn). */
+export async function loadMemories(): Promise<MemoryEntry[]> {
+  try {
+    const found = await barang().memory.discover();
+    const parse = (list: Array<{ scope: 'user' | 'project'; slug: string; file: string; mtime: number; text: string }>) =>
+      (list ?? [])
+        .map((r) => parseMemoryMarkdown(r.text, { slug: r.slug, scope: r.scope, file: r.file, mtime: r.mtime }))
+        .filter((m): m is MemoryEntry => !!m);
+    return mergeMemories(parse(found.user), parse(found.project));
+  } catch {
+    return [];
+  }
+}
+
+/** Build the augmentation block (skills catalog + memory) for one turn.
+ *  Empty string when both are disabled or nothing is found. Pure given its
+ *  inputs (helpers above do the I/O). */
+export function augmentationBlock(skills: SkillMeta[], memories: MemoryEntry[]): string {
+  const parts: string[] = [];
+  const cat = skillsCatalog(skills);
+  if (cat) parts.push(cat);
+  const mem = memoryPromptBlock(memories);
+  if (mem) parts.push(mem);
+  return parts.join('\n\n');
+}
+
+/** Prepend the augmentation block to a user message. The original text is
+ *  preserved verbatim inside a fenced block so the agent can tell context
+ *  from instructions. Pure. */
+export function augmentBody(body: string, augmentation: string): string {
+  if (!augmentation) return body;
+  return [
+    '[Barang context — skills + memory. Use what is relevant; do not repeat it back.]',
+    augmentation,
+    '',
+    '---',
+    '[User message]',
+    body,
+  ].join('\n');
+}
+
+/** Strip the Barang context wrapper from a user message the server echoed
+ *  back. The augmentation block is wire-only context for the model — it must
+ *  never be part of the persisted/rendered transcript. Returns the original
+ *  body when no wrapper is present (safe for messages we never augmented).
+ *  Pure. */
+export function stripAugmentation(text: string): string {
+  const t = String(text ?? '');
+  const m = /[\s\S]*?\n---\n\[User message\]\n([\s\S]*)$/.exec(t);
+  return m ? m[1] : t;
+}
+
+/** Returns true when a user message carries our augmentation wrapper. Pure. */
+export function isAugmentedMessage(text: unknown): boolean {
+  return /\[Barang context — skills + memory\].*\n---\n\[User message\]/s.test(String(text ?? ''));
+}
+
+/** Resolve the augmentation for the current settings + backend. */
+async function currentAugmentation(): Promise<string> {
+  const settings = readSettings();
+  const [skills, memories] = await Promise.all([
+    settings.skillsEnabled ? loadSkills() : Promise.resolve([] as Skill[]),
+    settings.memoryEnabled ? loadMemories() : Promise.resolve([] as MemoryEntry[]),
+  ]);
+  return augmentationBlock(skills, memories);
+}
+
+/** Qoder-style automatic memory update: after a turn goes idle, scan the
+ *  last exchange for durable facts and persist them. Best-effort and
+ *  backgrounded — a failure never affects the turn. Sets the chat badge
+ *  when something actually changed. */
+function maybeExtractMemory() {
+  const s = agentStore.get();
+  const settings = readSettings();
+  if (s.busy || !settings.memoryEnabled || !settings.memoryAutoUpdate || !s.activeId) return;
+  const sid = s.activeId;
+  const sel = resolveSendModel(s.model, s.providerModels, s.agents.map((a) => a.name), s.agent);
+  void runMemoryExtraction({ sessionId: sid, messages: s.messages, model: sel.model ?? null })
+    .then((res) => {
+      if (res.wrote > 0 && agentStore.get().activeId === sid) {
+        agentStore.set({ memoryUpdated: true });
+      }
+    })
+    .catch(() => {});
+}
+
 export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): Promise<boolean> {
   const s = agentStore.get();
   const body = text.trim();
@@ -1644,8 +1813,14 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
   // and run-level retries happen server-side (surfaced as 'Agent retrying').
   // The client messageID makes submit retries idempotent; a reconcile check
   // after any failure guarantees we never stack duplicate user messages.
+  // Skills + memory context is prepended here (once, before the retry loop).
+  const augmentation = await currentAugmentation().catch(() => '');
+  const parts = [
+    ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
+    ...(body ? [{ type: 'text', text: augmentBody(body, augmentation) }] : []),
+  ];
   const messageID = `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: 'sending…' });
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: 'sending…', memoryUpdated: false });
   lastSubmitAt = Date.now();
   clearSessionQuestions(id); // a fresh run supersedes any dead waits
   clearSessionPermissions(id);
@@ -1655,10 +1830,7 @@ export async function sendMessage(text: string, rawFiles: OutgoingFile[] = []): 
     ...(sel.model ? { model: { providerID: sel.model.providerID, modelID: sel.model.modelID } } : {}),
     ...(sel.agent ? { agent: sel.agent } : {}),
     ...(variant ? { variant } : {}),
-    parts: [
-      ...files.map((f) => ({ type: 'file', mime: f.mime, filename: f.filename, url: f.url })),
-      ...(body ? [{ type: 'text', text: body }] : []),
-    ],
+    parts,
   };
   let sent = false;
   let lastErr = '';
@@ -1993,6 +2165,8 @@ async function finishRelay(exit: RelayExit) {
     const sid = exit.sessionID || run.sessionID;
     await renameUntitledSession(sid, relayTitle);
     relayTitle = null;
+    // Post-turn memory extraction (Qoder-style auto-memory)
+    scheduleMemoryExtraction();
     const view = agentStore.get().activeId;
     if (view) await drainQueue(view).catch(() => {});
   } else {
@@ -2041,7 +2215,7 @@ async function sendRelay(
     return false;
   }
   relayTitle = derivePromptTitle(body, files);
-  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `Sending via ${RELAY_DISPLAY_NAME}…` });
+  agentStore.set({ busy: true, status: 'busy', statusInfo: { type: 'busy' }, error: null, lastActivity: `Sending via ${RELAY_DISPLAY_NAME}…`, memoryUpdated: false });
   lastSubmitAt = Date.now();
   clearSessionQuestions(sessionID); // a fresh run supersedes any dead waits
   clearSessionPermissions(sessionID);

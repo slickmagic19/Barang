@@ -105,6 +105,20 @@ const barang = {
   },
   /** MCP config files: raw read/write (renderer merges). */
   mcpConfig: (action, payload = {}) => invoke('mcp:config', { action, ...payload }),
+  /** Qoder-compatible skills: list (all scopes) + project write/remove.
+   *  list resolves [{ scope, dir, path, file, text }]. */
+  skills: {
+    list: () => invoke('skills:list'),
+    write: (name, text) => invoke('skills:write', { name, text }),
+    remove: (name) => invoke('skills:remove', { name }),
+  },
+  /** Qoder-style memory: discover (both scopes + index text) + write/remove. */
+  memory: {
+    discover: () => invoke('memory:discover'),
+    write: (scope, slug, text) => invoke('memory:write', { scope, slug, text }),
+    writeIndex: (scope, text) => invoke('memory:write-index', { scope, text }),
+    remove: (scope, slug) => invoke('memory:remove', { scope, slug }),
+  },
   /** Bolt API client: main-process HTTP (no CORS), cancellable. */
   api: {
     send: (req) => invoke('api:send', req),

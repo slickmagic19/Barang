@@ -1729,7 +1729,7 @@ export function augmentationBlock(skills: SkillMeta[], memories: MemoryEntry[]):
 export function augmentBody(body: string, augmentation: string): string {
   if (!augmentation) return body;
   return [
-    '[Barang context — skills + memory. Use what is relevant; do not repeat it back.]',
+    '[Barang context — skills + memory. Use what is relevant; do not repeat it back. Memory is maintained automatically by the client after each turn; never write memory files or AGENTS.md entries yourself.]',
     augmentation,
     '',
     '---',
@@ -1751,7 +1751,7 @@ export function stripAugmentation(text: string): string {
 
 /** Returns true when a user message carries our augmentation wrapper. Pure. */
 export function isAugmentedMessage(text: unknown): boolean {
-  return /\[Barang context — skills + memory\].*\n---\n\[User message\]/s.test(String(text ?? ''));
+  return /\[Barang context — skills \+ memory[^\]]*\][\s\S]*?\n---\n\[User message\]/.test(String(text ?? ''));
 }
 
 /** Resolve the augmentation for the current settings + backend. */

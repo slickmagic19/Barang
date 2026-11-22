@@ -188,7 +188,10 @@ export function memoryPromptBlock(
     .sort((a, b) => (b.mtime || 0) - (a.mtime || 0))
     .slice(0, maxEntries);
   if (!list.length) return '';
-  const parts: string[] = ['## Memory', 'Use these memories when relevant:'];
+  const parts: string[] = [
+    '## Memory',
+    'Use these memories when relevant. Barang maintains this memory automatically after each turn — do not create memory files or AGENTS.md entries yourself.',
+  ];
   let used = 0;
   for (const e of list) {
     const body = e.body.trim();

@@ -49,6 +49,12 @@ describe('augmentBody', () => {
   it('returns the body unchanged when there is no augmentation', () => {
     expect(augmentBody('Hello.', '')).toBe('Hello.');
   });
+
+  it('states that memory is client-maintained (no manual memory files)', () => {
+    const out = augmentBody('Fix the bug.', '## Memory\n- something');
+    expect(out).toContain('maintained automatically by the client');
+    expect(out).toContain('never write memory files');
+  });
 });
 
 describe('agent.ts wiring', () => {

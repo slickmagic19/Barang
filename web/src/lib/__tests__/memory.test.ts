@@ -126,6 +126,12 @@ describe('memoryPromptBlock', () => {
     expect(block).toContain('Body A.');
   });
 
+  it('tells the agent memory is maintained automatically (no manual files)', () => {
+    const block = memoryPromptBlock([mk('a', 'Body A.', 1)]);
+    expect(block).toContain('maintains this memory automatically');
+    expect(block).toContain('do not create memory files');
+  });
+
   it('sorts newest first and respects maxEntries', () => {
     const block = memoryPromptBlock([mk('old', 'Old.', 1), mk('new', 'New.', 2)], { maxEntries: 1 });
     expect(block).toContain('New.');

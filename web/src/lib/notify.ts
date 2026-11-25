@@ -33,6 +33,8 @@ export interface AgentSnap {
   questions: number;
   activeId: string | null;
   stuck: boolean;
+  permKeys: string[];
+  questKeys: string[];
 }
 
 /** Pure edge detector (unit-verified in smoke): prev -> next yields at most one event. */
@@ -58,21 +60,53 @@ export function decideAgentNotification(prev: AgentSnap, next: AgentSnap): Notif
 
 export function snapAgent(): AgentSnap {
   const a = agentStore.get();
-  return { root: a.root, busy: a.busy, error: a.error, perms: a.permissions.length, questions: a.questions.length, activeId: a.activeId, stuck: !!a.relayStuck };
+  return {
+    root: a.root, busy: a.busy, error: a.error,
+    perms: a.permissions.length, questions: a.questions.length,
+    activeId: a.activeId, stuck: !!a.relayStuck,
+    permKeys: a.permissions.map((p) => p.key),
+    questKeys: a.questions.map((q) => q.key),
+  };
+}
+
+/** Per-wait dedup guard. A run parks on a permission/question and the status
+ *  heartbeat keeps flipping busy→idle, which the edge detector reads as a
+ *  fresh wait. Remember the ids already announced so the SAME pending
+ *  approval/question only notifies once (a genuinely new wait still fires).
+ *  Pure: mutates the passed `announced` set, returns whether to notify. */
+export function shouldAnnounceWait(
+  kind: 'approval' | 'question',
+  keys: string[],
+  announced: Set<string>,
+): boolean {
+  if (!keys.length) {
+    announced.clear();
+    return false;
+  }
+  if (!keys.some((k) => !announced.has(k))) return false; // all already announced
+  for (const k of keys) announced.add(k);
+  return true;
 }
 
 export function watchAgentNotifications(onEvent: (kind: NotifyKind) => void): () => void {
   let last = snapAgent();
+  const announced: Record<'approval' | 'question', Set<string>> = {
+    approval: new Set(),
+    question: new Set(),
+  };
   return agentStore.subscribe(() => {
     const next = snapAgent();
     const kind = decideAgentNotification(last, next);
     last = next;
-    if (kind) {
-      try {
-        onEvent(kind);
-      } catch {
-        /* a broken handler must never break the agent loop */
-      }
+    if (!kind) return;
+    if (kind === 'approval' || kind === 'question') {
+      const keys = kind === 'approval' ? next.permKeys : next.questKeys;
+      if (!shouldAnnounceWait(kind, keys, announced[kind])) return;
+    }
+    try {
+      onEvent(kind);
+    } catch {
+      /* a broken handler must never break the agent loop */
     }
   });
 }

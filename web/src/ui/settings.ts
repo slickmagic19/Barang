@@ -1148,6 +1148,14 @@ export function openSettings(hooks: SettingsHooks) {
     .catch(() => {
       restoreBox.toggleAttribute('disabled', true);
     });
+  const maximizedBox = checkRow('Start maximized');
+  void appState()
+    .then((s) => {
+      maximizedBox.checked = s.startMaximized === true;
+    })
+    .catch(() => {
+      maximizedBox.toggleAttribute('disabled', true);
+    });
 
   // --- Layout ---
   section('Layout');
@@ -1517,6 +1525,18 @@ export function openSettings(hooks: SettingsHooks) {
       })
       .catch((e) => {
         restoreBox.checked = !restoreBox.checked;
+        hooks.toast((e as Error).message, 'error');
+      });
+  };
+  maximizedBox.onchange = () => {
+    void barang()
+      .app.setStartMaximized(maximizedBox.checked)
+      .then((r) => {
+        maximizedBox.checked = r.startMaximized;
+        hooks.toast(r.startMaximized ? 'Will start maximized.' : 'Will start windowed.', 'info');
+      })
+      .catch((e) => {
+        maximizedBox.checked = !maximizedBox.checked;
         hooks.toast((e as Error).message, 'error');
       });
   };

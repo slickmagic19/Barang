@@ -19,7 +19,7 @@ import {
 import { sliceWindow, truncateText, parseUnifiedPatch, applyHunkSubset, tabPageRange } from './lib/util';
 import { hasDirtyUnder } from './lib/treeBadges';
 import { crumbSegments, crumbsOverflow } from './lib/crumbs';
-import { watchAgentNotifications, playNotificationSound, resolveKindSound, KIND_DEFAULT_SOUND, debugAudioState, activeSessionTitle, decideAgentNotification, armAudioUnlock, type NotifyKind } from './lib/notify';
+import { watchAgentNotifications, playNotificationSound, resolveKindSound, KIND_DEFAULT_SOUND, debugAudioState, activeSessionTitle, decideAgentNotification, shouldAnnounceWait, armAudioUnlock, type NotifyKind } from './lib/notify';
 import { el, debounce, copyText } from './lib/util';
 import { iconEl } from './ui/icons';
 import { fileIconEl } from './ui/fileIcons';
@@ -36,7 +36,7 @@ deleteFocusedEntry, pathOf, selectInTree } from './ui/explorer';
 import { initEditor, openFile, openUntitled, showDiffTab, closeTab, closeOtherTabs, closeAllTabs, closeSavedTabs, closePathAndChildren, saveActive, saveAll, checkExternalChanges, editorStore, revealInEditor,
 revealSearchMatch, clearSearchDecorations, getSearchDecorCount, langOf, getTsDiagOptions, registeredLanguageIds,
 parseTsconfigPaths, matchAlias, packageNameOf, candidateImportPaths, specResolves, toggleSplit, focusGroup,
-openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab,
+  openInOtherGroup, closeSplitGroup, setSplitHost, groupTabs, editorSplitState, openPreview, showPreviewTab, moveTabToGroup,
 showImageTab, getEditorDisplayFlags, isAbsolutePath, flushTabSession, restoreTabSession, debugModelText, debugDisplayedText, setFileOpenedHandler, resetGitGutter, toggleGitDiff, pinTab, toggleWordWrap } from './ui/editor';
 import { initChat, filePartView, stepHistory, pushComposerHist, changeFp, isReviewed, markReviewed, loadReviewedState, scheduleReviewedPersist, openLightbox, closeLightbox } from './ui/chat';
 import { initPalette } from './ui/palette';
@@ -395,6 +395,46 @@ async function boot() {
   center.append(editorCols, boltHost, welcome);
   setSplitHost(editorHost2);
 
+  // Tab strips scroll horizontally (hidden scrollbar); translate a plain
+  // vertical wheel into left/right travel so many open tabs stay reachable.
+  const wireTabWheel = (strip: HTMLElement) => {
+    strip.addEventListener('wheel', (e: WheelEvent) => {
+      const max = strip.scrollWidth - strip.clientWidth;
+      if (max <= 0) return;
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (delta === 0) return;
+      e.preventDefault();
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? strip.clientWidth : 1;
+      strip.scrollLeft += delta * unit;
+    }, { passive: false });
+  };
+  wireTabWheel(tabs);
+  wireTabWheel(tabs2);
+
+  // Drag a tab onto the other editor group to move it there (VSCode).
+  const TAB_DND = 'application/x-barang-tab';
+  let tabDragFrom: 1 | 2 = 1; // group the in-flight tab drag started in
+  const isTabDrag = (e: DragEvent) => [...(e.dataTransfer?.types ?? [])].includes(TAB_DND);
+  const wireTabDrop = (col: HTMLElement, group: 1 | 2) => {
+    col.addEventListener('dragover', (e: DragEvent) => {
+      if (!isTabDrag(e)) return;
+      e.preventDefault();
+      col.classList.add('drop-over');
+    });
+    col.addEventListener('dragleave', (e: DragEvent) => {
+      if (!col.contains(e.relatedTarget as Node | null)) col.classList.remove('drop-over');
+    });
+    col.addEventListener('drop', (e: DragEvent) => {
+      if (!isTabDrag(e)) return;
+      e.preventDefault();
+      col.classList.remove('drop-over');
+      const path = e.dataTransfer?.getData(TAB_DND) ?? '';
+      if (path) void moveTabToGroup(path, group, tabDragFrom);
+    });
+  };
+  wireTabDrop(col1, 1);
+  wireTabDrop(splitCol, 2);
+
   // OS file drop: absolute paths open straight through openFile (in-project
   // ones become workspace tabs, the rest detached tabs); folders open as the
   // project — VSCode behavior. Drops on the chat composer keep their
@@ -738,6 +778,15 @@ async function boot() {
       }
       if (t.dirty) b.append(el('span', { class: 'dirty-dot', title: 'Unsaved changes' }));
       b.onclick = () => activateTab(t.path, group);
+      // Drag a tab to the other group to move it there (not for bolt tabs).
+      if (!isBolt) {
+        b.draggable = true;
+        b.ondragstart = (e) => {
+          tabDragFrom = group;
+          e.dataTransfer?.setData('application/x-barang-tab', t.path);
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+        };
+      }
       // Double-clicking a preview tab keeps it (VSCode).
       b.ondblclick = () => pinTab(t.path, group);
       b.onauxclick = (e) => {
@@ -1348,6 +1397,7 @@ async function boot() {
     openLightbox,
     closeLightbox,
     resolveKindSound,
+    shouldAnnounceWait,
     KIND_DEFAULT_SOUND,
     normalizeNotifSoundSettings,
     playNotificationSound,

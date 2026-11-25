@@ -39,9 +39,9 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 /** Render markdown: paragraphs, fences, headings, lists, quotes, rules,
- *  inline code, bold and links. Escaped first; fences are extracted before the
- *  block parse. Text typed by the user keeps its shape: single newlines are
- *  <br> inside a paragraph, blank lines start a new paragraph. */
+ *  tables, inline code, bold and links. Escaped first; fences are extracted
+ *  before the block parse. Text typed by the user keeps its shape: single
+ *  newlines are <br> inside a paragraph, blank lines start a new paragraph. */
 export function md(src: string): string {
   const esc = src.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const blocks: string[] = [];
@@ -57,6 +57,41 @@ export function md(src: string): string {
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noreferrer">$2</a>')
       .replace(/@([A-Za-z0-9_./\\-]+)/g, '<span class="md-mention">@$1</span>');
+  // --- Tables (GitHub-flavored pipe tables) -------------------------------
+  type Align = '' | 'left' | 'right' | 'center';
+  const splitRow = (row: string): string[] => {
+    let s = row.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    return s.split('|').map((c) => c.trim());
+  };
+  const parseAlign = (cell: string): Align => {
+    const t = cell.trim();
+    const left = t.startsWith(':');
+    const right = t.endsWith(':');
+    if (left && right) return 'center';
+    if (right) return 'right';
+    if (left) return 'left';
+    return '';
+  };
+  // A separator row: dashes per column, at least two columns, optional colons.
+  const isTableSep = (row: string): boolean =>
+    /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(row);
+  const renderCell = (tag: 'th' | 'td', content: string, align: Align): string => {
+    const style = align ? ` style="text-align:${align}"` : '';
+    return `<${tag}${style}>${inline(content)}</${tag}>`;
+  };
+  const renderTable = (header: string[], aligns: Align[], rows: string[][]): string => {
+    const head = `<thead><tr>${header
+      .map((c, i) => renderCell('th', c, aligns[i] ?? ''))
+      .join('')}</tr></thead>`;
+    const body = rows.length
+      ? `<tbody>${rows
+          .map((r) => `<tr>${header.map((_, i) => renderCell('td', r[i] ?? '', aligns[i] ?? '')).join('')}</tr>`)
+          .join('')}</tbody>`
+      : '';
+    return `<div class="md-table-wrap"><table>${head}${body}</table></div>`;
+  };
   const lines = fenced.split('\n');
   const out: string[] = [];
   let list: 'ul' | 'ol' | null = null;
@@ -77,7 +112,8 @@ export function md(src: string): string {
     flushPara();
     closeList();
   };
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     const line = raw.replace(/\s+$/, '');
     if (/^\u0000\d+\u0000$/.test(line.trim())) {
       closeBlocks();
@@ -125,6 +161,20 @@ export function md(src: string): string {
         list = 'ol';
       }
       out.push(`<li>${inline(ol[1])}</li>`);
+      continue;
+    }
+    // Table: a header row (has a pipe) followed by a separator row.
+    if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      closeBlocks();
+      const header = splitRow(line);
+      const aligns = splitRow(lines[i + 1]).map(parseAlign);
+      i++; // consume the separator row
+      const rows: string[][] = [];
+      while (i + 1 < lines.length && lines[i + 1].trim() !== '' && lines[i + 1].includes('|')) {
+        i++;
+        rows.push(splitRow(lines[i]));
+      }
+      out.push(renderTable(header, aligns, rows));
       continue;
     }
     closeList(); // a paragraph line after a list ends the list

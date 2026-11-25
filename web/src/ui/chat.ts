@@ -10,6 +10,7 @@ import {
   relayActive, relayRouteFor, modelListKey, sessionDisplayTitle, stuckContinueText, relayEchoGuard, isTransientRelayEcho,
   loadCommands, parseSlashCommand, sendCommand, loadSkills,
   compactSession, shareSession, unshareSession, markQuestionAnswered,
+  removePermission, restorePermission, removeQuestion, restoreQuestion,
   enqueueFollowUp, queuedFollowUps, removeQueuedFollowUp, drainQueue,
   type ChatMessage, type ChangeEntry, type PendingPermission, type PermissionResponse,
 } from '../lib/agent';
@@ -1137,7 +1138,11 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
         }
       } else for (const p of g.parts) renderPart(p as Record<string, unknown>, body, openKeys);
     }
-    if (parts.length) wrap.append(body);
+    // Only attach a body that actually rendered something. A long turn folds
+    // every step into the "Worked on" line and every edit into the file card,
+    // so most step rows produce an empty body — attaching it would leave an
+    // empty .msg wrapper (and its chat-list gap) for each one.
+    if (body.childNodes.length) wrap.append(body);
     // Server-reported run failures live on the assistant message — show them
     // inline in the transcript, not just as a toast.
     if (role !== 'user') {
@@ -1242,7 +1247,10 @@ function renderMessages(list: HTMLElement, hooks: ChatHooks) {
       wrap.classList.add('msg-enter');
     }
     nextSeen.add(msgKey);
-    list.append(wrap);
+    // Skip fully empty rows (all parts folded away, no actions/errors/badge):
+    // appending them would stack empty .msg gaps between the summary and the
+    // file-changes card.
+    if (wrap.childNodes.length) list.append(wrap);
     const msgId = String(m.info?.id ?? '');
     renderedIds.add(msgId);
     for (const t of errorById.get(msgId) ?? []) {
@@ -1300,6 +1308,17 @@ export function initChat(panel: HTMLElement, hooks: ChatHooks) {
   btnUnrevert.append(iconEl('history', 15));
   sessRow.append(sessList, btnNew, btnUnrevert, btnDel);
   sessSection.append(sessRow);
+  // The strip scrolls horizontally (hidden scrollbar) so past sessions stay
+  // reachable; translate a plain vertical wheel into horizontal travel.
+  sessList.addEventListener('wheel', (e: WheelEvent) => {
+    const max = sessList.scrollWidth - sessList.clientWidth;
+    if (max <= 0) return;
+    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (delta === 0) return;
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? sessList.clientWidth : 1;
+    sessList.scrollLeft += delta * unit;
+  }, { passive: false });
 
   const perms = el('div', { class: 'perms' });
   const quests = el('div', { class: 'quests' });
@@ -2655,9 +2674,16 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
         if (permBusy.has(p.key)) return;
         permBusy.add(p.key);
         bAllow.disabled = bOnce.disabled = bDeny.disabled = true;
+        // Optimistic: drop the card immediately so the UI responds instantly;
+        // respondPermission tombstones on success, and we restore on a real
+        // (non-stale) failure so the approval can be retried.
+        removePermission(p.sessionID, p.permissionID);
+        requestChatPaint?.();
         void respondPermission(p, resp).then((r) => {
           if (r === 'stale') hooks.toast('That approval was already resolved — card removed.', 'info');
         }).catch((e) => {
+          restorePermission(p);
+          requestChatPaint?.();
           hooks.toast((e as Error).message, 'error');
         }).finally(() => {
           permBusy.delete(p.key);
@@ -2757,17 +2783,27 @@ function appendWriteStat(stat: HTMLElement, ws: WriteStat | undefined) {
                 hooks.toast('Pick an option first.', 'error');
                 return;
               }
+              // Optimistic: clear the card now so the UI updates instantly;
+              // restore it if the run won't stop or the send fails.
+              removeQuestion(q.sessionID, q.questionID);
+              questStep.delete(q.key);
+              questPicks.delete(q.key);
+              requestChatPaint?.();
               if (agentStore.get().busy) await abortActive();
               if (agentStore.get().busy) {
+                restoreQuestion(q);
+                requestChatPaint?.();
                 hooks.toast('Stop did not take — answer in chat once the run ends.', 'error');
                 return;
               }
               const ok = await sendMessage(lines.join('\n'));
               if (ok) {
                 markQuestionAnswered(q);
-                questStep.delete(q.key);
-                questPicks.delete(q.key);
-              } else hooks.toast('Could not send the answer — try again from the composer.', 'error');
+              } else {
+                restoreQuestion(q);
+                requestChatPaint?.();
+                hooks.toast('Could not send the answer — try again from the composer.', 'error');
+              }
             } finally {
               bSend.toggleAttribute('disabled', false);
             }

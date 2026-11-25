@@ -123,6 +123,7 @@ export interface BarangBridge {
       root: string;
       recent: string[];
       restore: boolean;
+      startMaximized: boolean;
       opencode: { running: boolean; version?: string; cli?: string; port?: number };
       versions: { app: string; electron: string };
     }>;
@@ -130,6 +131,7 @@ export interface BarangBridge {
     openPath(path: string): Promise<{ root: string }>;
     defaultFolder(): Promise<{ root: string }>;
     setRestore(restore: boolean): Promise<{ restore: boolean }>;
+    setStartMaximized(startMaximized: boolean): Promise<{ startMaximized: boolean }>;
     checkUpdates(): Promise<{ update: boolean; current: string; version?: string; url?: string; error?: string; packaged?: boolean; asset?: { name: string; url: string; size: number } }>;
     downloadUpdate(): Promise<{ path: string }>;
     applyUpdate(path: string, replace?: string): Promise<{ ok: boolean }>;

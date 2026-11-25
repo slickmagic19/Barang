@@ -870,6 +870,9 @@ body.agentic .send-row { gap: 8px; margin-top: 6px; }
 .tool-row.step-block.worked-block .step-chev { margin-left: auto; }
 .tool-row.step-block.worked-block[open] > summary .step-chev { transform: rotate(90deg); }
 .worked-body { padding: 2px 0 2px 2px; }
+/* A closed fold must not reserve any space (defends against UA details rules
+   that an author display can otherwise defeat). */
+.worked-block:not([open]) > .worked-body { display: none; }
 
 /* ---- file cards: [TS] chatLayout.ts   +5 -1  M Applied ----------------- */
 .file-ops { display: flex; flex-direction: column; gap: 6px; }
@@ -998,6 +1001,27 @@ body.agentic .send-row { gap: 8px; margin-top: 6px; }
 .msg-md pre.md-code code { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; }
 .msg-md a { color: var(--brand-strong); text-decoration: none; }
 .msg-md a:hover { text-decoration: underline; }
+/* Tables (GitHub-flavored): a rounded, scrollable frame so a wide table
+   scrolls sideways inside the message instead of stretching the layout. */
+.msg-md .md-table-wrap {
+  max-width: 100%; overflow-x: auto; margin: 8px 0;
+  border: 1px solid var(--border); border-radius: 8px;
+  -webkit-overflow-scrolling: touch;
+}
+.msg-md table {
+  border-collapse: collapse; width: 100%; font-size: 12px; line-height: 1.5;
+  word-break: normal; overflow-wrap: break-word;
+}
+.msg-md th, .msg-md td {
+  border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  padding: 6px 10px; text-align: left; vertical-align: top;
+}
+.msg-md th:last-child, .msg-md td:last-child { border-right: none; }
+.msg-md tbody tr:last-child td { border-bottom: none; }
+/* Headers never wrap or break mid-word; narrow columns scroll instead. */
+.msg-md th { background: var(--panel-2); color: var(--text); font-weight: 600; white-space: nowrap; }
+.msg-md td { color: var(--text-dim); }
+.msg-md tbody tr:nth-child(even) td { background: #ffffff05; }
 .md-mention { color: var(--brand-strong); background: var(--brand-dim); border-radius: 4px; padding: 0 4px; }
 .mention-link {
   background: var(--brand-dim); border: 1px solid var(--brand-line); color: var(--brand-strong);
@@ -1878,6 +1902,23 @@ button.status-item:hover { color: var(--text); }
 .md-preview code.md-inline { background: #ffffff10; border-radius: 5px; padding: 1px 6px; font-size: 12px; }
 .md-preview a { color: var(--brand-strong); }
 .md-preview .md-mention { color: var(--brand-strong); }
+.md-preview .md-table-wrap {
+  max-width: 100%; overflow-x: auto; margin: 12px 0;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.md-preview table {
+  border-collapse: collapse; width: 100%; font-size: 13px; line-height: 1.55;
+  word-break: normal; overflow-wrap: break-word;
+}
+.md-preview th, .md-preview td {
+  border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  padding: 7px 12px; text-align: left; vertical-align: top;
+}
+.md-preview th:last-child, .md-preview td:last-child { border-right: none; }
+.md-preview tbody tr:last-child td { border-bottom: none; }
+.md-preview th { background: var(--panel-2); color: var(--text); font-weight: 600; white-space: nowrap; }
+.md-preview td { color: var(--text-dim); }
+.md-preview tbody tr:nth-child(even) td { background: #ffffff05; }
 /* Search-match highlights (find-widget landing in the open file). */
 .search-match { background: #e0af6840; border-radius: 2px; }
 .search-match-current { background: #e0af68a6; border-radius: 2px; }

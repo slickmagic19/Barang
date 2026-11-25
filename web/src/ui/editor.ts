@@ -1728,9 +1728,10 @@ export function closeSavedTabs(group?: EditorGroup) {
   dropTabs(editorStore.get().tabs.filter((t) => (t.group || 1) === g && !t.dirty));
 }
 
-/** Open the second group. Mirrors the current file into a REAL group-2 tab
- *  (a bare model with no tab looks glitched and can't be closed). Diffs,
- *  bolt tabs and untitled scratches are not mirrorable — those open empty. */
+/** Open the second group. Mirrors the current editor into a REAL group-2 tab
+ *  (a bare model with no tab looks glitched and can't be closed). A real file
+ *  reopens as its own tab; an untitled scratch is shown in BOTH groups sharing
+ *  one path/model (VSCode). Diffs and bolt tabs are not mirrorable — empty. */
 export async function openSplit(): Promise<boolean> {
   const s = editorStore.get();
   if (s.split) return true;
@@ -1739,15 +1740,28 @@ export async function openSplit(): Promise<boolean> {
     return false;
   }
   editorStore.set({ split: true, focus: 1 });
-  let show: string | null = s.active2;
-  if (!show) {
-    const cur = s.tabs.find((t) => t.path === s.active && (t.group || 1) === 1);
-    show = cur && !cur.diff && !cur.untitled && !cur.path.startsWith('bolt:') ? cur.path : null;
-  }
-  if (show) await openFile(show, { group: 2, focus: false });
-  else {
+  const cur = s.tabs.find((t) => t.path === s.active && (t.group || 1) === 1);
+  if (!s.active2 && cur?.untitled) {
+    // Mirror the untitled document into group 2 (same path + model).
+    editorStore.set((st) => ({
+      ...st,
+      tabs: st.tabs.some((t) => (t.group || 1) === 2 && t.path === cur.path)
+        ? st.tabs
+        : [...st.tabs, { ...cur, group: 2 as const }],
+      active2: cur.path,
+    }));
     showNormal(2);
-    editor2?.setModel(null);
+    editor2?.setModel(models.get(cur.path) ?? null);
+  } else {
+    let show: string | null = s.active2;
+    if (!show) {
+      show = cur && !cur.diff && !cur.untitled && !cur.path.startsWith('bolt:') ? cur.path : null;
+    }
+    if (show) await openFile(show, { group: 2, focus: false });
+    else {
+      showNormal(2);
+      editor2?.setModel(null);
+    }
   }
   // Splitting keeps focus left (VSCode); the mirror is just revealed.
   editorStore.set({ focus: 1 });
@@ -1805,6 +1819,43 @@ export async function openInOtherGroup(path: string) {
     return;
   }
   await openFile(path, { group: other });
+}
+
+/** Drag a tab from one group into the other (VSCode): it opens there and
+ *  leaves the source group. Untitled scratches keep their model (shared
+ *  path); diffs reopen through the diff pipeline. `from` is the group the
+ *  drag started in — required because a mirrored path lives in BOTH groups,
+ *  so the source can't be inferred from the path alone. */
+export async function moveTabToGroup(path: string, target: EditorGroup, from: EditorGroup): Promise<void> {
+  const s = editorStore.get();
+  if (!s.split) return;
+  if (from === target) {
+    await focusGroup(target);
+    return;
+  }
+  const tab = s.tabs.find((t) => t.path === path && (t.group || 1) === from);
+  if (!tab || tab.path.startsWith('bolt:')) return;
+  if (tab.untitled) {
+    // Move the scratch: add it to the target (same path/model), then drop the
+    // source tab — dropTabs keeps the model alive because the target refs it.
+    editorStore.set((st) => ({ ...st, tabs: [...st.tabs, { ...tab, group: target }] }));
+    showNormal(target);
+    editorFor(target)?.setModel(models.get(path) ?? null);
+    dropTabs([tab]);
+  } else {
+    // Open in the target group explicitly (openInOtherGroup keys off the first
+    // tab with the path, which may be the wrong group when the tab is mirrored).
+    if (tab.diff && tab.file) {
+      const pair = diffModels.get(`${from}:${path}`);
+      if (pair) await openDiffTab(tab.file, pair.original.getValue(), pair.modified.getValue(), tab.diffKind ?? 'session', target);
+    } else {
+      await openFile(path, { group: target });
+    }
+    const src = editorStore.get().tabs.find((t) => t.path === path && (t.group || 1) === from);
+    if (src) dropTabs([src]); // remove source silently; target keeps the model
+  }
+  await focusGroup(target);
+  hooks?.onTabs();
 }
 
 /** Close a tab and any tabs under it (deleted/renamed folder). False = user cancelled. */

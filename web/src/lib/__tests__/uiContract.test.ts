@@ -415,3 +415,39 @@ describe('memory updated badge', () => {
     expect(chatTs).toContain('memoryBadgeSeen = new Set()');
   });
 });
+
+describe('markdown tables', () => {
+  it('wraps tables in a rounded, horizontally scrollable frame', () => {
+    expect(decl('.msg-md .md-table-wrap', 'overflow-x')).toContain('auto');
+    expect(decl('.msg-md .md-table-wrap', 'max-width')).toContain('100%');
+    expect(decl('.msg-md .md-table-wrap', 'border-radius')).toContain('8px');
+    expect(decl('.msg-md table', 'border-collapse')).toContain('collapse');
+    expect(decl('.msg-md th', 'background')).toContain('var(--panel-2)');
+    expect(decl('.msg-md td', 'color')).toContain('var(--text-dim)');
+  });
+
+  it('keeps headers on one line and never breaks words mid-letter', () => {
+    expect(decl('.msg-md th', 'white-space')).toContain('nowrap');
+    expect(decl('.msg-md table', 'word-break')).toContain('normal');
+  });
+
+  it('mirrors the same frame in the editor markdown preview', () => {
+    expect(decl('.md-preview .md-table-wrap', 'overflow-x')).toContain('auto');
+    expect(decl('.md-preview table', 'border-collapse')).toContain('collapse');
+    expect(decl('.md-preview th', 'background')).toContain('var(--panel-2)');
+    expect(decl('.md-preview th', 'white-space')).toContain('nowrap');
+  });
+});
+
+describe('chat transcript spacing', () => {
+  it('never appends empty message wrappers for folded step rows', () => {
+    // A long turn folds every step into "Worked on N actions" and every edit
+    // into the file card; empty .msg wrappers would stack chat-list gaps.
+    expect(chatTs).toContain('if (body.childNodes.length) wrap.append(body);');
+    expect(chatTs).toContain('if (wrap.childNodes.length) list.append(wrap);');
+  });
+
+  it('reserves no space for a closed "Worked on" body', () => {
+    expect(decl('.worked-block:not([open]) > .worked-body', 'display')).toEqual(['none']);
+  });
+});

@@ -41,3 +41,48 @@ describe('md — blocks around paragraphs', () => {
     expect(md('\n\n')).toBe('');
   });
 });
+
+describe('md — tables', () => {
+  it('renders a pipe table as <table>', () => {
+    expect(md('| a | b |\n| --- | --- |\n| 1 | 2 |'))
+      .toBe('<div class="md-table-wrap"><table><thead><tr><th>a</th><th>b</th></tr></thead>'
+        + '<tbody><tr><td>1</td><td>2</td></tr></tbody></table></div>');
+  });
+
+  it('honors column alignment from the separator row', () => {
+    expect(md('| L | C | R |\n| :-- | :-: | --: |\n| 1 | 2 | 3 |'))
+      .toBe('<div class="md-table-wrap"><table><thead><tr>'
+        + '<th style="text-align:left">L</th><th style="text-align:center">C</th><th style="text-align:right">R</th>'
+        + '</tr></thead><tbody><tr>'
+        + '<td style="text-align:left">1</td><td style="text-align:center">2</td><td style="text-align:right">3</td>'
+        + '</tr></tbody></table></div>');
+  });
+
+  it('applies inline formatting and escapes HTML inside cells', () => {
+    expect(md('| **x** | y |\n| --- | --- |\n| `z` | a < b |'))
+      .toBe('<div class="md-table-wrap"><table><thead><tr><th><strong>x</strong></th><th>y</th></tr></thead>'
+        + '<tbody><tr><td><code class="md-inline">z</code></td><td>a &lt; b</td></tr></tbody></table></div>');
+  });
+
+  it('pads short rows and truncates long rows to the header width', () => {
+    expect(md('| a | b | c |\n| --- | --- | --- |\n| 1 | 2 |\n| 4 | 5 | 6 | 7 |'))
+      .toBe('<div class="md-table-wrap"><table><thead><tr><th>a</th><th>b</th><th>c</th></tr></thead>'
+        + '<tbody>'
+        + '<tr><td>1</td><td>2</td><td></td></tr>'
+        + '<tr><td>4</td><td>5</td><td>6</td></tr>'
+        + '</tbody></table></div>');
+  });
+
+  it('omits <tbody> when there are no data rows', () => {
+    expect(md('| a | b |\n| --- | --- |'))
+      .toBe('<div class="md-table-wrap"><table><thead><tr><th>a</th><th>b</th></tr></thead></table></div>');
+  });
+
+  it('sits between surrounding paragraphs', () => {
+    expect(md('intro\n| a | b |\n| --- | --- |\n| 1 | 2 |\noutro'))
+      .toBe('<p>intro</p>'
+        + '<div class="md-table-wrap"><table><thead><tr><th>a</th><th>b</th></tr></thead>'
+        + '<tbody><tr><td>1</td><td>2</td></tr></tbody></table></div>'
+        + '<p>outro</p>');
+  });
+});

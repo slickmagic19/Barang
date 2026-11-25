@@ -475,6 +475,15 @@ export function removePermission(sessionID: string, permissionID: string): boole
   return true;
 }
 
+/** Re-insert an optimistically removed approval (rollback when the POST fails
+ *  for a real reason). No-op if it was tombstoned or is already back. */
+export function restorePermission(p: PendingPermission) {
+  if (answeredPermKeys.has(p.key)) return;
+  const cur = agentStore.get().permissions;
+  if (cur.some((x) => x.key === p.key)) return;
+  agentStore.set({ permissions: [...cur, p] });
+}
+
 /** Tombstones for dead approvals: answered, or 404-stale (the server
  *  resolved them without telling us — e.g. a superseded batch sibling).
  *  Without these the dead cards sit there erroring on every click. */
@@ -621,6 +630,15 @@ export function removeQuestion(sessionID: string, questionID: string): boolean {
   if (next.length === cur.length) return false;
   agentStore.set({ questions: next });
   return true;
+}
+
+/** Re-insert an optimistically removed question (rollback when the send did
+ *  not go through). No-op if it was tombstoned or is already back. */
+export function restoreQuestion(q: PendingQuestion) {
+  if (answeredKeys.has(q.key)) return;
+  const cur = agentStore.get().questions;
+  if (cur.some((x) => x.key === q.key)) return;
+  agentStore.set({ questions: [...cur, q] });
 }
 
 /** Drop all of one session's questions AND tombstone them (fresh send /
@@ -783,7 +801,8 @@ export function connectEvents() {
           else if (ev.type === 'question.replied' || ev.type === 'question.rejected') {
             const props = ev.props;
             const sid = typeof props.sessionID === 'string' ? props.sessionID : '';
-            const qid = typeof props.requestID === 'string' ? props.requestID : '';
+            const qid = typeof props.requestID === 'string' ? props.requestID
+              : (typeof props.id === 'string' ? props.id : '');
             if (sid && qid) removeQuestion(sid, qid);
           }
         }
@@ -1433,6 +1452,10 @@ export async function respondPermission(p: PendingPermission, response: Permissi
   try {
     await oc.post(`/session/${p.sessionID}/permissions/${p.permissionID}`, { response });
     markPermissionAnswered(p);
+    // The run resumes server-side; arm the "just submitted" grace so the
+    // status heartbeat can't read a not-yet-published entry as busy→idle and
+    // fire a spurious "finished" notification right after the approval.
+    lastSubmitAt = Date.now();
     await refreshActive();
     return 'ok';
   } catch (e) {
@@ -1440,6 +1463,7 @@ export async function respondPermission(p: PendingPermission, response: Permissi
       // Already resolved server-side (superseded batch sibling, restarted
       // or stopped run): drop the dead card instead of erroring forever.
       markPermissionAnswered(p);
+      lastSubmitAt = Date.now();
       await refreshActive().catch(() => {});
       return 'stale';
     }

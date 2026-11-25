@@ -54,6 +54,7 @@ let win = null;
 let root = process.env.BARANG_ROOT || ''; // '' = no project (welcome state)
 let recents = []; // most-recent-first project roots (max 8)
 let restoreProject = false; // Settings > Startup: reopen last project
+let startMaximized = false; // Settings > Startup: launch maximized
 let statePath = '';
 
 // Notification attention state (module scope: window focus clears it no
@@ -86,6 +87,7 @@ async function loadState() {
       recents = saved.recents.filter((r) => typeof r === 'string').slice(0, 8);
     }
     restoreProject = saved.restore === true;
+    startMaximized = saved.startMaximized === true;
     // Reopen the last project only when enabled (default: welcome state).
     if (!root && restoreProject && typeof saved.root === 'string') root = saved.root;
   } catch {
@@ -96,7 +98,7 @@ async function loadState() {
 async function saveState() {
   try {
     await fs.mkdir(path.dirname(statePath), { recursive: true });
-    await fs.writeFile(statePath, JSON.stringify({ root, recents, restore: restoreProject }), 'utf8');
+    await fs.writeFile(statePath, JSON.stringify({ root, recents, restore: restoreProject, startMaximized }), 'utf8');
   } catch {
     /* non-fatal */
   }
@@ -235,6 +237,8 @@ function createWindow() {
       sandbox: true,
     },
   });
+  // Settings > Startup: open maximized (fills the screen, keeps window chrome).
+  if (startMaximized) win.maximize();
   if (VITE_URL) {
     win.loadURL(VITE_URL);
   } else {
@@ -748,6 +752,7 @@ function registerIpc() {
     root,
     recent: recents,
     restore: restoreProject,
+    startMaximized,
     opencode: kiloState(),
     versions: { app: app.getVersion(), electron: process.versions.electron },
   }));
@@ -914,6 +919,21 @@ function registerIpc() {
     restoreProject = p.restore === true;
     await saveState();
     return { ok: true, data: { restore: restoreProject } };
+  });
+  ipcMain.handle('app:set-start-maximized', async (_ev, p = {}) => {
+    startMaximized = p.startMaximized === true;
+    // Apply live so the toggle gives immediate feedback; it also persists
+    // and is re-applied at window creation on the next launch.
+    try {
+      if (win) {
+        if (startMaximized) win.maximize();
+        else if (win.isMaximized()) win.restore();
+      }
+    } catch {
+      /* window may be gone */
+    }
+    await saveState();
+    return { ok: true, data: { startMaximized } };
   });
   ipcMain.handle('app:check-updates', async () => {
     try {
@@ -2718,6 +2738,31 @@ async function runUiSmoke() {
   } catch (e) { notifDecide = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] notif-decide: ' + notifDecide);
   pass = pass && notifDecide === 'ok-18';
+  // Dedup: the same pending approval/question re-seen (busy→idle heartbeat)
+  // must not re-announce; a new wait still fires; clearing resets the guard.
+  let notifDedup = 'skip';
+  try {
+    notifDedup = await w.webContents.executeJavaScript(`(() => {
+      const u = window.__barangTestUtils;
+      if (!u || typeof u.shouldAnnounceWait !== 'function') return 'no-dedup-fn';
+      const seenA = new Set();
+      const seenQ = new Set();
+      const out = [];
+      out.push(u.shouldAnnounceWait('approval', ['s1:p1'], seenA));
+      out.push(u.shouldAnnounceWait('approval', ['s1:p1'], seenA));
+      out.push(u.shouldAnnounceWait('approval', ['s1:p1', 's1:p2'], seenA));
+      out.push(u.shouldAnnounceWait('approval', ['s1:p1'], seenA));
+      out.push(u.shouldAnnounceWait('approval', [], seenA));
+      out.push(u.shouldAnnounceWait('approval', ['s1:p1'], seenA));
+      out.push(u.shouldAnnounceWait('question', ['s1:q1'], seenQ));
+      out.push(u.shouldAnnounceWait('question', ['s1:q1'], seenQ));
+      const want = [true, false, true, false, false, true, true, false];
+      const bad = out.map((v, i) => (v === want[i] ? '' : i + ':' + v)).filter(Boolean);
+      return bad.length ? 'FAIL:' + bad.join(';') : 'ok';
+    })()`);
+  } catch (e) { notifDedup = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] notif-dedup: ' + notifDedup);
+  pass = pass && notifDedup === 'ok';
   let notifIpc = 'skip';
   try {
     notifIpc = await w.webContents.executeJavaScript(`(async () => {
@@ -4090,11 +4135,75 @@ async function runUiSmoke() {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: '\\\\', bubbles: true, cancelable: true, ctrlKey: true }));
       await sleep(800);
       if (visibleStrips().length !== 1) return 'no-key-close';
+      // Untitled scratch mirrors into the split (VSCode): Ctrl+N, then split.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true, cancelable: true, ctrlKey: true }));
+      await sleep(500);
+      const untitledTab = [...document.querySelectorAll('.center .tabs .tab')].find((b) => (b.dataset.path || '').startsWith('untitled:'));
+      if (!untitledTab) return 'no-untitled-tab';
+      untitledTab.click();
+      await sleep(300);
+      const splitBtn2 = document.querySelector('.split-btn');
+      if (!splitBtn2) return 'no-split-btn-2';
+      splitBtn2.click();
+      await sleep(800);
+      if (visibleStrips().length !== 2) return 'no-untitled-split';
+      const rightHasUntitled = [...visibleStrips()[1].querySelectorAll('.tab')].some((b) => (b.dataset.path || '').startsWith('untitled:'));
+      if (!rightHasUntitled) return 'no-untitled-mirror';
+      // Cleanup: close the split, then the untitled tab.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '\\\\', bubbles: true, cancelable: true, ctrlKey: true }));
+      await sleep(600);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true, cancelable: true, ctrlKey: true }));
+      await sleep(400);
       return 'ok';
     })()`);
   } catch (e) { splitEd = 'error: ' + (e.message || e); }
   console.log('[smoke-ui] split-editor: ' + splitEd);
   pass = pass && splitEd === 'ok';
+  // Tab drag: in a split, dragging a tab onto the other group moves it there.
+  let tabDrag = 'skip';
+  try {
+    tabDrag = await w.webContents.executeJavaScript(`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const strips = () => [...document.querySelectorAll('.center .tabs')].filter((s) => !s.closest('.hidden'));
+      if (strips().length === 2) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: '\\\\', bubbles: true, cancelable: true, ctrlKey: true }));
+        await sleep(500);
+      }
+      const fileTab = [...document.querySelectorAll('.center .tabs .tab')].find((b) => !(b.dataset.path || '').startsWith('bolt:') && !b.classList.contains('is-diff'));
+      if (!fileTab) return 'no-file-tab';
+      const path = fileTab.dataset.path;
+      fileTab.click();
+      await sleep(300);
+      const openBtn = document.querySelector('.split-btn');
+      if (!openBtn) return 'no-split-btn';
+      openBtn.click();
+      await sleep(700);
+      if (strips().length !== 2) return 'no-split';
+      if (typeof DataTransfer === 'undefined' || typeof DragEvent === 'undefined') return 'skip-sim';
+      const dt = new DataTransfer();
+      dt.setData('application/x-barang-tab', path);
+      const rightTab = strips()[1].querySelector('.tab');
+      if (!rightTab) return 'no-right-tab';
+      rightTab.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const leftCol = document.querySelectorAll('.editor-col')[0];
+      leftCol.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      leftCol.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      await sleep(700);
+      const after = strips();
+      const leftHas = after[0] ? [...after[0].querySelectorAll('.tab')].some((b) => b.dataset.path === path) : false;
+      const rightHas = after[1] ? [...after[1].querySelectorAll('.tab')].some((b) => b.dataset.path === path) : false;
+      // The right group auto-closes when its last tab moves out; that's a pass.
+      if (after.length === 2) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: '\\\\', bubbles: true, cancelable: true, ctrlKey: true }));
+        await sleep(400);
+      }
+      if (!leftHas) return 'not-moved-left';
+      if (rightHas) return 'still-on-right';
+      return 'ok';
+    })()`);
+  } catch (e) { tabDrag = 'error: ' + (e.message || e); }
+  console.log('[smoke-ui] tab-drag: ' + tabDrag);
+  pass = pass && (tabDrag === 'ok' || tabDrag === 'skip-sim');
   // Pomodoro: rail tab opens the view, Start ticks, Reset idles.
   let pomoUi = 'skip';
   try {
